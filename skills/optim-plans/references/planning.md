@@ -14,3 +14,5 @@ Every user-facing planning question is a choice prompt with options ordered:
 4. `Auto-complete`.
 
 `PLAN_v1.md` must contain stable IDs for goals, non-goals, requirements, constraints, implementation items, acceptance criteria, verification class, expected evidence, dependencies, allowed paths, repo evidence, and resolved decisions. IDs are never recycled in later revisions.
+
+Every future `PLAN_vN.md` artifact must include a dedicated `## Verifier Checklist` section. Each verifier criterion is a Markdown checkbox and includes a criterion ID, covered item IDs, pass condition, evidence, and either a metric threshold or a justification for why the criterion is not quantified.

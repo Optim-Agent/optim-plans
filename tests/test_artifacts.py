@@ -27,8 +27,30 @@ class ArtifactTests(unittest.TestCase):
         )
 
         items = [
-            PlanItem("REQ-001", "Support cards", "deterministic command", "test_cards", acceptance="Cards are ordered", allowed_paths=["skills/"]),
-            PlanItem("TASK-001", "Implement cards", "deterministic command", "python -m unittest", acceptance="Tests pass", allowed_paths=["scripts/"]),
+            PlanItem(
+                "REQ-001",
+                "Support cards",
+                "deterministic command",
+                "test_cards",
+                acceptance="Cards are ordered",
+                allowed_paths=["skills/"],
+                verifier_criterion_id="VC-001",
+                verifier_covered_item_ids=["REQ-001"],
+                verifier_pass_condition="Cards are ordered",
+                verifier_metric_threshold="100% of rendered card options preserve order",
+            ),
+            PlanItem(
+                "TASK-001",
+                "Implement cards",
+                "deterministic command",
+                "python -m unittest",
+                acceptance="Tests pass",
+                allowed_paths=["scripts/"],
+                verifier_criterion_id="VC-002",
+                verifier_covered_item_ids=["TASK-001"],
+                verifier_pass_condition="Tests pass",
+                verifier_non_quantification="Binary unit-test result is sufficient",
+            ),
         ]
         plan = render_plan(
             "Goal",
@@ -45,6 +67,9 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn("Resolved decisions", plan)
         self.assertIn("Use PLAN_v1.md only", plan)
         self.assertIn("Revision ledger", plan)
+        self.assertIn("## Verifier Checklist", plan)
+        self.assertIn("- [ ] VC-001 | Covered: REQ-001 | Pass: Cards are ordered | Evidence: test_cards | Metric threshold: 100% of rendered card options preserve order", plan)
+        self.assertIn("- [ ] VC-002 | Covered: TASK-001 | Pass: Tests pass | Evidence: python -m unittest | Non-quantification: Binary unit-test result is sufficient", plan)
         comments = render_comments("reviewer", 1, [{"id": "F-001", "fix": "Add nonce check"}])
         self.assertIn("PLAN_v1_reviewer_comments", comments)
         report = render_execution_results(

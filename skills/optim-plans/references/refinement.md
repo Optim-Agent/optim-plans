@@ -11,3 +11,5 @@ Criticizer mode asks zero to five adaptive questions. It is not reviewer mode: d
 Do not write `PLAN_vN_criticizer_comments.md` or `PLAN_v(N+1).md` until every criticizer question has a recorded user answer or an Auto-complete answer recorded by the controller. The criticizer comments file records challenge, presented options, selected answer, answer source, and summarized fix; only then revise the plan.
 
 Write only the comment artifact matching the selected mode: `PLAN_vN_reviewer_comments.md` or `PLAN_vN_criticizer_comments.md`. Then write `PLAN_v(N+1).md` with a revision ledger.
+
+When revising a plan, preserve and update the dedicated `## Verifier Checklist`: each Markdown checkbox must keep a criterion ID, covered item IDs, pass condition, evidence, and either a metric threshold or a non-quantification justification.

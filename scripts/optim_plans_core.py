@@ -1956,6 +1956,11 @@ class PlanItem:
     depends_on: list[str] = field(default_factory=list)
     acceptance: str = ""
     allowed_paths: list[str] = field(default_factory=list)
+    verifier_criterion_id: str = ""
+    verifier_covered_item_ids: list[str] = field(default_factory=list)
+    verifier_pass_condition: str = ""
+    verifier_metric_threshold: str = ""
+    verifier_non_quantification: str = ""
 
 
 def render_plan(
@@ -1981,6 +1986,20 @@ def render_plan(
         lines.append(
             f"| {item.id} | {depends} | {item.verification} | {item.evidence} | "
             f"{acceptance} | {allowed_paths} | {item.summary} |"
+        )
+    lines.extend(["", "## Verifier Checklist", ""])
+    for item in items:
+        criterion_id = item.verifier_criterion_id or f"VC-{item.id}"
+        covered_ids = ", ".join(item.verifier_covered_item_ids or [item.id])
+        pass_condition = item.verifier_pass_condition or item.acceptance or "not recorded"
+        metric = (
+            f"Metric threshold: {item.verifier_metric_threshold}"
+            if item.verifier_metric_threshold
+            else f"Non-quantification: {item.verifier_non_quantification or 'not recorded'}"
+        )
+        lines.append(
+            f"- [ ] {criterion_id} | Covered: {covered_ids} | Pass: {pass_condition} | "
+            f"Evidence: {item.evidence} | {metric}"
         )
     lines.extend(["", "## Repo evidence", ""])
     lines.extend(f"- {evidence}" for evidence in (repo_evidence or ["Not recorded."]))

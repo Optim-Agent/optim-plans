@@ -61,6 +61,18 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("at most three sentences", text)
         self.assertIn("highlight the most important point", text)
 
+    def test_plan_versions_require_verifier_checklist(self) -> None:
+        planning = (ROOT / "skills/optim-plans/references/planning.md").read_text(encoding="utf-8")
+        refinement = (ROOT / "skills/optim-plans/references/refinement.md").read_text(encoding="utf-8")
+        for text in (planning, refinement):
+            self.assertIn("`## Verifier Checklist`", text)
+            self.assertIn("Markdown checkbox", text)
+            self.assertIn("criterion ID", text)
+            self.assertIn("covered item IDs", text)
+            self.assertIn("pass condition", text)
+            self.assertIn("evidence", text)
+            self.assertRegex(text, re.compile("metric threshold.*non-quantification|not quantified", re.I | re.S))
+
     def test_first_turn_forbids_reference_only_direct_edits(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
         self.assertRegex(text, re.compile("first visible response.*question", re.I | re.S))
