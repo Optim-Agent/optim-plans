@@ -31,8 +31,8 @@ def init_controller(repo: Path, topic: str) -> None:
     controller_json("init", "--repo", str(repo), "--topic", topic)
 
 
-def ask_agent_choice(repo: Path, prompt: str = "Choose agent") -> dict[str, Any]:
-    return controller_json("ask", "--repo", str(repo), "--prompt", prompt, "--stage", "agent-choice")
+def ask_agent_choice(repo: Path, prompt: str = "Choose agent", role: str = "refinement") -> dict[str, Any]:
+    return controller_json("ask", "--repo", str(repo), "--prompt", prompt, "--stage", "agent-choice", "--role", role)
 
 
 def answer_choice(repo: Path, nonce: str, choice: str, *extra: str) -> dict[str, Any]:
@@ -199,6 +199,23 @@ class E2ETests(unittest.TestCase):
             self.assertEqual(q["options"][0]["label"], "Delegated foreground run")
             self.assertIn("standalone sub-agent", q["options"][0]["reason"])
 
+    def test_cli_ask_agent_choice_defaults_by_worker_role(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Agent Choice Roles")
+            q1 = ask_agent_choice(repo)
+            answer_choice(repo, q1["nonce"], "foreground")
+            same_role = ask_agent_choice(repo, "Choose refinement again")
+            executor = ask_agent_choice(repo, "Choose executor", role="executor")
+            answer_choice(repo, executor["nonce"], "background")
+
+            config = json.loads(config_path(repo).read_text(encoding="utf-8"))
+            self.assertEqual(same_role["choice"], "foreground")
+            self.assertNotIn("options", same_role)
+            self.assertIn("options", executor)
+            self.assertEqual(config["refinement_worker"]["choice"], "foreground")
+            self.assertEqual(config["executor_worker"]["choice"], "background")
+
     def test_cli_ask_agent_choice_defaults_from_first_background_or_foreground_answer(self) -> None:
         for choice in ("background", "foreground"):
             with self.subTest(choice=choice), tempfile.TemporaryDirectory() as raw:
@@ -222,7 +239,7 @@ class E2ETests(unittest.TestCase):
             path = config_path(repo)
             self.assertEqual(
                 json.loads(path.read_text(encoding="utf-8")),
-                {"schema": 1, "agent_choice": {"choice": "foreground"}},
+                {"schema": 1, "refinement_worker": {"choice": "foreground"}},
             )
             self.assertEqual(ask_agent_choice(repo)["choice"], "foreground")
 
@@ -241,7 +258,15 @@ class E2ETests(unittest.TestCase):
             repo = make_repo(Path(raw))
             init_controller(repo, "Incomplete Config")
             path = config_path(repo)
-            path.write_text(json.dumps({"schema": 1, "agent_choice": []}), encoding="utf-8")
+            path.write_text(json.dumps({"schema": 1, "refinement_worker": []}), encoding="utf-8")
+
+            self.assertIn("options", ask_agent_choice(repo))
+
+    def test_legacy_global_agent_choice_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Legacy Agent Choice")
+            config_path(repo).write_text(json.dumps({"schema": 1, "agent_choice": {"choice": "foreground"}}), encoding="utf-8")
 
             self.assertIn("options", ask_agent_choice(repo))
 
@@ -374,6 +399,25 @@ class E2ETests(unittest.TestCase):
             self.assertEqual(reused["choice"], f"{platform}-manual")
             self.assertEqual((reused["model"], reused["effort"]), ("model-test", "high"))
             self.assertNotIn("options", reused)
+
+    def test_background_model_preserves_agent_choice(self) -> None:
+        from scripts.optim_plans_core import host_agent
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Preserve Worker Choice")
+            platform = host_agent(os.environ)
+            q1 = ask_agent_choice(repo)
+            answer_choice(repo, q1["nonce"], "background")
+            question = controller_json(
+                "ask", "--repo", str(repo), "--prompt", "Choose model", "--stage", "background-model"
+            )
+            answer_choice(repo, question["nonce"], f"{platform}-default")
+
+            self.assertEqual(
+                json.loads(config_path(repo).read_text(encoding="utf-8"))["refinement_worker"],
+                {"choice": "background", "platform": platform, "mode": "default"},
+            )
 
     def test_incompatible_worker_config_is_treated_as_missing(self) -> None:
         from scripts.optim_plans_core import host_agent

@@ -47,7 +47,9 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("same-platform delegated worker first", refinement)
         self.assertIn("offer only that platform's default and manual options", refinement)
         self.assertIn("Do not offer the opposite platform", refinement)
-        self.assertIn("first foreground or delegated-foreground answer becomes the active-run default", refinement)
+        self.assertIn("same worker role", refinement)
+        self.assertIn("`refinement_worker.choice`", refinement)
+        self.assertIn("`executor_worker.choice`", refinement)
 
     def test_criticizer_questions_gate_plan_revision(self) -> None:
         text = (ROOT / "skills/optim-plans/references/refinement.md").read_text(encoding="utf-8")
@@ -166,6 +168,13 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("checked-out destination", execution)
         self.assertIn("explicit confirmation", execution)
         self.assertIn("Auto-complete cannot approve finish-wrap", execution)
+
+    def test_executor_choice_is_role_specific_before_manifest(self) -> None:
+        execution = (ROOT / "skills/optim-plans/references/execution.md").read_text(encoding="utf-8")
+        self.assertIn("ask `agent-choice --role executor`", execution)
+        self.assertIn("default only from `executor_worker.choice`", execution)
+        self.assertIn("continue to executor model/effort and `worker-config`", execution)
+        self.assertIn("foreground executor execution is unsupported", execution)
 
     def test_execution_contract_matches_manifest_bound_controller_lifecycle(self) -> None:
         execution = (ROOT / "skills/optim-plans/references/execution.md").read_text(encoding="utf-8")

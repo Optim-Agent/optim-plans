@@ -35,7 +35,7 @@ For `plan`, `big-plan`, and `huge-plan`, only high-priority comments or criticis
 
 If no level is named, auto-select the smallest level that fits the user's prompt and repo evidence before the first planning question. Do not ask the user to choose the level as that question.
 
-After each plan version, ask one refinement mode question: recommend `Reviewer` first, then `Criticizer`, `Jump to executor` (`skip-refinement-execute`), and `Auto-complete`. For `Reviewer` or `Criticizer`, ask the first `agent-choice` follow-up for the detected agent and effort; later `agent-choice` asks use the first foreground or delegated-foreground answer as the default. Delegated workers are same-platform only: Codex must not call Claude, and Claude must not call Codex.
+After each plan version, ask one refinement mode question: recommend `Reviewer` first, then `Criticizer`, `Jump to executor` (`skip-refinement-execute`), and `Auto-complete`. For `Reviewer` or `Criticizer`, ask the first `agent-choice` follow-up for the detected agent and effort; later `agent-choice` asks default only from the same worker role: `refinement_worker.choice` or `executor_worker.choice`. Delegated workers are same-platform only: Codex must not call Claude, and Claude must not call Codex.
 
 ## Anti-Pattern: "Too Small To Plan"
 

@@ -109,7 +109,22 @@ def _host_agent(env: dict[str, str]) -> str:
 
 
 def _save_config(repo: Path, key: str, value: dict[str, Any]) -> None:
-    save_optim_plans_config_value(repo, key, value)
+    existing = read_optim_plans_config(repo).get(key)
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    merged.update(value)
+    save_optim_plans_config_value(repo, key, merged)
+
+
+def _worker_config_key(role: str) -> str:
+    return "executor_worker" if role == "executor" else "refinement_worker"
+
+
+def _agent_choice_preference(repo: Path, key: str) -> str | None:
+    value = read_optim_plans_config(repo).get(key)
+    if not isinstance(value, dict):
+        return None
+    choice = value.get("choice")
+    return choice if choice in {"background", "foreground"} else None
 
 
 def _worker_preference(repo: Path, key: str, *, env: dict[str, str] | None = None) -> dict[str, str] | None:
@@ -151,12 +166,13 @@ def _background_model_options(
     return ordered[0], ordered[1:]
 
 
-def _agent_choice_default(events: list[dict[str, Any]]) -> tuple[str, str] | None:
+def _agent_choice_default(events: list[dict[str, Any]], *, config_key: str | None = None) -> tuple[str, str] | None:
     questions: dict[str, dict[str, Any]] = {}
     for event in events:
         payload = event.get("payload", {})
         if event["type"] == "pending_question" and payload.get("stage") == "agent-choice":
-            questions[payload["nonce"]] = payload
+            if config_key is None or payload.get("config_key") == config_key:
+                questions[payload["nonce"]] = payload
         elif event["type"] == "answer_recorded" and payload.get("nonce") in questions:
             source_nonce = payload["nonce"]
             choice = payload.get("choice")
@@ -168,7 +184,7 @@ def _agent_choice_default(events: list[dict[str, Any]]) -> tuple[str, str] | Non
 
 
 def _record_default(state: OptimPlansState, payload: dict[str, Any], choice: str, **result: str) -> None:
-    previous = _agent_choice_default(state.replay().events) if payload.get("stage") == "agent-choice" else None
+    previous = _agent_choice_default(state.replay().events, config_key=payload.get("config_key")) if payload.get("stage") == "agent-choice" else None
     with state.controller_lock():
         state._append_event_locked("pending_question", payload)
         if previous:
@@ -229,7 +245,7 @@ def cmd_ask(args: argparse.Namespace) -> None:
             state,
             prompt=args.prompt,
             level=level,
-            key="executor_worker" if args.role == "executor" else "refinement_worker",
+            key=_worker_config_key(args.role),
         )
         return
     else:
@@ -244,9 +260,10 @@ def cmd_ask(args: argparse.Namespace) -> None:
     payload["plan_level"] = level.to_json()
     if args.stage != "default":
         payload["stage"] = args.stage
-    stored_agent_choice = read_optim_plans_config(state.repo).get("agent_choice")
-    stored_choice = stored_agent_choice.get("choice") if isinstance(stored_agent_choice, dict) else None
-    if args.stage == "agent-choice" and stored_choice in {"background", "foreground"}:
+    if args.stage == "agent-choice":
+        payload["config_key"] = _worker_config_key(args.role)
+    stored_choice = _agent_choice_preference(state.repo, payload["config_key"]) if args.stage == "agent-choice" else None
+    if stored_choice:
         _record_default(state, payload, stored_choice)
     else:
         state.append_event("pending_question", payload)
@@ -280,7 +297,7 @@ def cmd_answer(args: argparse.Namespace) -> None:
         worker = {"platform": choice.removesuffix("-default"), "mode": "default"}
     payload = state.record_answer(args.nonce, args.choice)
     if pending and pending.get("stage") == "agent-choice" and choice in {"foreground", "background"}:
-        _save_config(state.repo, "agent_choice", {"choice": choice})
+        _save_config(state.repo, pending.get("config_key", "refinement_worker"), {"choice": choice})
     elif worker and worker["platform"] == host_agent():
         _save_config(state.repo, pending.get("config_key", "refinement_worker"), worker)
     print_json(payload)
@@ -288,7 +305,7 @@ def cmd_answer(args: argparse.Namespace) -> None:
 
 def cmd_worker_config(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
-    key = "executor_worker" if args.role == "executor" else "refinement_worker"
+    key = _worker_config_key(args.role)
     preference = _worker_preference(state.repo, key)
     if preference is None:
         _worker_question(state, prompt=f"Choose {args.role} model and effort", level=plan_level("plan"), key=key)
