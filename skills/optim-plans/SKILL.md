@@ -17,6 +17,10 @@ Do NOT write code, scaffold files, edit repo docs/config, or change target files
 
 Treat the user's prompt as a planning target, not write authorization. After any read-only context check, the first visible response must be one optim-plans choice question, not a completed analysis or file edit. It must include recommended first, `Other` second-last, and `Auto-complete` last. References inform the recommended option; they never replace the user interview. One human-choice answer is necessary but not sufficient: after the answer, continue through `PLAN_v1.md`, refinement, and explicit execution approval before editing target files.
 
+## Language Policy
+
+When more than 60% of the user's planning request's natural-language body is written in one language, use that language for questioning, review summaries, criticizer questions, answer choices, and optim-plans Markdown under `docs/optim-plans/`. Count only natural-language prose for the `> 60%` threshold: ignore command prefixes, option IDs, file paths, and code spans. Keep stable option IDs and exact controller-required protocol labels unchanged, but localize visible option descriptions/reasons and agent-written choice prose when rendering controller-backed questions. Always write commit messages in English.
+
 ## Plan Request Levels
 
 Users may choose the planning depth in the prompt or via direct controller flags:
@@ -110,7 +114,7 @@ Direct, evidence-based, relentless until answers are real:
 
 ## Question Bridge
 
-When native cards are available, render the controller's pending question as cards. Otherwise print numbered Markdown. Submit only the selected option ID and nonce back to the controller. Stale or replayed nonces must be rejected by the controller, not hand-waved by the agent.
+When native cards are available, render the controller's pending question as cards. Otherwise print numbered Markdown. When rendering, follow the Language Policy for visible labels/reasons and surrounding choice prose while preserving option IDs and exact controller-required protocol labels. Submit only the selected option ID and nonce back to the controller. Stale or replayed nonces must be rejected by the controller, not hand-waved by the agent.
 
 ## Invariants
 

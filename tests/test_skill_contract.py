@@ -93,6 +93,17 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("collect evidence before asking unresolved questions", planning)
         self.assertIn("Record that evidence in `PLAN_v1.md`", planning)
 
+
+    def test_language_policy_matches_request_language_scope(self) -> None:
+        text = SKILL.read_text(encoding="utf-8")
+        self.assertIn("more than 60% of the user's planning request's natural-language body", text)
+        self.assertIn("use that language for questioning, review summaries, criticizer questions, answer choices", text)
+        self.assertIn("optim-plans Markdown under `docs/optim-plans/`", text)
+        self.assertIn("`> 60%` threshold: ignore command prefixes, option IDs, file paths, and code spans", text)
+        self.assertIn("localize visible option descriptions/reasons and agent-written choice prose", text)
+        self.assertIn("controller-backed questions", text)
+        self.assertIn("Always write commit messages in English", text)
+
     def test_plan_request_levels_are_documented(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
         for expected in (
