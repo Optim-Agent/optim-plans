@@ -80,7 +80,7 @@ Create a task for each item and complete them in order:
 3. Grill the user: ask unresolved questions one at a time until none remain.
 4. Write `PLAN_v1.md` under `docs/optim-plans/YYYY-MM-DD-topic/`, including the repo evidence and resolved decisions.
 5. Run reviewer or criticizer refinement; produce `PLAN_v(N+1).md` until converged.
-6. Obtain explicit human approval for the immutable execution manifest, execute serial items through the controller, then complete the finish wrap.
+6. Obtain explicit human approval for the immutable execution manifest, execute serial items through the controller, then let clean final audits auto-record the kept terminal outcome.
 
 ## Grilling the User
 
@@ -121,7 +121,7 @@ When native cards are available, render the controller's pending question as car
 - Worker adapter manifests include same-agent CLI smoke argv before immutable recording, then run only through adapter argv with `shell=False` in one controller-owned run worktree and branch.
 - Controller verification, path audits, and protected Git metadata audits are authoritative; worker prose is evidence only.
 - Verified items become checkpoint commits in serial DAG order. Failed attempts require explicit retry approval before restoration.
-- All verified items plus final audits enter `awaiting_integration`; `finish-run` records the evidence-backed terminal outcome.
+- All verified items plus final audits automatically record a non-destructive `kept` terminal outcome; `finish-run` remains a manual recovery command.
 - The trust boundary is repository-integrity detection and integration gating, not host confinement.
 - Hooks only inject context and deny unsafe tool calls; they are defense in depth and the controller owns continuation.
 

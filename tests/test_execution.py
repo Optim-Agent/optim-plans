@@ -84,23 +84,30 @@ class ExecutionTests(unittest.TestCase):
         return state, Path(started["run_worktree"])
 
     def _finish_nonce(self, state, outcome: str) -> str:
-        for event in reversed(state.replay().events):
-            payload = event.get("payload", {})
-            if event["type"] == "pending_question" and payload.get("stage") == "finish_run":
-                choices = {option["id"] for option in payload["options"]}
-                if outcome in choices:
-                    return payload["nonce"]
+        question = state.request_finish_approval()
+        choices = {option["id"] for option in question["options"]}
+        if outcome in choices:
+            return question["nonce"]
         self.fail(f"missing finish approval question for {outcome}")
 
-    def _verify_one_item(self, state, run_worktree: Path, path: str = "src/done.txt") -> str:
+    def _checkpoint_one_item(self, state, run_worktree: Path, path: str = "src/done.txt") -> str:
         state.begin_item("TASK-001")
         target = run_worktree / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("done\n", encoding="utf-8")
         state.record_worker_completion("TASK-001", evidence="worker finished")
-        commit = state.checkpoint_item("TASK-001", evidence="unit ok")["commit"]
+        return state.checkpoint_item("TASK-001", evidence="unit ok")["commit"]
+
+    def _verify_one_item(self, state, run_worktree: Path, path: str = "src/done.txt") -> str:
+        commit = self._checkpoint_one_item(state, run_worktree, path)
         state.final_audit()
         return commit
+
+    def _enter_manual_finish_state(self, state, run_worktree: Path, path: str = "src/done.txt") -> str:
+        checkpoint = self._checkpoint_one_item(state, run_worktree, path)
+        state.append_event("final_audit_passed", {"status": "passed", "final_commit": checkpoint, "changed_files": [path]})
+        state.append_event("awaiting_integration", {"final_checkpoint": checkpoint})
+        return checkpoint
 
     def test_run_item_launches_manifest_adapter_and_verifier_before_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -142,17 +149,17 @@ class ExecutionTests(unittest.TestCase):
             self.assertFalse(sentinel.exists())
             self.assertFalse(any("schema" in arg for arg in json.loads(argv_log.read_text(encoding="utf-8"))))
             self.assertEqual(
-                [event["type"] for event in state.replay().events[-7:]],
+                [event["type"] for event in state.replay().events[-6:]],
                 [
                     "item_started",
                     "worker_completed",
                     "item_verified",
                     "checkpoint_created",
                     "final_audit_passed",
-                    "awaiting_integration",
-                    "pending_question",
+                    "run_finished",
                 ],
             )
+            self.assertFalse(any(event.get("payload", {}).get("stage") == "finish_run" for event in state.replay().events))
 
     def test_codex_host_rejects_claude_worker_before_launch(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -212,11 +219,13 @@ class ExecutionTests(unittest.TestCase):
                 state.run_item("TASK-001")
 
             events = state.replay().events
-            self.assertIn("worker_completed", [event["type"] for event in events])
-            self.assertIn("verification_failed", [event["type"] for event in events])
-            self.assertIn("awaiting_retry_decision", [event["type"] for event in events])
-            self.assertNotIn("item_verified", [event["type"] for event in events])
-            self.assertNotIn("checkpoint_created", [event["type"] for event in events])
+            event_types = [event["type"] for event in events]
+            self.assertIn("worker_completed", event_types)
+            self.assertIn("verification_failed", event_types)
+            self.assertIn("awaiting_retry_decision", event_types)
+            self.assertNotIn("item_verified", event_types)
+            self.assertNotIn("checkpoint_created", event_types)
+            self.assertFalse(any(event.get("payload", {}).get("stage") in {"execution_retry", "finish_run"} for event in events))
             self.assertTrue((run_worktree / "src/app.txt").exists())
 
     def test_verifier_failures_preserve_worktree_without_checkpoint(self) -> None:
@@ -256,6 +265,7 @@ class ExecutionTests(unittest.TestCase):
                 self.assertIn("verification_failed", event_types)
                 self.assertIn("awaiting_retry_decision", event_types)
                 self.assertNotIn("checkpoint_created", event_types)
+                self.assertFalse(any(event.get("payload", {}).get("stage") in {"execution_retry", "finish_run"} for event in state.replay().events))
                 self.assertTrue((run_worktree / "src/app.txt").exists())
                 failure = next(event for event in state.replay().events if event["type"] == "verification_failed")
                 self.assertLessEqual(len(failure["payload"]["evidence"]), 4096)
@@ -412,6 +422,7 @@ class ExecutionTests(unittest.TestCase):
                 self.assertIn("audit_failed", event_types)
                 self.assertIn("awaiting_retry_decision", event_types)
                 self.assertNotIn("checkpoint_created", event_types)
+                self.assertFalse(any(event.get("payload", {}).get("stage") in {"execution_retry", "finish_run"} for event in state.replay().events))
                 self.assertEqual(git(repo, "config", "optim-plans.bypass"), "1")
 
     def test_final_cumulative_audit_failure_records_bounded_evidence(self) -> None:
@@ -438,10 +449,11 @@ class ExecutionTests(unittest.TestCase):
             self.assertIn("awaiting_retry_decision", event_types)
             self.assertNotIn("final_audit_passed", event_types)
             self.assertNotIn("awaiting_integration", event_types)
+            self.assertFalse(any(event.get("payload", {}).get("stage") in {"execution_retry", "finish_run"} for event in events))
             failure = next(event for event in events if event["type"] == "audit_failed")
             self.assertLessEqual(len(failure["payload"]["evidence"]), 4096)
 
-    def test_all_verified_enters_awaiting_integration_and_kept_releases_active(self) -> None:
+    def test_all_verified_auto_keeps_and_releases_active(self) -> None:
         from scripts.optim_plans_core import OptimPlansState
 
         with tempfile.TemporaryDirectory() as raw:
@@ -451,15 +463,14 @@ class ExecutionTests(unittest.TestCase):
             )
             checkpoint = self._verify_one_item(state, run_worktree)
 
-            self.assertEqual(state.replay().status, "awaiting_integration")
+            self.assertEqual(state.replay().status, "completed")
             event_types = [event["type"] for event in state.replay().events]
             self.assertIn("final_audit_passed", event_types)
-            self.assertIn("awaiting_integration", event_types)
+            self.assertIn("run_finished", event_types)
+            self.assertNotIn("awaiting_integration", event_types)
+            self.assertFalse(any(event.get("payload", {}).get("stage") == "finish_run" for event in state.replay().events))
 
-            nonce = self._finish_nonce(state, "kept")
-            state.record_answer(nonce, "kept")
-            finished = state.finish_run("kept", approval_nonce=nonce)
-
+            finished = next(event["payload"] for event in state.replay().events if event["type"] == "run_finished")
             self.assertEqual(finished["outcome"], "kept")
             self.assertEqual(finished["final_checkpoint"], checkpoint)
             self.assertEqual(state.replay().status, "completed")
@@ -477,7 +488,7 @@ class ExecutionTests(unittest.TestCase):
             state, run_worktree = self._start_execution(
                 repo, [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}]
             )
-            checkpoint = self._verify_one_item(state, run_worktree)
+            checkpoint = self._enter_manual_finish_state(state, run_worktree)
             started = next(event["payload"] for event in state.replay().events if event["type"] == "execution_started")
             nonce = self._finish_nonce(state, "integrated")
             state.record_answer(nonce, "integrated")
@@ -545,7 +556,7 @@ class ExecutionTests(unittest.TestCase):
             state, run_worktree = self._start_execution(
                 repo, [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}]
             )
-            checkpoint = self._verify_one_item(state, run_worktree)
+            checkpoint = self._enter_manual_finish_state(state, run_worktree)
             remote = raw_path / "remote.git"
             subprocess.run(["git", "init", "--bare", str(remote)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             git(repo, "remote", "add", "origin", str(remote))
@@ -584,7 +595,7 @@ class ExecutionTests(unittest.TestCase):
             state, run_worktree = self._start_execution(
                 repo, [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}]
             )
-            self._verify_one_item(state, run_worktree)
+            self._enter_manual_finish_state(state, run_worktree)
             started = next(event["payload"] for event in state.replay().events if event["type"] == "execution_started")
             nonce = self._finish_nonce(state, "discarded")
             state.record_answer(nonce, "discarded")
@@ -610,7 +621,7 @@ class ExecutionTests(unittest.TestCase):
             (run_worktree / "src").mkdir()
             (run_worktree / "src/done.txt").write_text("failed attempt\n", encoding="utf-8")
             state.record_worker_failure("TASK-001", evidence="worker failed")
-            nonce = self._finish_nonce(state, "discarded")
+            nonce = state.request_finish_approval()["nonce"]
             state.record_answer(nonce, "discarded")
 
             finished = state.finish_run("discarded", approval_nonce=nonce, confirm_discard=True)
@@ -626,7 +637,7 @@ class ExecutionTests(unittest.TestCase):
             state, run_worktree = self._start_execution(
                 repo, [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}]
             )
-            self._verify_one_item(state, run_worktree)
+            self._enter_manual_finish_state(state, run_worktree)
             nonce = self._finish_nonce(state, "failed")
             state.record_answer(nonce, "failed")
 
@@ -644,7 +655,7 @@ class ExecutionTests(unittest.TestCase):
             state, run_worktree = self._start_execution(
                 repo, [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}]
             )
-            self._verify_one_item(state, run_worktree)
+            self._enter_manual_finish_state(state, run_worktree)
             nonce = self._finish_nonce(state, "kept")
             state.record_answer(nonce, "kept")
             script = (
@@ -676,7 +687,7 @@ class ExecutionTests(unittest.TestCase):
             state, run_worktree = self._start_execution(
                 repo, [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}]
             )
-            self._verify_one_item(state, run_worktree)
+            self._enter_manual_finish_state(state, run_worktree)
             nonce = self._finish_nonce(state, "kept")
             state.record_answer(nonce, "kept")
             write_json_atomic(state.active_file, {"run_id": "other", "artifact_dir": "docs/other"})
@@ -697,7 +708,7 @@ class ExecutionTests(unittest.TestCase):
                 (run_worktree / "src").mkdir()
                 (run_worktree / "src/done.txt").write_text("failed attempt\n", encoding="utf-8")
                 state.record_worker_failure("TASK-001", evidence="worker failed visibly")
-                nonce = self._finish_nonce(state, outcome)
+                nonce = state.request_finish_approval()["nonce"]
                 state.record_answer(nonce, outcome)
 
                 finished = state.finish_run(outcome, approval_nonce=nonce)

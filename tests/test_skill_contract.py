@@ -134,12 +134,16 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("Do not offer `Auto-complete`", text)
         self.assertIn("execution approval", text)
 
-    def test_execution_finish_wrap_is_required_after_execution(self) -> None:
+    def test_execution_auto_keeps_after_success_and_manual_finish_is_recovery(self) -> None:
         skill = SKILL.read_text(encoding="utf-8")
         execution = (ROOT / "skills/optim-plans/references/execution.md").read_text(encoding="utf-8")
-        self.assertIn("finish wrap", skill)
+        self.assertIn("manual recovery command", skill)
         self.assertIn("After every item is verified and the final audits pass", execution)
-        self.assertIn("awaiting_integration", execution)
+        self.assertIn("automatically records `run_finished`", execution)
+        self.assertIn("outcome `kept`", execution)
+        self.assertIn("must not create a `finish_run` question", execution)
+        self.assertIn("request_retry", execution)
+        self.assertIn("request_finish_approval", execution)
         self.assertIn("integrated", execution)
         self.assertIn("pr-opened", execution)
         self.assertIn("kept", execution)
@@ -194,7 +198,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("start-execution", readme)
         self.assertIn("run-item", readme)
         self.assertIn("finish-run", readme)
-        self.assertIn("awaiting_integration", readme)
+        self.assertIn("automatic non-destructive `run_finished` / `kept`", readme)
         self.assertNotIn("--worker-command", readme)
         self.assertNotIn("python3 scripts/optim_plans.py run-worker", readme)
         self.assertIn("Repository-integrity detection and integration gating", readme)

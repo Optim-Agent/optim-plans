@@ -1320,12 +1320,6 @@ class OptimPlansState:
                 "run_worktree": start["run_worktree"],
             },
         )
-        self._retry_question_payload_locked(
-            self.replay().events,
-            item_id=item_id,
-            failed_base_commit=start["base_commit"],
-        )
-        self._finish_question_payload_locked(self.replay().events)
         return payload
 
     def record_attempt_failure(self, event_type: str, item_id: str, *, evidence: str) -> dict[str, Any]:
@@ -1791,10 +1785,22 @@ class OptimPlansState:
                     },
                 )
                 raise
+            active = self._matching_active_locked()
             payload = {"status": "passed", "final_commit": head, "changed_files": audit["changed_files"]}
             passed = self._append_event_locked("final_audit_passed", payload)["payload"]
-            self._append_event_locked("awaiting_integration", {"final_checkpoint": head, "audit": passed})
-            self._finish_question_payload_locked(self.replay().events)
+            finished = self._append_event_locked(
+                "run_finished",
+                {
+                    "outcome": "kept",
+                    "approval_nonce": started["approval_nonce"],
+                    "final_checkpoint": head,
+                    "run_branch": started["run_branch"],
+                    "run_worktree": started["run_worktree"],
+                    "preserved": True,
+                    "final_audit": passed,
+                },
+            )["payload"]
+            self._release_active_locked(active, finished)
             return passed
 
     def _manifest_destination_ref(self, manifest: dict[str, Any]) -> str:

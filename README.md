@@ -53,12 +53,12 @@ Planning-refining ring
 Execution ring
 
   prepare manifest -> approve -> start run worktree
-        -> serial item checkpoint -> awaiting integration -> finish outcome
+        -> serial item checkpoint -> final audit -> auto-kept run
 ```
 
 The first ring fights the wrong-plan problem. It turns vague intent into a plan, then refines that plan with review or criticism. Each decision can open its own smaller question-answering ring, so uncertainty gets resolved before code changes.
 
-The second ring fights the wrong-execution problem. It starts only from an immutable manifest-bound human approval, runs serial checkpointed work in one controller-owned worktree and branch, verifies with controller-run commands and Git audits, then waits at `awaiting_integration` until a proven finish outcome records what happened.
+The second ring fights the wrong-execution problem. It starts only from an immutable manifest-bound human approval, runs serial checkpointed work in one controller-owned worktree and branch, verifies with controller-run commands and Git audits, then automatically records a non-destructive `kept` outcome after a clean final audit.
 
 ## See it in action
 
@@ -333,9 +333,9 @@ The implemented guardrails include:
 - serial item execution with checkpoint commits in stable DAG order;
 - adapter-only argv launch with `shell=False` after adapter CLI smoke;
 - controller verification and Git audits for path allowlists and protected Git metadata;
-- `awaiting_retry_decision` with explicit retry approval before restoration;
-- `awaiting_integration` after every item and final audit pass;
-- evidence-backed `finish-run` outcomes: `integrated`, `pr-opened`, `kept`, `discarded`, `failed`, and `aborted`;
+- `awaiting_retry_decision` with bounded evidence and explicit retry approval before restoration;
+- automatic non-destructive `run_finished` / `kept` after every item and final audit pass;
+- manual recovery `finish-run` outcomes: `integrated`, `pr-opened`, `kept`, `discarded`, `failed`, and `aborted`;
 - path-scope rejection and delta audits for symlinks, gitlinks, nested repos, ignored files, untracked files, staged files, and tracked changes;
 - three distinct evidenced attempts before `not_achievable` can even request confirmation;
 - Codex/Claude command builders with conservative role-specific flags;
@@ -401,8 +401,8 @@ Implemented:
 - adapter-only argv launch with `shell=False`, using worker stdout for the result JSON envelope;
 - controller verification and Git audits for path allowlists and protected Git metadata;
 - explicit retry approval;
-- `awaiting_integration`;
-- evidence-backed `finish-run` outcomes;
+- automatic non-destructive `run_finished` / `kept` after clean final audits;
+- manual evidence-backed `finish-run` outcomes;
 - hook guard dispatcher and configs;
 - CI and tests.
 

@@ -700,7 +700,7 @@ class E2ETests(unittest.TestCase):
             )
             self.assertEqual(too_early_finish.returncode, 2)
 
-            subprocess.run(
+            completed = subprocess.run(
                 [
                     sys.executable,
                     str(ROOT / "scripts/optim_plans.py"),
@@ -715,59 +715,27 @@ class E2ETests(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 check=True,
             )
-            status = subprocess.run(
-                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "status", "--repo", str(repo)],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            status_payload = json.loads(status.stdout)
-            self.assertEqual(status_payload["status"], "awaiting_integration")
+            self.assertIn("commit", json.loads(completed.stdout))
 
-            from scripts.optim_plans_core import OptimPlansState
+            from scripts.optim_plans_core import ContractError, OptimPlansState
 
-            state = OptimPlansState.load_active(repo)
-            finish_nonce = next(
-                event["payload"]["nonce"]
-                for event in state.replay().events
-                if event["type"] == "pending_question" and event["payload"].get("stage") == "finish_run"
-            )
-            self.assertEqual(status_payload["finish_approval_nonce"], finish_nonce)
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(ROOT / "scripts/optim_plans.py"),
-                    "answer",
-                    "--repo",
-                    str(repo),
-                    "--nonce",
-                    finish_nonce,
-                    "--choice",
-                    "kept",
-                ],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(ROOT / "scripts/optim_plans.py"),
-                    "finish-run",
-                    "--repo",
-                    str(repo),
-                    "--outcome",
-                    "kept",
-                    "--approval-nonce",
-                    finish_nonce,
-                ],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
+            with self.assertRaises(ContractError):
+                OptimPlansState.load_active(repo)
+            events = [
+                json.loads(line)
+                for line in (repo / ".git" / "optim-plans" / "runs" / run_id / "events.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            event_types = [event["type"] for event in events]
+            self.assertIn("final_audit_passed", event_types)
+            self.assertIn("run_finished", event_types)
+            self.assertNotIn("awaiting_integration", event_types)
+            self.assertFalse(any(event.get("payload", {}).get("stage") == "finish_run" for event in events))
+            finished = next(event["payload"] for event in events if event["type"] == "run_finished")
+            self.assertEqual(finished["outcome"], "kept")
+            self.assertTrue(run_worktree.is_dir())
+
             second = subprocess.run(
                 [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "Second"],
                 text=True,

@@ -69,8 +69,8 @@ class StructureTests(unittest.TestCase):
             "adapter-only argv launch with `shell=False`",
             "controller verification and Git audits",
             "explicit retry approval",
-            "`awaiting_integration`",
-            "evidence-backed `finish-run` outcomes",
+            "automatic non-destructive `run_finished` / `kept`",
+            "manual recovery `finish-run` outcomes",
         ):
             self.assertIn(expected, implemented)
             self.assertNotIn(expected, not_implemented)
@@ -84,7 +84,7 @@ class StructureTests(unittest.TestCase):
             "prepare-execution",
             "start-execution",
             "run-item",
-            "awaiting_integration",
+            "run_finished",
             "finish-run",
             "init",
         ):
