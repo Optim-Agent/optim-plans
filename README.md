@@ -431,6 +431,10 @@ python3 scripts/validate_structure.py
 
 The repository intentionally has no Python dependency installation step.
 
+## Acknowledgements
+
+Thanks to [chaseai-yt/grill-me-codex](https://github.com/chaseai-yt/grill-me-codex) for motivating this project, [mattpocock/skills](https://github.com/mattpocock/skills) for initiating this idea, and [leo-lilinxiao/codex-autoresearch](https://github.com/leo-lilinxiao/codex-autoresearch) as a reference for the execution loop.
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
