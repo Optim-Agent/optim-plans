@@ -198,4 +198,8 @@ def build_claude_command(
             "--json-schema",
             "{}",
         ]
+    if info.configured_model:
+        argv.extend(["--model", info.configured_model])
+    if info.configured_effort:
+        argv.extend(["--effort", info.configured_effort])
     return AgentCommand(argv, {**os.environ, "PWD": str(cwd)})

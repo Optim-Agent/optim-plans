@@ -110,6 +110,8 @@ class AgentAdapterTests(unittest.TestCase):
             info = AgentInfo("claude", True, "2.1.211", "/bin/claude", "opus-test", "high")
             review = build_claude_command(info, role="reviewer", cwd=Path("/tmp/repo"))
             self.assertIn("--json-schema", review.argv)
+            self.assertEqual(review.argv[review.argv.index("--model") + 1], "opus-test")
+            self.assertEqual(review.argv[review.argv.index("--effort") + 1], "high")
             execute = build_claude_command(
                 info,
                 role="executor",

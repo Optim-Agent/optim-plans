@@ -10,6 +10,8 @@ first, ISO dates, and grouped change types.
 
 ### Changed
 
+- Planning agent and same-platform worker preferences are now reused from the
+  repository's Git common directory, with pre-manifest worker configuration.
 - Codex read-only worker commands now load normal user configuration instead of
   suppressing it.
 - `.agents/plugins/marketplace.json` is no longer hidden from public commits.

@@ -146,6 +146,7 @@ Machine state is separate and replayable:
 
 ```text
 .git/optim-plans/
+  config.json
   worktrees/<worktree-id>/active.json
   runs/<run-id>/
     run.json
@@ -290,6 +291,9 @@ AI:  This is open-ended plugin design. I will inspect the directory, research
 python3 scripts/optim_plans.py init --repo <repo> --topic "<topic>"
 python3 scripts/optim_plans.py ask --repo <repo> --prompt "Choose reviewer" --plan-level small-plan
 python3 scripts/optim_plans.py answer --repo <repo> --nonce <nonce> --choice <option-id>
+python3 scripts/optim_plans.py answer --repo <repo> --nonce <nonce> --choice codex-manual --model <model> --effort <effort>
+python3 scripts/optim_plans.py worker-config --repo <repo> --role reviewer --cwd <worktree>
+python3 scripts/optim_plans.py worker-config --repo <repo> --role executor --cwd <run-worktree>
 
 # after PLAN_vN is final, write a manifest JSON that binds the plan hash,
 # source base, adapter argv/config plus smoke, item DAG, allowed paths, verification argv,

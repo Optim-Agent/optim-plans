@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -14,20 +15,24 @@ try:
         ContractError,
         OptimPlansState,
         QuestionLedger,
+        git_common_dir,
         host_agent,
         json_text,
         plan_level,
         sha256_text,
+        write_json_atomic,
     )
 except ImportError:  # pragma: no cover - package import path
     from scripts.optim_plans_core import (
         ContractError,
         OptimPlansState,
         QuestionLedger,
+        git_common_dir,
         host_agent,
         json_text,
         plan_level,
         sha256_text,
+        write_json_atomic,
     )
 
 
@@ -44,11 +49,19 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--prompt", required=True)
     ask.add_argument("--plan-level", default="plan")
     ask.add_argument("--stage", choices=["default", "agent-choice", "background-model"], default="default")
+    ask.add_argument("--role", choices=["refinement", "executor"], default="refinement")
 
     answer = sub.add_parser("answer")
     answer.add_argument("--repo", required=True)
     answer.add_argument("--nonce", required=True)
     answer.add_argument("--choice", required=True)
+    answer.add_argument("--model")
+    answer.add_argument("--effort")
+
+    worker_config = sub.add_parser("worker-config")
+    worker_config.add_argument("--repo", required=True)
+    worker_config.add_argument("--role", required=True, choices=["reviewer", "criticizer", "executor"])
+    worker_config.add_argument("--cwd", required=True)
 
     status = sub.add_parser("status")
     status.add_argument("--repo", required=True)
@@ -92,6 +105,34 @@ def print_json(payload: dict[str, Any]) -> None:
 
 def _host_agent(env: dict[str, str]) -> str:
     return host_agent(env)
+
+
+def _config_path(repo: Path) -> Path:
+    return git_common_dir(repo) / "optim-plans" / "config.json"
+
+
+def _read_config(repo: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(_config_path(repo).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) and payload.get("schema") == 1 else {}
+
+
+def _save_config(repo: Path, key: str, value: dict[str, Any]) -> None:
+    config = _read_config(repo)
+    config.update({"schema": 1, key: value})
+    write_json_atomic(_config_path(repo), config)
+
+
+def _worker_preference(repo: Path, key: str, *, env: dict[str, str] | None = None) -> dict[str, str] | None:
+    value = _read_config(repo).get(key)
+    platform = host_agent(env)
+    if not isinstance(value, dict) or value.get("platform") != platform or value.get("mode") not in {"default", "manual"}:
+        return None
+    if value["mode"] == "manual" and not all(isinstance(value.get(field), str) and value[field].strip() for field in ("model", "effort")):
+        return None
+    return value
 
 
 def _background_model_options(
@@ -139,6 +180,34 @@ def _agent_choice_default(events: list[dict[str, Any]]) -> tuple[str, str] | Non
     return None
 
 
+def _record_default(state: OptimPlansState, payload: dict[str, Any], choice: str, **result: str) -> None:
+    previous = _agent_choice_default(state.replay().events) if payload.get("stage") == "agent-choice" else None
+    with state.controller_lock():
+        state._append_event_locked("pending_question", payload)
+        if previous:
+            state._append_event_locked(
+                "agent_choice_default_applied",
+                {"defaulted_nonce": payload["nonce"], "source_nonce": previous[0], "choice": choice},
+            )
+        answer = state._append_event_locked("answer_recorded", {"nonce": payload["nonce"], "choice": choice})
+    print_json({**answer["payload"], **result})
+
+
+def _worker_question(state: OptimPlansState, *, prompt: str, level: Any, key: str, reuse: bool = True) -> None:
+    recommended, alternatives = _background_model_options()
+    question = QuestionLedger().ask(prompt, recommended=recommended, alternatives=alternatives)
+    payload = question.to_json(expected_seq=len(state.replay().events) + 1)
+    payload.update({"plan_level": level.to_json(), "stage": "background-model", "config_key": key})
+    stored = _worker_preference(state.repo, key) if reuse else None
+    if stored:
+        choice = f"{stored['platform']}-{stored['mode']}"
+        extra = {field: stored[field] for field in ("model", "effort") if field in stored}
+        _record_default(state, payload, choice, **extra)
+    else:
+        state.append_event("pending_question", payload)
+        print_json(payload)
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     state = OptimPlansState.initialize(Path(args.repo), topic=args.topic, plan_hash=sha256_text(args.topic))
     state.append_event("initialized", {"topic": args.topic})
@@ -169,8 +238,13 @@ def cmd_ask(args: argparse.Namespace) -> None:
             alternatives=[foreground],
         )
     elif args.stage == "background-model":
-        recommended, alternatives = _background_model_options()
-        question = ledger.ask(args.prompt, recommended=recommended, alternatives=alternatives)
+        _worker_question(
+            state,
+            prompt=args.prompt,
+            level=level,
+            key="executor_worker" if args.role == "executor" else "refinement_worker",
+        )
+        return
     else:
         question = ledger.ask(
             args.prompt,
@@ -183,17 +257,10 @@ def cmd_ask(args: argparse.Namespace) -> None:
     payload["plan_level"] = level.to_json()
     if args.stage != "default":
         payload["stage"] = args.stage
-    default = _agent_choice_default(state.replay().events) if args.stage == "agent-choice" else None
-    if default:
-        source_nonce, choice = default
-        with state.controller_lock():
-            state._append_event_locked("pending_question", payload)
-            state._append_event_locked(
-                "agent_choice_default_applied",
-                {"defaulted_nonce": payload["nonce"], "source_nonce": source_nonce, "choice": choice},
-            )
-            answer = state._append_event_locked("answer_recorded", {"nonce": payload["nonce"], "choice": choice})
-        print_json(answer["payload"])
+    stored_agent_choice = _read_config(state.repo).get("agent_choice")
+    stored_choice = stored_agent_choice.get("choice") if isinstance(stored_agent_choice, dict) else None
+    if args.stage == "agent-choice" and stored_choice in {"background", "foreground"}:
+        _record_default(state, payload, stored_choice)
     else:
         state.append_event("pending_question", payload)
         print_json(payload)
@@ -201,8 +268,88 @@ def cmd_ask(args: argparse.Namespace) -> None:
 
 def cmd_answer(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
+    pending = next(
+        (
+            event["payload"]
+            for event in state.replay().events
+            if event["type"] == "pending_question" and event.get("payload", {}).get("nonce") == args.nonce
+        ),
+        None,
+    )
+    choice = args.choice
+    if pending and choice == "auto":
+        choice = pending.get("recommended_option_id", choice)
+    worker: dict[str, Any] | None = None
+    if pending and pending.get("stage") == "background-model" and choice.endswith("-manual"):
+        if not args.model or not args.model.strip() or not args.effort or not args.effort.strip():
+            raise ContractError("manual worker choice requires non-empty --model and --effort")
+        worker = {
+            "platform": choice.removesuffix("-manual"),
+            "mode": "manual",
+            "model": args.model.strip(),
+            "effort": args.effort.strip(),
+        }
+    elif pending and pending.get("stage") == "background-model" and choice.endswith("-default"):
+        worker = {"platform": choice.removesuffix("-default"), "mode": "default"}
     payload = state.record_answer(args.nonce, args.choice)
+    if pending and pending.get("stage") == "agent-choice" and choice in {"foreground", "background"}:
+        _save_config(state.repo, "agent_choice", {"choice": choice})
+    elif worker and worker["platform"] == host_agent():
+        _save_config(state.repo, pending.get("config_key", "refinement_worker"), worker)
     print_json(payload)
+
+
+def cmd_worker_config(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    key = "executor_worker" if args.role == "executor" else "refinement_worker"
+    preference = _worker_preference(state.repo, key)
+    if preference is None:
+        _worker_question(state, prompt=f"Choose {args.role} model and effort", level=plan_level("plan"), key=key)
+        return
+    try:
+        from agent_adapters import AgentInfo, build_claude_command, build_codex_command, detect_agents
+    except ImportError:  # pragma: no cover - package import path
+        from scripts.agent_adapters import AgentInfo, build_claude_command, build_codex_command, detect_agents
+    platform = preference["platform"]
+    detected = detect_agents().get(platform)
+    if detected is None or not detected.available:
+        _worker_question(
+            state,
+            prompt=f"Choose {args.role} model and effort",
+            level=plan_level("plan"),
+            key=key,
+            reuse=False,
+        )
+        return
+    info = AgentInfo(
+        platform,
+        True,
+        detected.version,
+        detected.path,
+        preference.get("model") if preference["mode"] == "manual" else detected.configured_model,
+        preference.get("effort") if preference["mode"] == "manual" else detected.configured_effort,
+    )
+    cwd = Path(args.cwd)
+    files: dict[str, str] = {}
+    if platform == "codex":
+        config_home = state.run_dir / "executor-codex-home" if args.role == "executor" else None
+        command = build_codex_command(info, role=args.role, cwd=cwd, config_home=config_home)
+        env = {"CODEX_HOME": str(config_home)} if config_home else {}
+    else:
+        settings = state.run_dir / "executor-settings" / "settings.json"
+        plugin_dir = state.run_dir / "executor-plugin"
+        command = build_claude_command(
+            info,
+            role=args.role,
+            cwd=cwd,
+            settings=settings if args.role == "executor" else None,
+            plugin_dir=plugin_dir if args.role == "executor" else None,
+            allowed_tools=["Bash", "Read", "Write", "Edit", "MultiEdit"] if args.role == "executor" else None,
+        )
+        env = {"PWD": str(cwd)}
+        if args.role == "executor":
+            files = {"settings": str(settings), "plugin_dir": str(plugin_dir)}
+    print_json({"adapter": platform, "argv": command.argv, "env": env, **files})
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -295,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
             "init": cmd_init,
             "ask": cmd_ask,
             "answer": cmd_answer,
+            "worker-config": cmd_worker_config,
             "status": cmd_status,
             "prepare-execution": cmd_prepare_execution,
             "start-execution": cmd_start_execution,

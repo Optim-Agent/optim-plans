@@ -34,8 +34,14 @@ def ask_agent_choice(repo: Path, prompt: str = "Choose agent") -> dict[str, Any]
     return controller_json("ask", "--repo", str(repo), "--prompt", prompt, "--stage", "agent-choice")
 
 
-def answer_choice(repo: Path, nonce: str, choice: str) -> dict[str, Any]:
-    return controller_json("answer", "--repo", str(repo), "--nonce", nonce, "--choice", choice)
+def answer_choice(repo: Path, nonce: str, choice: str, *extra: str) -> dict[str, Any]:
+    return controller_json("answer", "--repo", str(repo), "--nonce", nonce, "--choice", choice, *extra)
+
+
+def config_path(repo: Path) -> Path:
+    from scripts.optim_plans_core import git_common_dir
+
+    return git_common_dir(repo) / "optim-plans" / "config.json"
 
 
 class E2ETests(unittest.TestCase):
@@ -188,6 +194,39 @@ class E2ETests(unittest.TestCase):
                 self.assertNotIn("options", q2)
                 self.assertNotEqual(q2["nonce"], q1["nonce"])
 
+    def test_agent_choice_is_persisted_in_git_common_config(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Persist Agent Choice")
+            question = ask_agent_choice(repo)
+            answer_choice(repo, question["nonce"], "foreground")
+
+            path = config_path(repo)
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                {"schema": 1, "agent_choice": {"choice": "foreground"}},
+            )
+            self.assertEqual(ask_agent_choice(repo)["choice"], "foreground")
+
+    def test_invalid_agent_config_is_treated_as_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Invalid Config")
+            path = config_path(repo)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("not json", encoding="utf-8")
+
+            self.assertIn("options", ask_agent_choice(repo))
+
+    def test_incomplete_agent_config_is_treated_as_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Incomplete Config")
+            path = config_path(repo)
+            path.write_text(json.dumps({"schema": 1, "agent_choice": []}), encoding="utf-8")
+
+            self.assertIn("options", ask_agent_choice(repo))
+
     def test_cli_ask_agent_choice_auto_defaults_to_recommended_background(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
@@ -285,6 +324,87 @@ class E2ETests(unittest.TestCase):
             [recommended[0], *(option[0] for option in alternatives)],
             ["codex-default", "codex-manual"],
         )
+
+    def test_manual_refinement_worker_is_persisted_and_reused(self) -> None:
+        from scripts.optim_plans_core import host_agent
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Manual Worker")
+            platform = host_agent(os.environ)
+            question = controller_json(
+                "ask", "--repo", str(repo), "--prompt", "Choose model", "--stage", "background-model"
+            )
+            answer_choice(
+                repo,
+                question["nonce"],
+                f"{platform}-manual",
+                "--model",
+                "model-test",
+                "--effort",
+                "high",
+            )
+
+            reused = controller_json(
+                "ask", "--repo", str(repo), "--prompt", "Choose model again", "--stage", "background-model"
+            )
+            path = config_path(repo)
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))["refinement_worker"],
+                {"platform": platform, "mode": "manual", "model": "model-test", "effort": "high"},
+            )
+            self.assertEqual(reused["choice"], f"{platform}-manual")
+            self.assertEqual((reused["model"], reused["effort"]), ("model-test", "high"))
+            self.assertNotIn("options", reused)
+
+    def test_incompatible_worker_config_is_treated_as_missing(self) -> None:
+        from scripts.optim_plans_core import host_agent
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Host Switch")
+            platform = host_agent(os.environ)
+            other = "claude" if platform == "codex" else "codex"
+            path = config_path(repo)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"schema": 1, "refinement_worker": {"platform": other, "mode": "default"}}),
+                encoding="utf-8",
+            )
+
+            question = controller_json(
+                "ask", "--repo", str(repo), "--prompt", "Choose model", "--stage", "background-model"
+            )
+            self.assertIn("options", question)
+            self.assertEqual([option["id"] for option in question["options"][:2]], [f"{platform}-default", f"{platform}-manual"])
+
+    def test_worker_config_executor_uses_stored_manual_values(self) -> None:
+        from scripts.optim_plans_core import host_agent
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Executor Worker")
+            platform = host_agent(os.environ)
+            question = controller_json(
+                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo)
+            )
+            self.assertEqual(question["config_key"], "executor_worker")
+            answer_choice(
+                repo,
+                question["nonce"],
+                f"{platform}-manual",
+                "--model",
+                "model-test",
+                "--effort",
+                "high",
+            )
+
+            resolved = controller_json(
+                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo)
+            )
+            self.assertEqual(resolved["adapter"], platform)
+            self.assertIn("model-test", resolved["argv"])
+            self.assertIn("high", resolved["argv"])
 
     def test_cli_ask_mini_plan_uses_same_refinement_mode_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
