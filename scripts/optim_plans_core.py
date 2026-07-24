@@ -1063,8 +1063,6 @@ class OptimPlansState:
             raise ContractError("worker adapter argv executable does not match adapter")
         if adapter == "codex" and "exec" not in argv[1:]:
             raise ContractError("codex worker argv must be an exec adapter command")
-        if adapter == "codex" and "--output-schema" not in argv:
-            raise ContractError("codex worker argv must include an output schema")
         if adapter == "claude" and "-p" not in argv[1:]:
             raise ContractError("claude worker argv must be a print-mode adapter command")
         if adapter == "claude" and "--json-schema" not in argv:
@@ -1146,7 +1144,7 @@ class OptimPlansState:
     def _ensure_adapter_launch_files(self, config: dict[str, Any], *, write: bool = True) -> None:
         argv = config["argv"]
         self._write_manifest_config_files(config["config_files"], write=write)
-        for flag in ("--output-schema", "--settings"):
+        for flag in ("--settings",):
             if flag not in argv:
                 continue
             index = argv.index(flag) + 1
@@ -1155,22 +1153,7 @@ class OptimPlansState:
             target = self._owned_launch_path(argv[index], flag=flag)
             if not write:
                 continue
-            if flag == "--output-schema":
-                write_json_atomic(
-                    target,
-                    {
-                        "type": "object",
-                        "required": ["nonce", "item_id", "status", "evidence"],
-                        "properties": {
-                            "nonce": {"type": "string"},
-                            "item_id": {"type": "string"},
-                            "status": {"type": "string"},
-                            "evidence": {"type": "string"},
-                        },
-                        "additionalProperties": True,
-                    },
-                )
-            elif not target.exists():
+            if not target.exists():
                 write_json_atomic(target, {})
         if "--plugin-dir" in argv:
             index = argv.index("--plugin-dir") + 1
@@ -1227,10 +1210,10 @@ class OptimPlansState:
             start = self._latest_item_start(replayed.events, item_id)
             return self._record_attempt_failure_locked(event_type, item_id, evidence=evidence, start=start)
 
-    def _worker_result_evidence(self, item_id: str, *, result_path: Path, worker_nonce: str) -> str:
-        if not result_path.exists():
-            raise ContractError("worker result file is missing")
-        payload = parse_json_strict(result_path.read_text(encoding="utf-8"), source=str(result_path))
+    def _worker_result_evidence(self, item_id: str, *, stdout: str, worker_nonce: str) -> str:
+        if not stdout.strip():
+            raise ContractError("worker stdout result is missing")
+        payload = parse_json_strict(stdout.strip(), source="worker stdout")
         if not isinstance(payload, dict):
             raise ContractError("worker result must be a JSON object")
         for key in ("nonce", "item_id", "status", "evidence"):
@@ -1269,13 +1252,8 @@ class OptimPlansState:
         self._ensure_adapter_launch_files(worker_config)
         run_worktree = Path(started["run_worktree"])
         worker_nonce = uuid.uuid4().hex
-        result_path = self.run_dir / "worker-results" / f"{item_id}-{started['attempt']}.json"
         state_path = self.run_dir / "worker-states" / f"{item_id}-{started['attempt']}.json"
-        if result_path.exists():
-            self.record_worker_failure(item_id, evidence="worker result path already exists")
-            raise ContractError("worker result path already exists")
         write_json_atomic(state_path, {"run_id": self.run_id, "worker_nonce": worker_nonce})
-        result_path.parent.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
         env.update(worker_config["env"])
         env.update(
@@ -1285,7 +1263,6 @@ class OptimPlansState:
                 "OPTIM_PLANS_STATE_PATH": str(state_path),
                 "OPTIM_PLANS_IDS": item_id,
                 "OPTIM_PLANS_SCOPES": os.pathsep.join(started["allowed_paths"]),
-                "OPTIM_PLANS_RESULT_PATH": str(result_path),
             }
         )
         worker = run_process_group(
@@ -1299,7 +1276,7 @@ class OptimPlansState:
             self.record_worker_failure(item_id, evidence=evidence)
             raise ContractError(evidence)
         try:
-            worker_evidence = self._worker_result_evidence(item_id, result_path=result_path, worker_nonce=worker_nonce)
+            worker_evidence = self._worker_result_evidence(item_id, stdout=worker.stdout, worker_nonce=worker_nonce)
         except ContractError as exc:
             self.record_worker_failure(item_id, evidence=f"worker result rejected: {exc}")
             raise
@@ -1929,24 +1906,6 @@ class PlanItem:
     allowed_paths: list[str] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class WorkerAssignment:
-    item_id: str
-    nonce: str
-    scopes: list[str]
-    result_path: Path
-
-    def env(self, *, run_id: str, state_path: Path) -> dict[str, str]:
-        return {
-            "OPTIM_PLANS_RUN_ID": run_id,
-            "OPTIM_PLANS_WORKER_NONCE": self.nonce,
-            "OPTIM_PLANS_STATE_PATH": str(state_path),
-            "OPTIM_PLANS_IDS": self.item_id,
-            "OPTIM_PLANS_SCOPES": os.pathsep.join(self.scopes),
-            "OPTIM_PLANS_RESULT_PATH": str(self.result_path),
-        }
-
-
 def render_plan(
     goal: str,
     items: list[PlanItem],
@@ -2174,102 +2133,6 @@ class RefinementLedger:
     def add_criticizer_question(self, question: str) -> None:
         self._check_round_limit(self.criticizer_questions)
         self.criticizer_questions += 1
-
-
-class ExecutionLedger:
-    def __init__(self, items: list[PlanItem]) -> None:
-        self.items = {item.id: item for item in items}
-        self.status = {item.id: "pending" for item in items}
-        self.attempts = {item.id: [] for item in items}
-
-    def ready_ids(self) -> list[str]:
-        ready: list[str] = []
-        for item in self.items.values():
-            if self.status[item.id] != "pending":
-                continue
-            if all(self.status[dep] == "verified" for dep in item.depends_on):
-                ready.append(item.id)
-        return ready
-
-    def record_attempt(self, item_id: str, evidence: str) -> None:
-        if item_id not in self.items:
-            raise ContractError(f"unknown plan item {item_id}")
-        if not evidence.strip():
-            raise ContractError("attempt evidence is required")
-        attempts = self.attempts[item_id]
-        if evidence in attempts:
-            raise ContractError("attempt evidence must be distinct")
-        attempts.append(evidence)
-        if len(attempts) >= 3:
-            self.status[item_id] = "needs_confirmation"
-
-    def confirm_not_achievable(self, item_id: str, evidence: str) -> None:
-        if self.status.get(item_id) != "needs_confirmation":
-            raise ContractError(f"{item_id} does not need not_achievable confirmation")
-        if not evidence.strip():
-            raise ContractError("confirmation evidence is required")
-        self.attempts[item_id].append(f"confirmation: {evidence}")
-        self.status[item_id] = "not_achievable"
-
-    def prepare_worker(
-        self,
-        item_id: str,
-        *,
-        scopes: list[str],
-        result_dir: Path | None = None,
-        result_path: Path | None = None,
-    ) -> WorkerAssignment:
-        if item_id not in self.items:
-            raise ContractError(f"unknown plan item {item_id}")
-        if item_id not in self.ready_ids():
-            raise ContractError(f"{item_id} is not ready for execution")
-        if not scopes:
-            raise ContractError("worker scopes are required")
-        nonce = uuid.uuid4().hex
-        if result_path is None:
-            if result_dir is None:
-                raise ContractError("worker result directory is required")
-            result_path = Path(result_dir) / f"{item_id}-{nonce}.json"
-        result_path.parent.mkdir(parents=True, exist_ok=True)
-        if result_path.exists():
-            raise ContractError("worker result path already exists")
-        return WorkerAssignment(item_id, nonce, list(scopes), result_path)
-
-    def complete_worker(
-        self,
-        assignment: WorkerAssignment,
-        *,
-        exit_code: int = 0,
-        timed_out: bool = False,
-    ) -> dict[str, Any]:
-        if assignment.item_id not in self.items:
-            raise ContractError(f"unknown plan item {assignment.item_id}")
-        if self.status[assignment.item_id] != "pending":
-            raise ContractError(f"{assignment.item_id} is not pending")
-        if timed_out:
-            self.record_attempt(assignment.item_id, "worker timed out")
-            raise ContractError("worker timed out")
-        if exit_code != 0:
-            self.record_attempt(assignment.item_id, f"worker exited with exit {exit_code}")
-            raise ContractError(f"worker exited with exit {exit_code}")
-        if not assignment.result_path.exists():
-            raise ContractError("worker result file is missing")
-        payload = parse_json_strict(assignment.result_path.read_text(encoding="utf-8"), source=str(assignment.result_path))
-        if not isinstance(payload, dict):
-            raise ContractError("worker result must be a JSON object")
-        for key in ("nonce", "item_id", "status", "evidence"):
-            if key not in payload:
-                raise ContractError(f"worker result is missing {key!r}")
-        if payload["nonce"] != assignment.nonce:
-            raise ContractError("worker result nonce does not match assignment")
-        if payload["item_id"] != assignment.item_id:
-            raise ContractError("worker result item_id does not match assignment")
-        if payload["status"] not in {"completed", "verified"}:
-            raise ContractError(f"unsupported worker result status {payload['status']!r}")
-        if not isinstance(payload["evidence"], str) or not payload["evidence"].strip():
-            raise ContractError("worker result evidence is required")
-        self.status[assignment.item_id] = "completed"
-        return payload
 
 
 def require_clean_source(repo: Path, *, ignored_paths: list[Path] | None = None) -> None:

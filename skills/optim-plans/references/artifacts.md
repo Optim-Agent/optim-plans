@@ -17,7 +17,7 @@ Machine state lives under the Git common directory:
 .git/optim-plans/runs/<run-id>/run.json
 .git/optim-plans/runs/<run-id>/events.jsonl
 .git/optim-plans/runs/<run-id>/runtime.json
-.git/optim-plans/runs/<run-id>/worker-results/
+.git/optim-plans/runs/<run-id>/worker-states/
 ```
 
 `run.json` is immutable. `events.jsonl` is authoritative for the write-once execution manifest record, approval nonce consumption, lifecycle state, retry decisions, checkpoint commits, final audits, and terminal finish outcome. `runtime.json` and `active.json` are rebuildable indexes; terminalization archives/releases only the matching active pointer.

@@ -7,7 +7,6 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,48 +29,9 @@ class AgentCommand:
     env: dict[str, str]
 
 
-WORKER_RESULT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "required": ["nonce", "item_id", "status", "evidence"],
-    "properties": {
-        "nonce": {"type": "string"},
-        "item_id": {"type": "string"},
-        "status": {"type": "string"},
-        "evidence": {"type": "string"},
-    },
-    "additionalProperties": True,
-}
-
-
 def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _write_worker_schema(path: Path) -> None:
-    _write_json_file(path, WORKER_RESULT_SCHEMA)
-
-
-def bind_optim_plans_env(
-    command: AgentCommand,
-    *,
-    run_id: str,
-    worker_nonce: str,
-    state_path: Path,
-    item_ids: list[str],
-    scopes: list[str],
-    result_path: Path,
-) -> AgentCommand:
-    env = {
-        **command.env,
-        "OPTIM_PLANS_RUN_ID": run_id,
-        "OPTIM_PLANS_WORKER_NONCE": worker_nonce,
-        "OPTIM_PLANS_STATE_PATH": str(state_path),
-        "OPTIM_PLANS_IDS": os.pathsep.join(item_ids),
-        "OPTIM_PLANS_SCOPES": os.pathsep.join(scopes),
-        "OPTIM_PLANS_RESULT_PATH": str(result_path),
-    }
-    return AgentCommand(list(command.argv), env)
 
 
 def _run(argv: list[str], *, env: dict[str, str]) -> str | None:
@@ -137,12 +97,6 @@ def build_codex_command(
         raise ValueError("executor requires isolated CODEX_HOME")
     executable = info.path or "codex"
     sandbox = "read-only" if role in {"reviewer", "criticizer", "verifier"} else "workspace-write"
-    schema_path = (
-        (config_home / "optim-plans-output-schema.json")
-        if config_home is not None
-        else Path(tempfile.gettempdir()) / "optim-plans-output-schema.json"
-    )
-    _write_worker_schema(schema_path)
     argv = [
         executable,
         "exec",
@@ -153,8 +107,6 @@ def build_codex_command(
         "--ignore-rules",
         "-C",
         str(cwd),
-        "--output-schema",
-        str(schema_path),
     ]
     if info.configured_model:
         argv.extend(["--model", info.configured_model])
@@ -203,7 +155,7 @@ def build_claude_command(
             {
                 agent_name: {
                     "description": "Executes approved optim-plans manifest items in a controller-owned worktree.",
-                    "prompt": "Complete only the assigned optim-plans item, stay inside the allowed scopes, and write the required result JSON.",
+                    "prompt": "Complete only the assigned optim-plans item, stay inside the allowed scopes, and print the required result JSON to stdout.",
                     "tools": allowed_tools,
                     "permissionMode": "acceptEdits",
                 }

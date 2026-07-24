@@ -27,13 +27,12 @@ class ExecutionTests(unittest.TestCase):
         worker_timeout_seconds: float = 5,
         verification_timeout_seconds: float = 5,
         worker_env: dict[str, str] | None = None,
-        schema_path: Path | None = None,
     ):
         from scripts.optim_plans_core import OptimPlansState
 
         state = OptimPlansState.initialize(repo, topic="Adapter Execution", plan_hash="abc123")
         run_worktree = state.root / "run-worktrees" / state.run_id
-        schema = schema_path or state.run_dir / "worker-output-schema.json"
+        argv = [str(worker), "exec", "-C", str(run_worktree)]
         state.persist_execution_manifest(
             {
                 "plan_hash": "abc123",
@@ -42,7 +41,7 @@ class ExecutionTests(unittest.TestCase):
                 "run_worktree_path": str(run_worktree),
                 "worker": {
                     "adapter": "codex",
-                    "argv": [str(worker), "exec", "-C", str(run_worktree), "--output-schema", str(schema)],
+                    "argv": argv,
                     "env": worker_env or {},
                     "timeout_seconds": worker_timeout_seconds,
                 },
@@ -102,17 +101,15 @@ class ExecutionTests(unittest.TestCase):
                 raw_path / "codex",
                 "import json, os, sys\n"
                 "from pathlib import Path\n"
-                "schema = Path(sys.argv[sys.argv.index('--output-schema') + 1])\n"
-                "assert schema.is_file()\n"
                 f"Path({str(argv_log)!r}).write_text(json.dumps(sys.argv), encoding='utf-8')\n"
                 "Path('src').mkdir(exist_ok=True)\n"
                 "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
-                "Path(os.environ['OPTIM_PLANS_RESULT_PATH']).write_text(json.dumps({\n"
+                "print(json.dumps({\n"
                 "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
                 "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
                 "    'status': 'verified',\n"
                 "    'evidence': 'worker self-attested verified',\n"
-                "}), encoding='utf-8')\n",
+                "}))\n",
             )
             state, run_worktree = self._start_adapter_execution(
                 repo,
@@ -132,7 +129,7 @@ class ExecutionTests(unittest.TestCase):
                 f"optim-plans checkpoint {state.run_id} TASK-001 attempt 1",
             )
             self.assertFalse(sentinel.exists())
-            self.assertIn("--output-schema", json.loads(argv_log.read_text(encoding="utf-8")))
+            self.assertFalse(any("schema" in arg for arg in json.loads(argv_log.read_text(encoding="utf-8"))))
             self.assertEqual(
                 [event["type"] for event in state.replay().events[-7:]],
                 [
@@ -161,12 +158,12 @@ class ExecutionTests(unittest.TestCase):
                 f"Path({str(argv_log)!r}).write_text(json.dumps(sys.argv), encoding='utf-8')\n"
                 "Path('src').mkdir(exist_ok=True)\n"
                 "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
-                "Path(os.environ['OPTIM_PLANS_RESULT_PATH']).write_text(json.dumps({\n"
+                "print(json.dumps({\n"
                 "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
                 "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
                 "    'status': 'verified',\n"
                 "    'evidence': 'claude worker accepted empty setting sources',\n"
-                "}), encoding='utf-8')\n",
+                "}))\n",
             )
             state = OptimPlansState.initialize(repo, topic="Claude Empty Argv", plan_hash="abc123")
             run_worktree = state.root / "run-worktrees" / state.run_id
@@ -214,12 +211,12 @@ class ExecutionTests(unittest.TestCase):
                 "from pathlib import Path\n"
                 "Path('src').mkdir(exist_ok=True)\n"
                 "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
-                "Path(os.environ['OPTIM_PLANS_RESULT_PATH']).write_text(json.dumps({\n"
+                "print(json.dumps({\n"
                 "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
                 "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
                 "    'status': 'verified',\n"
                 "    'evidence': 'worker claims verified',\n"
-                "}), encoding='utf-8')\n",
+                "}))\n",
             )
             state, run_worktree = self._start_adapter_execution(
                 repo,
@@ -254,12 +251,12 @@ class ExecutionTests(unittest.TestCase):
                     "from pathlib import Path\n"
                     "Path('src').mkdir(exist_ok=True)\n"
                     "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
-                    "Path(os.environ['OPTIM_PLANS_RESULT_PATH']).write_text(json.dumps({\n"
+                    "print(json.dumps({\n"
                     "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
                     "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
                     "    'status': 'completed',\n"
                     "    'evidence': 'worker done',\n"
-                    "}), encoding='utf-8')\n",
+                    "}))\n",
                 )
                 state, run_worktree = self._start_adapter_execution(
                     repo,
@@ -290,12 +287,12 @@ class ExecutionTests(unittest.TestCase):
                 "time.sleep(0.3)\n"
                 "Path('src').mkdir(exist_ok=True)\n"
                 "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
-                "Path(os.environ['OPTIM_PLANS_RESULT_PATH']).write_text(json.dumps({\n"
+                "print(json.dumps({\n"
                 "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
                 "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
                 "    'status': 'verified',\n"
                 "    'evidence': 'worker finished despite legacy timeout field',\n"
-                "}), encoding='utf-8')\n",
+                "}))\n",
             )
             state, run_worktree = self._start_adapter_execution(
                 repo,
@@ -337,6 +334,8 @@ class ExecutionTests(unittest.TestCase):
             self.assertNotIn("item_started", [event["type"] for event in state.replay().events])
 
     def test_adapter_generated_files_cannot_escape_controller_state(self) -> None:
+        from scripts.optim_plans_core import OptimPlansState
+
         with tempfile.TemporaryDirectory() as raw:
             raw_path = Path(raw)
             repo = make_repo(raw_path)
@@ -345,16 +344,31 @@ class ExecutionTests(unittest.TestCase):
                 raw_path / "codex",
                 f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('launched', encoding='utf-8')\n",
             )
-            state, _run_worktree = self._start_adapter_execution(
-                repo,
-                worker=worker,
-                verification_argv=[sys.executable, "-c", "pass"],
-                schema_path=raw_path / "outside-schema.json",
+            state = OptimPlansState.initialize(repo, topic="Adapter Files", plan_hash="abc123")
+            run_worktree = state.root / "run-worktrees" / state.run_id
+            outside = raw_path / "outside-config.json"
+            state.persist_execution_manifest(
+                {
+                    "plan_hash": "abc123",
+                    "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                    "integration_destination": "main",
+                    "run_worktree_path": str(run_worktree),
+                    "worker": {
+                        "adapter": "codex",
+                        "argv": [str(worker), "exec", "-C", str(run_worktree)],
+                        "config_files": [{"path": str(outside), "content": {}}],
+                    },
+                    "verification_argv": [sys.executable, "-c", "pass"],
+                    "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
+                }
             )
+            question = state.request_execution_approval()
+            state.record_answer(question["nonce"], "approve")
+            state.start_execution(question["nonce"])
             with self.assertRaises(Exception):
                 state.run_item("TASK-001")
             self.assertFalse(sentinel.exists())
-            self.assertFalse((raw_path / "outside-schema.json").exists())
+            self.assertFalse(outside.exists())
             self.assertNotIn("item_started", [event["type"] for event in state.replay().events])
 
     def test_authoritative_audit_catches_git_bypass_forms(self) -> None:
@@ -382,12 +396,12 @@ class ExecutionTests(unittest.TestCase):
                     f"{bypass(raw_path)}"
                     "Path('src').mkdir(exist_ok=True)\n"
                     "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
-                    "Path(os.environ['OPTIM_PLANS_RESULT_PATH']).write_text(json.dumps({\n"
+                    "print(json.dumps({\n"
                     "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
                     "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
                     "    'status': 'completed',\n"
                     "    'evidence': 'worker done',\n"
-                    "}), encoding='utf-8')\n",
+                    "}))\n",
                 )
                 state, _run_worktree = self._start_adapter_execution(
                     repo,
@@ -699,132 +713,6 @@ class ExecutionTests(unittest.TestCase):
                 self.assertIn("worker failed visibly", finished["failure_evidence"])
                 self.assertTrue(run_worktree.exists())
                 self.assertFalse(state.active_file.exists())
-
-    def test_dependency_ready_selection_and_attempt_limit(self) -> None:
-        from scripts.optim_plans_core import ExecutionLedger, PlanItem
-
-        items = [
-            PlanItem("TASK-001", "First", "deterministic command", "cmd"),
-            PlanItem("TASK-002", "Second", "deterministic command", "cmd", depends_on=["TASK-001"]),
-        ]
-        ledger = ExecutionLedger(items)
-        self.assertEqual(ledger.ready_ids(), ["TASK-001"])
-        for note in ("a", "b", "c"):
-            ledger.record_attempt("TASK-001", note)
-        self.assertEqual(ledger.status["TASK-001"], "needs_confirmation")
-        ledger.confirm_not_achievable("TASK-001", "independent verifier confirmed")
-        self.assertEqual(ledger.status["TASK-001"], "not_achievable")
-
-    def test_attempt_evidence_must_be_distinct_and_nonblank(self) -> None:
-        from scripts.optim_plans_core import ContractError, ExecutionLedger, PlanItem
-
-        ledger = ExecutionLedger([PlanItem("TASK-001", "First", "deterministic command", "cmd")])
-        with self.assertRaises(ContractError):
-            ledger.record_attempt("TASK-001", " ")
-        ledger.record_attempt("TASK-001", "same")
-        with self.assertRaises(ContractError):
-            ledger.record_attempt("TASK-001", "same")
-
-    def test_worker_assignment_requires_ready_item_and_exports_result_env(self) -> None:
-        from scripts.optim_plans_core import ContractError, ExecutionLedger, PlanItem
-
-        with tempfile.TemporaryDirectory() as raw:
-            result_dir = Path(raw)
-            ledger = ExecutionLedger(
-                [
-                    PlanItem("TASK-001", "First", "unit", "cmd", allowed_paths=["src"]),
-                    PlanItem("TASK-002", "Second", "unit", "cmd", depends_on=["TASK-001"], allowed_paths=["tests"]),
-                ]
-            )
-            with self.assertRaises(ContractError):
-                ledger.prepare_worker("TASK-002", scopes=["tests"], result_dir=result_dir)
-            assignment = ledger.prepare_worker("TASK-001", scopes=["src"], result_dir=result_dir)
-            env = assignment.env(run_id="run1", state_path=result_dir / "state.json")
-            self.assertEqual(env["OPTIM_PLANS_IDS"], "TASK-001")
-            self.assertEqual(env["OPTIM_PLANS_SCOPES"], "src")
-            self.assertEqual(env["OPTIM_PLANS_WORKER_NONCE"], assignment.nonce)
-            self.assertEqual(env["OPTIM_PLANS_RESULT_PATH"], str(assignment.result_path))
-            self.assertFalse(assignment.result_path.exists())
-
-    def test_worker_result_file_must_match_assignment_once_without_verifying(self) -> None:
-        from scripts.optim_plans_core import ContractError, ExecutionLedger, PlanItem
-
-        with tempfile.TemporaryDirectory() as raw:
-            ledger = ExecutionLedger([PlanItem("TASK-001", "First", "unit", "cmd")])
-            assignment = ledger.prepare_worker("TASK-001", scopes=["src"], result_dir=Path(raw))
-            assignment.result_path.write_text(
-                json.dumps(
-                    {
-                        "nonce": assignment.nonce,
-                        "item_id": "TASK-001",
-                        "status": "verified",
-                        "evidence": "unit ok",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            self.assertEqual(ledger.complete_worker(assignment, exit_code=0)["evidence"], "unit ok")
-            self.assertEqual(ledger.status["TASK-001"], "completed")
-            with self.assertRaises(ContractError):
-                ledger.complete_worker(assignment, exit_code=0)
-
-    def test_worker_result_file_rejects_missing_invalid_stale_and_wrong_item(self) -> None:
-        from scripts.optim_plans_core import ContractError, ExecutionLedger, PlanItem
-
-        cases = [
-            None,
-            "not json",
-            {"nonce": "USE_ASSIGNMENT", "item_id": "TASK-001", "status": "verified"},
-            {"nonce": "old", "item_id": "TASK-001", "status": "verified", "evidence": "ok"},
-            {"nonce": "USE_ASSIGNMENT", "item_id": "TASK-999", "status": "verified", "evidence": "ok"},
-            {"nonce": "USE_ASSIGNMENT", "item_id": "TASK-001", "status": "blocked", "evidence": "ok"},
-        ]
-        for payload in cases:
-            with self.subTest(payload=payload):
-                with tempfile.TemporaryDirectory() as raw:
-                    ledger = ExecutionLedger([PlanItem("TASK-001", "First", "unit", "cmd")])
-                    assignment = ledger.prepare_worker("TASK-001", scopes=["src"], result_dir=Path(raw))
-                    if isinstance(payload, dict):
-                        payload = dict(payload)
-                        if payload["nonce"] == "USE_ASSIGNMENT":
-                            payload["nonce"] = assignment.nonce
-                        assignment.result_path.write_text(json.dumps(payload), encoding="utf-8")
-                    elif isinstance(payload, str):
-                        assignment.result_path.write_text(payload, encoding="utf-8")
-                    with self.assertRaises(ContractError):
-                        ledger.complete_worker(assignment, exit_code=0)
-
-    def test_worker_assignment_rejects_preexisting_result_path(self) -> None:
-        from scripts.optim_plans_core import ContractError, ExecutionLedger, PlanItem
-
-        with tempfile.TemporaryDirectory() as raw:
-            result_path = Path(raw) / "result.json"
-            result_path.write_text("{}", encoding="utf-8")
-            ledger = ExecutionLedger([PlanItem("TASK-001", "First", "unit", "cmd")])
-            with self.assertRaises(ContractError):
-                ledger.prepare_worker("TASK-001", scopes=["src"], result_path=result_path)
-
-    def test_worker_process_failure_records_attempt_without_verifying(self) -> None:
-        from scripts.optim_plans_core import ContractError, ExecutionLedger, PlanItem
-
-        with tempfile.TemporaryDirectory() as raw:
-            ledger = ExecutionLedger([PlanItem("TASK-001", "First", "unit", "cmd")])
-            assignment = ledger.prepare_worker("TASK-001", scopes=["src"], result_dir=Path(raw))
-            with self.assertRaises(ContractError):
-                ledger.complete_worker(assignment, exit_code=7)
-            self.assertEqual(ledger.status["TASK-001"], "pending")
-            self.assertIn("exit 7", ledger.attempts["TASK-001"][0])
-
-    def test_worker_timeout_records_attempt_without_verifying(self) -> None:
-        from scripts.optim_plans_core import ContractError, ExecutionLedger, PlanItem
-
-        with tempfile.TemporaryDirectory() as raw:
-            ledger = ExecutionLedger([PlanItem("TASK-001", "First", "unit", "cmd")])
-            assignment = ledger.prepare_worker("TASK-001", scopes=["src"], result_dir=Path(raw))
-            with self.assertRaises(ContractError):
-                ledger.complete_worker(assignment, timed_out=True)
-            self.assertEqual(ledger.status["TASK-001"], "pending")
-            self.assertIn("timed out", ledger.attempts["TASK-001"][0])
 
     def test_execution_manifest_dag_validation_and_stable_topological_order(self) -> None:
         from scripts.optim_plans_core import ContractError, canonical_execution_manifest

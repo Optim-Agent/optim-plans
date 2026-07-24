@@ -276,12 +276,12 @@ class E2ETests(unittest.TestCase):
                 "from pathlib import Path\n"
                 "Path('src').mkdir(exist_ok=True)\n"
                 "Path('src/cli-run-item.txt').write_text('ok\\n', encoding='utf-8')\n"
-                "Path(os.environ['OPTIM_PLANS_RESULT_PATH']).write_text(json.dumps({\n"
+                "print(json.dumps({\n"
                 "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
                 "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
                 "    'status': 'verified',\n"
                 "    'evidence': 'worker done',\n"
-                "}), encoding='utf-8')\n",
+                "}))\n",
             )
             init = subprocess.run(
                 [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "Run Item"],
@@ -291,7 +291,6 @@ class E2ETests(unittest.TestCase):
                 check=True,
             )
             run_id = json.loads(init.stdout)["run_id"]
-            schema = repo / ".git/optim-plans/runs" / run_id / "executor-config/schema.json"
             manifest = {
                 "plan_hash": "abc123",
                 "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
@@ -299,7 +298,7 @@ class E2ETests(unittest.TestCase):
                 "run_worktree_path": str(run_worktree),
                 "worker": {
                     "adapter": "codex",
-                    "argv": [str(worker), "exec", "-C", str(run_worktree), "--output-schema", str(schema)],
+                    "argv": [str(worker), "exec", "-C", str(run_worktree)],
                     "timeout_seconds": 5,
                 },
                 "verification_argv": [
@@ -474,12 +473,12 @@ class E2ETests(unittest.TestCase):
                 f"Path({str(sentinel)!r}).write_text('launched', encoding='utf-8')\n"
                 "Path('src').mkdir(exist_ok=True)\n"
                 "Path('src/cli-life.txt').write_text('ok\\n', encoding='utf-8')\n"
-                "Path(os.environ['OPTIM_PLANS_RESULT_PATH']).write_text(json.dumps({\n"
+                "print(json.dumps({\n"
                 "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
                 "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
                 "    'status': 'completed',\n"
                 "    'evidence': 'worker done',\n"
-                "}), encoding='utf-8')\n",
+                "}))\n",
             )
             init = subprocess.run(
                 [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "Lifecycle"],
@@ -489,7 +488,6 @@ class E2ETests(unittest.TestCase):
                 check=True,
             )
             run_id = json.loads(init.stdout)["run_id"]
-            schema = repo / ".git/optim-plans/runs" / run_id / "executor-config/schema.json"
             manifest = {
                 "plan_hash": "abc123",
                 "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
@@ -497,7 +495,7 @@ class E2ETests(unittest.TestCase):
                 "run_worktree_path": str(run_worktree),
                 "worker": {
                     "adapter": "codex",
-                    "argv": [str(worker), "exec", "-C", str(run_worktree), "--output-schema", str(schema)],
+                    "argv": [str(worker), "exec", "-C", str(run_worktree)],
                     "timeout_seconds": 5,
                 },
                 "verification_argv": [
@@ -541,7 +539,6 @@ class E2ETests(unittest.TestCase):
                 stderr=subprocess.PIPE,
             )
             self.assertEqual(premature.returncode, 2)
-            self.assertFalse(schema.exists())
             self.assertFalse(sentinel.exists())
 
             subprocess.run(

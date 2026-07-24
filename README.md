@@ -372,7 +372,7 @@ Implemented:
 - agent discovery and role-based command builders;
 - one controller-owned run worktree and run branch;
 - serial item execution with checkpoint commits;
-- adapter-only argv launch with `shell=False`, using `OPTIM_PLANS_RESULT_PATH` for the result file envelope;
+- adapter-only argv launch with `shell=False`, using worker stdout for the result JSON envelope;
 - controller verification and Git audits for path allowlists and protected Git metadata;
 - explicit retry approval;
 - `awaiting_integration`;
