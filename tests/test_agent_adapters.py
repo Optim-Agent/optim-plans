@@ -90,6 +90,10 @@ class AgentAdapterTests(unittest.TestCase):
             self.assertIn("--plugin-dir", execute.argv)
             self.assertIn("--allowedTools", execute.argv)
             self.assertIn("--settings", execute.argv)
+            self.assertEqual(
+                json.loads(execute.argv[execute.argv.index("--mcp-config") + 1]),
+                {"mcpServers": {}},
+            )
             self.assertEqual(execute.argv[execute.argv.index("--agent") + 1], "optim-plans-executor")
             self.assertNotIn("--bg", execute.argv)
             self.assertNotIn("--background", execute.argv)

@@ -223,7 +223,7 @@ def build_claude_command(
             str(settings),
             "--strict-mcp-config",
             "--mcp-config",
-            "{}",
+            '{"mcpServers":{}}',
             "--plugin-dir",
             str(plugin_dir),
             "--allowedTools",
