@@ -149,6 +149,7 @@ def build_codex_command(
         "-s",
         sandbox,
         "--ephemeral",
+        *([] if config_home is None else ["--ignore-user-config"]),
         "--ignore-rules",
         "-C",
         str(cwd),

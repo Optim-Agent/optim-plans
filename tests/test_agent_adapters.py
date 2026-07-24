@@ -57,6 +57,7 @@ class AgentAdapterTests(unittest.TestCase):
                     "-s",
                     "workspace-write",
                     "--ephemeral",
+                    "--ignore-user-config",
                     "--ignore-rules",
                     "-C",
                     "/tmp/repo",
