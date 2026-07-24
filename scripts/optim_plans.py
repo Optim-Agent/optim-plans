@@ -129,10 +129,11 @@ def cmd_ask(args: argparse.Namespace) -> None:
     reviewer = ("reviewer", "Reviewer", "fresh read-only reviewer session")
     criticizer = ("criticizer", "Criticizer", "fresh read-only criticizer session")
     if args.stage == "agent-choice":
+        delegated = ("background", "Delegated foreground run", "choose a standalone sub-agent with visible output")
         question = ledger.ask(
             args.prompt,
-            recommended=foreground,
-            alternatives=[("background", "Delegated foreground run", "choose a standalone sub-agent with visible output")],
+            recommended=delegated,
+            alternatives=[foreground],
         )
     elif args.stage == "background-model":
         recommended, alternatives = _background_model_options()

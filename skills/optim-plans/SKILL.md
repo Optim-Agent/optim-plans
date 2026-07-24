@@ -88,7 +88,7 @@ Direct, evidence-based, relentless until answers are real:
 - If the repo can't answer but the web might (library behavior, version constraints, external API semantics, domain facts), websearch first and cite sources. The evidence ladder is: codebase → cited web research → user question.
 - Walk each branch of the decision tree, resolving dependent decisions in order. One question per message; if a topic needs more exploration, split it into multiple questions.
 - Every user-facing planning or refinement question must be a choice prompt: recommended option first with a short reason, alternatives, `Other` second-last, `Auto-complete` last, except the mini-plan `skip-refinement-execute` combined launch question.
-- When asking the user to choose an agent for reviewing, questioning, or criticizing, recommend the current foreground session first so Auto-complete continues in that session.
+- When asking the user to choose an agent for reviewing, questioning, or criticizing, recommend the delegated foreground run first so Auto-complete uses a standalone visible run.
 - Challenge vague or hand-waving answers. If an answer contradicts repo evidence, say so and re-ask — never silently accept it.
 - Never answer product questions on the user's behalf unless they pick `Auto-complete`. Auto-complete may accept recommended planning and refinement answers; it never approves execution, waivers, merge, push, release, or destructive cleanup.
 

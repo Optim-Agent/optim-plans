@@ -36,12 +36,12 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("except the mini-plan `skip-refinement-execute` combined launch question", text)
         self.assertIn("Asking a planning or refinement question without `Auto-complete` as the last option", text)
 
-    def test_refinement_agent_choice_recommends_foreground_session(self) -> None:
+    def test_refinement_agent_choice_recommends_delegated_foreground_run(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
         refinement = (ROOT / "skills/optim-plans/references/refinement.md").read_text(encoding="utf-8")
-        self.assertIn("current foreground session first", text)
-        self.assertIn("recommend `Current foreground session` first", refinement)
-        self.assertIn("Auto-complete continues in that session", refinement)
+        self.assertIn("delegated foreground run first", text)
+        self.assertIn("recommend `Delegated foreground run` first", refinement)
+        self.assertIn("Auto-complete uses a standalone visible run", refinement)
 
     def test_criticizer_questions_gate_plan_revision(self) -> None:
         text = (ROOT / "skills/optim-plans/references/refinement.md").read_text(encoding="utf-8")

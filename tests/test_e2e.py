@@ -143,10 +143,10 @@ class E2ETests(unittest.TestCase):
                 check=True,
             )
             q = json.loads(question.stdout)
-            self.assertEqual(q["recommended_option_id"], "foreground")
-            self.assertEqual([option["id"] for option in q["options"]], ["foreground", "background", "other", "auto"])
-            self.assertEqual(q["options"][1]["label"], "Delegated foreground run")
-            self.assertIn("standalone sub-agent", q["options"][1]["reason"])
+            self.assertEqual(q["recommended_option_id"], "background")
+            self.assertEqual([option["id"] for option in q["options"]], ["background", "foreground", "other", "auto"])
+            self.assertEqual(q["options"][0]["label"], "Delegated foreground run")
+            self.assertIn("standalone sub-agent", q["options"][0]["reason"])
 
     def test_cli_ask_background_model_stage_offers_model_effort_choices(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
