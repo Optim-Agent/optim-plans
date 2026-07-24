@@ -132,7 +132,7 @@ def cmd_ask(args: argparse.Namespace) -> None:
         question = ledger.ask(
             args.prompt,
             recommended=foreground,
-            alternatives=[("background", "Background/delegated run", "choose a separate agent with model and effort")],
+            alternatives=[("background", "Delegated foreground run", "choose a standalone sub-agent with visible output")],
         )
     elif args.stage == "background-model":
         recommended, alternatives = _background_model_options()

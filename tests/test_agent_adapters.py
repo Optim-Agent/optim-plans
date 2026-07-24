@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -89,6 +90,12 @@ class AgentAdapterTests(unittest.TestCase):
             self.assertIn("--plugin-dir", execute.argv)
             self.assertIn("--allowedTools", execute.argv)
             self.assertIn("--settings", execute.argv)
+            self.assertEqual(execute.argv[execute.argv.index("--agent") + 1], "optim-plans-executor")
+            self.assertNotIn("--bg", execute.argv)
+            self.assertNotIn("--background", execute.argv)
+            agent = json.loads(execute.argv[execute.argv.index("--agents") + 1])["optim-plans-executor"]
+            self.assertEqual(agent["tools"], ["Write", "Edit"])
+            self.assertNotIn("background", agent)
             self.assertTrue((tmp / "settings.json").is_file())
             self.assertTrue((tmp / "plugin").is_dir())
 

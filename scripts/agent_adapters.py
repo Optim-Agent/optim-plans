@@ -197,9 +197,26 @@ def build_claude_command(
             raise ValueError("executor requires explicit allowed tools")
         _write_json_file(settings, {})
         plugin_dir.mkdir(parents=True, exist_ok=True)
+        agent_name = "optim-plans-executor"
+        agents = json.dumps(
+            {
+                agent_name: {
+                    "description": "Executes approved optim-plans manifest items in a controller-owned worktree.",
+                    "prompt": "Complete only the assigned optim-plans item, stay inside the allowed scopes, and write the required result JSON.",
+                    "tools": allowed_tools,
+                    "permissionMode": "acceptEdits",
+                }
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
         argv = [
             info.path,
             "-p",
+            "--agents",
+            agents,
+            "--agent",
+            agent_name,
             "--setting-sources",
             "",
             "--settings",

@@ -13,6 +13,14 @@ first, ISO dates, and grouped change types.
 - Codex read-only worker commands now load normal user configuration instead of
   suppressing it.
 - `.agents/plugins/marketplace.json` is no longer hidden from public commits.
+- Public GitHub links now point at the live `Optim-Agent/optim-plans` repository.
+
+### Fixed
+
+- Claude executor manifests with `--setting-sources ""` now pass controller
+  validation and subprocess launch.
+- Claude executor launches now run through an explicit foreground
+  `optim-plans-executor` subagent when delegated execution is selected.
 
 ## 0.1.0 - 2026-07-24
 

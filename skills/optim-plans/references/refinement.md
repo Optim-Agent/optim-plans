@@ -1,6 +1,6 @@
 # Refinement Contract
 
-After each plan version, ask for `Reviewer` or `Criticizer`, then ask for the detected agent and effort. When asking the user to choose an agent for reviewing, questioning, or criticizing, use the `agent-choice` stage: recommend `Current foreground session` first so Auto-complete continues in that session, with `Background/delegated run` as the alternative. If the user selects background, use the `background-model` stage to ask for Codex or Claude model/effort, including manual model/effort options. Every user-facing refinement question is a choice prompt with `Auto-complete` last.
+After each plan version, ask for `Reviewer` or `Criticizer`, then ask for the detected agent and effort. When asking the user to choose an agent for reviewing, questioning, or criticizing, use the `agent-choice` stage: recommend `Current foreground session` first so Auto-complete continues in that session, with `Delegated foreground run` as the alternative. If the user selects the `background` option id, use the `background-model` stage to ask for Codex or Claude model/effort, including manual model/effort options; despite the legacy option id, Claude delegation must be a standalone foreground sub-agent run with visible output. Every user-facing refinement question is a choice prompt with `Auto-complete` last.
 
 Reviewer mode returns findings. The controller assigns finding IDs and records severity, affected plan IDs, evidence, impact, recommended fix, and disposition.
 

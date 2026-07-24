@@ -52,6 +52,13 @@ class StructureTests(unittest.TestCase):
         for key in ("skills",):
             self.assertTrue((ROOT / manifest[key]).exists(), key)
 
+    def test_public_github_urls_point_to_live_repository(self) -> None:
+        expected = "https://github.com/Optim-Agent/optim-plans"
+        for relative in ("README.md", ".codex-plugin/plugin.json", ".claude-plugin/plugin.json"):
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn(expected, text, relative)
+            self.assertNotIn("github.com/", text.replace(expected, ""), relative)
+
     def test_documented_scope_matches_execution_lifecycle(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         implemented = readme.split("Implemented:", 1)[1].split("Not implemented yet:", 1)[0]

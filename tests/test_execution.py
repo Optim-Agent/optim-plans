@@ -146,6 +146,64 @@ class ExecutionTests(unittest.TestCase):
                 ],
             )
 
+    def test_claude_executor_argv_allows_empty_setting_sources_argument(self) -> None:
+        from scripts.agent_adapters import AgentInfo, build_claude_command
+        from scripts.optim_plans_core import OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            argv_log = raw_path / "claude-argv.json"
+            fake_claude = self._worker(
+                raw_path / "claude",
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                f"Path({str(argv_log)!r}).write_text(json.dumps(sys.argv), encoding='utf-8')\n"
+                "Path('src').mkdir(exist_ok=True)\n"
+                "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
+                "Path(os.environ['OPTIM_PLANS_RESULT_PATH']).write_text(json.dumps({\n"
+                "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
+                "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
+                "    'status': 'verified',\n"
+                "    'evidence': 'claude worker accepted empty setting sources',\n"
+                "}), encoding='utf-8')\n",
+            )
+            state = OptimPlansState.initialize(repo, topic="Claude Empty Argv", plan_hash="abc123")
+            run_worktree = state.root / "run-worktrees" / state.run_id
+            command = build_claude_command(
+                AgentInfo("claude", True, "2.1.211", str(fake_claude)),
+                role="executor",
+                cwd=run_worktree,
+                settings=state.run_dir / "settings.json",
+                plugin_dir=state.run_dir / "plugin",
+                allowed_tools=["Write"],
+            )
+            state.persist_execution_manifest(
+                {
+                    "plan_hash": "abc123",
+                    "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                    "integration_destination": "main",
+                    "run_worktree_path": str(run_worktree),
+                    "worker": {"adapter": "claude", "argv": command.argv, "env": {}},
+                    "verification_argv": [
+                        sys.executable,
+                        "-c",
+                        "from pathlib import Path; assert Path('src/app.txt').read_text() == 'ok\\n'",
+                    ],
+                    "verification_timeout_seconds": 5,
+                    "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
+                }
+            )
+            question = state.request_execution_approval()
+            state.record_answer(question["nonce"], "approve")
+            state.start_execution(question["nonce"])
+
+            checkpoint = state.run_item("TASK-001")
+
+            self.assertEqual(git(run_worktree, "rev-parse", "--verify", "HEAD"), checkpoint["commit"])
+            argv = json.loads(argv_log.read_text(encoding="utf-8"))
+            self.assertEqual(argv[argv.index("--setting-sources") + 1], "")
+
     def test_worker_self_attestation_does_not_skip_manifest_verification(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             raw_path = Path(raw)

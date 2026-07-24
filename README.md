@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/chaseai-yt/optim-plans/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/chaseai-yt/optim-plans/actions/workflows/ci.yml/badge.svg" /></a>
+  <a href="https://github.com/Optim-Agent/optim-plans/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Optim-Agent/optim-plans/actions/workflows/ci.yml/badge.svg" /></a>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg?style=square" /></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-blue?style=square" />
   <img alt="Status" src="https://img.shields.io/badge/status-active-brightgreen?style=square" />

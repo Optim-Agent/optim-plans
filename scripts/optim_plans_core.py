@@ -506,8 +506,8 @@ def run_process_group(
     env: dict[str, str],
     timeout_seconds: float | None,
 ) -> ProcessResult:
-    if not argv or not all(isinstance(part, str) and part for part in argv):
-        raise ContractError("subprocess argv must be a non-empty list of strings")
+    if not argv or not all(isinstance(part, str) for part in argv) or not argv[0]:
+        raise ContractError("subprocess argv must have a non-empty executable and string arguments")
     if timeout_seconds is not None and timeout_seconds <= 0:
         raise ContractError("timeout_seconds must be positive")
     try:
@@ -1057,8 +1057,8 @@ class OptimPlansState:
         env = raw.get("env", {})
         if adapter not in ADAPTER_NAMES:
             raise ContractError("worker adapter must be claude or codex")
-        if not isinstance(argv, list) or not argv or not all(isinstance(part, str) and part for part in argv):
-            raise ContractError("worker adapter argv must be a non-empty argv array")
+        if not isinstance(argv, list) or not argv or not all(isinstance(part, str) for part in argv) or not argv[0]:
+            raise ContractError("worker adapter argv must have a non-empty executable and string arguments")
         if Path(argv[0]).name != adapter:
             raise ContractError("worker adapter argv executable does not match adapter")
         if adapter == "codex" and "exec" not in argv[1:]:
