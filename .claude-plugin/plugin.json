@@ -1,0 +1,17 @@
+{
+  "name": "optim-plans",
+  "version": "0.1.0",
+  "description": "Human-in-the-loop planning, refinement, and verified execution controller.",
+  "author": {
+    "name": "optim-plans contributors"
+  },
+  "homepage": "https://github.com/Optim-Agent/optim-plans",
+  "repository": "https://github.com/Optim-Agent/optim-plans",
+  "license": "MIT",
+  "keywords": [
+    "planning",
+    "codex",
+    "claude",
+    "human-in-the-loop"
+  ]
+}

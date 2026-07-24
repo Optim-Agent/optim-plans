@@ -1,0 +1,33 @@
+{
+  "name": "optim-plans",
+  "version": "0.1.0",
+  "description": "Human-in-the-loop planning, refinement, and verified execution controller.",
+  "author": {
+    "name": "optim-plans contributors"
+  },
+  "repository": "https://github.com/chaseai-yt/optim-plans",
+  "license": "MIT",
+  "keywords": [
+    "planning",
+    "codex",
+    "claude",
+    "human-in-the-loop"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Optim Plans",
+    "shortDescription": "Human-in-the-loop planning loop",
+    "longDescription": "Optim Plans turns a rough idea into a traceable plan, refines it with reviewer or criticizer passes, and gates execution behind durable evidence.",
+    "developerName": "optim-plans contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write",
+      "Review"
+    ],
+    "brandColor": "#2563EB",
+    "defaultPrompt": [
+      "Use $optim-plans to turn this idea into a reviewed plan."
+    ]
+  }
+}

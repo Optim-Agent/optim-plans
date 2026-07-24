@@ -1,0 +1,4 @@
+interface:
+  display_name: "Optim Plans"
+  short_description: "Human-in-the-loop planning loop"
+  default_prompt: "Use $optim-plans to turn this idea into a reviewed plan before execution."

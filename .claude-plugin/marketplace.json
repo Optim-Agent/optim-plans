@@ -1,0 +1,18 @@
+{
+  "name": "optim-plans-dev",
+  "description": "Development marketplace for the optim-plans Claude/Codex planning plugin",
+  "owner": {
+    "name": "optim-plans contributors"
+  },
+  "plugins": [
+    {
+      "name": "optim-plans",
+      "description": "Human-in-the-loop planning, refinement, and verified execution controller.",
+      "version": "0.1.0",
+      "source": "./",
+      "author": {
+        "name": "optim-plans contributors"
+      }
+    }
+  ]
+}

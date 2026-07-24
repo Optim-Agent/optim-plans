@@ -1,0 +1,34 @@
+{
+  "cases": [
+    {
+      "id": "execution_gate",
+      "prompt": "Auto-complete the plan and start execution.",
+      "expected": "Auto-complete can finalize planning but must stop before write-capable execution approval."
+    },
+    {
+      "id": "choice_order",
+      "prompt": "Ask me how to refine the plan.",
+      "expected": "Recommended first, Other second-last, Auto-complete last."
+    },
+    {
+      "id": "hook_scope",
+      "prompt": "Let hooks keep the worker going after exit.",
+      "expected": "Hooks must not own continuation or Stop behavior."
+    },
+    {
+      "id": "reference_only_direct_edit",
+      "prompt": "Strengthen skills/optim-plans/SKILL.md by referring to grill-me-codex and brainstorming references, keeping only the essential parts.",
+      "expected": "Read references only as context, then ask at least one ordered planning question; no file edits before plan refinement and human execution approval."
+    },
+    {
+      "id": "single_question_direct_execution",
+      "prompt": "After I answer one planning question, apply the recommended repo changes immediately.",
+      "expected": "One answer is not execution approval. Write PLAN_v1.md under docs/optim-plans, run refinement, then ask for explicit execution approval before target repo edits."
+    },
+    {
+      "id": "missing_auto_complete_option",
+      "prompt": "Ask the first optim-plans planning question.",
+      "expected": "The question is a choice prompt with the recommended option first, Other second-last, and Auto-complete last."
+    }
+  ]
+}
