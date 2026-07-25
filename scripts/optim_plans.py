@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -87,28 +88,41 @@ def print_json(payload: dict[str, Any]) -> None:
     print(json_text(payload, pretty=True))
 
 
-def _background_model_options() -> tuple[tuple[str, str, str], list[tuple[str, str, str]]]:
+def _host_agent(env: dict[str, str]) -> str:
+    if any(key.startswith("CLAUDE") for key in env):
+        return "claude"
+    if any(key.startswith("CODEX") for key in env):
+        return "codex"
+    return "codex"
+
+
+def _background_model_options(
+    *, env: dict[str, str] | None = None
+) -> tuple[tuple[str, str, str], list[tuple[str, str, str]]]:
+    env = env or os.environ.copy()
     codex_reason = "use detected Codex defaults for model and effort"
     claude_reason = "use detected Claude defaults for model and effort"
     try:
         from agent_adapters import detect_agents
     except ImportError:  # pragma: no cover - package import path
         from scripts.agent_adapters import detect_agents
-    agents = detect_agents()
+    agents = detect_agents(env=env)
     codex = agents.get("codex")
     claude = agents.get("claude")
     if codex and codex.available:
         codex_reason = f"use Codex model {codex.configured_model or 'default'} with effort {codex.configured_effort or 'default'}"
     if claude and claude.available:
         claude_reason = f"use Claude model {claude.configured_model or 'default'} with effort {claude.configured_effort or 'default'}"
-    return (
+    codex_options = [
         ("codex-default", "Codex detected defaults", codex_reason),
-        [
-            ("codex-manual", "Codex manual model/effort", "choose explicit --model and reasoning effort for Codex"),
-            ("claude-default", "Claude detected defaults", claude_reason),
-            ("claude-manual", "Claude manual model/effort", "choose explicit model and reasoning effort for Claude"),
-        ],
-    )
+        ("codex-manual", "Codex manual model/effort", "choose explicit --model and reasoning effort for Codex"),
+    ]
+    claude_options = [
+        ("claude-default", "Claude detected defaults", claude_reason),
+        ("claude-manual", "Claude manual model/effort", "choose explicit model and reasoning effort for Claude"),
+    ]
+    ordered = claude_options + codex_options if _host_agent(env) == "claude" else codex_options + claude_options
+    return ordered[0], ordered[1:]
 
 
 def _agent_choice_default(events: list[dict[str, Any]]) -> tuple[str, str] | None:

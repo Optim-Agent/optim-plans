@@ -67,6 +67,41 @@ class AgentAdapterTests(unittest.TestCase):
             )
             self.assertEqual(execute.env["CODEX_HOME"], str(config_home))
 
+    def test_codex_executor_follows_current_config_home(self) -> None:
+        from scripts.agent_adapters import AgentInfo, build_codex_command
+
+        with tempfile.TemporaryDirectory() as raw:
+            current_home = Path(raw) / "current-codex-home"
+            isolated_home = Path(raw) / "isolated-codex-home"
+            info = AgentInfo("codex", True, "0.144.4", None)
+
+            current = build_codex_command(
+                info,
+                role="executor",
+                cwd=Path("/tmp/repo"),
+                config_home=current_home,
+                env={"CODEX_HOME": str(current_home)},
+            )
+            self.assertNotIn("--ignore-user-config", current.argv)
+
+            default_home = build_codex_command(
+                info,
+                role="executor",
+                cwd=Path("/tmp/repo"),
+                config_home=Path.home() / ".codex",
+                env={},
+            )
+            self.assertNotIn("--ignore-user-config", default_home.argv)
+
+            isolated = build_codex_command(
+                info,
+                role="executor",
+                cwd=Path("/tmp/repo"),
+                config_home=isolated_home,
+                env={"CODEX_HOME": str(current_home)},
+            )
+            self.assertIn("--ignore-user-config", isolated.argv)
+
     def test_claude_commands_include_schema_and_executor_isolation(self) -> None:
         from scripts.agent_adapters import AgentInfo, build_claude_command
 

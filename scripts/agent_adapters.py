@@ -68,6 +68,15 @@ def _codex_defaults(path: str, env: dict[str, str]) -> tuple[str | None, str | N
     )
 
 
+def _codex_home(env: dict[str, str]) -> Path:
+    raw = env.get("CODEX_HOME")
+    return Path(raw).expanduser() if raw else Path.home() / ".codex"
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return left.expanduser().resolve(strict=False) == right.expanduser().resolve(strict=False)
+
+
 def detect_agents(*, env: dict[str, str] | None = None) -> dict[str, AgentInfo]:
     env = env or os.environ.copy()
     found: dict[str, AgentInfo] = {}
@@ -90,20 +99,25 @@ def build_codex_command(
     role: str,
     cwd: Path,
     config_home: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> AgentCommand:
     if not info.available:
         raise ValueError("codex is unavailable")
     if role == "executor" and config_home is None:
         raise ValueError("executor requires isolated CODEX_HOME")
+    command_env = os.environ.copy()
+    if env is not None:
+        command_env.update(env)
     executable = info.path or "codex"
     sandbox = "read-only" if role in {"reviewer", "criticizer", "verifier"} else "workspace-write"
+    ignore_config = config_home is not None and not _same_path(config_home, _codex_home(command_env))
     argv = [
         executable,
         "exec",
         "-s",
         sandbox,
         "--ephemeral",
-        *([] if config_home is None else ["--ignore-user-config"]),
+        *([] if not ignore_config else ["--ignore-user-config"]),
         "--ignore-rules",
         "-C",
         str(cwd),
@@ -112,10 +126,9 @@ def build_codex_command(
         argv.extend(["--model", info.configured_model])
     if info.configured_effort:
         argv.extend(["--reasoning-effort", info.configured_effort])
-    env = os.environ.copy()
     if config_home is not None:
-        env["CODEX_HOME"] = str(config_home)
-    return AgentCommand(argv, env)
+        command_env["CODEX_HOME"] = str(config_home)
+    return AgentCommand(argv, command_env)
 
 
 def build_claude_command(

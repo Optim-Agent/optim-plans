@@ -244,6 +244,23 @@ class E2ETests(unittest.TestCase):
             self.assertIn("model", q["options"][0]["reason"])
             self.assertIn("effort", q["options"][1]["reason"])
 
+    def test_background_model_stage_defaults_to_same_platform_worker(self) -> None:
+        from scripts.optim_plans import _background_model_options
+
+        recommended, alternatives = _background_model_options(env={"PATH": "", "CLAUDE_PLUGIN_ROOT": "/tmp/plugin"})
+        self.assertEqual(recommended[0], "claude-default")
+        self.assertEqual(
+            [recommended[0], *(option[0] for option in alternatives)],
+            ["claude-default", "claude-manual", "codex-default", "codex-manual"],
+        )
+
+        recommended, alternatives = _background_model_options(env={"PATH": ""})
+        self.assertEqual(recommended[0], "codex-default")
+        self.assertEqual(
+            [recommended[0], *(option[0] for option in alternatives)],
+            ["codex-default", "codex-manual", "claude-default", "claude-manual"],
+        )
+
     def test_cli_ask_mini_plan_recommends_execution_skip_option(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
