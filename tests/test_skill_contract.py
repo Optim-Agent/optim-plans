@@ -181,7 +181,7 @@ class SkillContractTests(unittest.TestCase):
             "controller runs the verification argv",
             "path allowlists",
             "protected Git metadata",
-            "explicit retry approval",
+            "explicit retry approval for later retries",
             "repository-integrity detection and integration gating",
             "not host confinement",
             "defense in depth",

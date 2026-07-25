@@ -68,7 +68,7 @@ class StructureTests(unittest.TestCase):
             "serial item execution with checkpoint commits",
             "adapter-only argv launch with `shell=False`",
             "controller verification and Git audits",
-            "explicit retry approval",
+            "explicit retry approval for later retries",
             "automatic non-destructive `run_finished` / `kept`",
             "manual recovery `finish-run` outcomes",
         ):

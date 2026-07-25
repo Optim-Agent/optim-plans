@@ -1690,7 +1690,7 @@ class OptimPlansState:
                 failed_base_commit=failure["base_commit"],
             )
 
-    def restore_retry(self, item_id: str, approval_nonce: str) -> dict[str, Any]:
+    def restore_retry(self, item_id: str, approval_nonce: str | None) -> dict[str, Any]:
         with self.controller_lock():
             replayed = self.replay()
             self._require_lifecycle_locked(replayed.events, {"awaiting_retry_decision"}, "retry-item")
@@ -1701,25 +1701,32 @@ class OptimPlansState:
             failure = self._latest_failure(replayed.events, item_id)
             question: dict[str, Any] | None = None
             answer: dict[str, Any] | None = None
-            for event in replayed.events:
-                payload = event.get("payload", {})
-                if (
-                    event["type"] == "pending_question"
-                    and payload.get("stage") == "execution_retry"
-                    and payload.get("nonce") == approval_nonce
-                    and payload.get("item_id") == item_id
-                ):
-                    question = payload
-                if event["type"] == "answer_recorded" and payload.get("nonce") == approval_nonce:
-                    answer = payload
-                if event["type"] == "retry_restored" and payload.get("approval_nonce") == approval_nonce:
-                    raise ContractError("retry approval nonce is stale or already used")
-            if question is None:
-                raise ContractError("unknown retry approval nonce")
-            if question.get("failed_base_commit") != failure["base_commit"]:
-                raise ContractError("retry approval is not bound to the failed attempt")
-            if answer is None or answer.get("choice") != "approve":
-                raise ContractError("retry restore has not been approved")
+            auto_approved = approval_nonce is None and not any(
+                event["type"] == "retry_restored" and event.get("payload", {}).get("item_id") == item_id
+                for event in replayed.events
+            )
+            if not auto_approved:
+                if approval_nonce is None:
+                    raise ContractError("retry approval is required after the first retry")
+                for event in replayed.events:
+                    payload = event.get("payload", {})
+                    if (
+                        event["type"] == "pending_question"
+                        and payload.get("stage") == "execution_retry"
+                        and payload.get("nonce") == approval_nonce
+                        and payload.get("item_id") == item_id
+                    ):
+                        question = payload
+                    if event["type"] == "answer_recorded" and payload.get("nonce") == approval_nonce:
+                        answer = payload
+                    if event["type"] == "retry_restored" and payload.get("approval_nonce") == approval_nonce:
+                        raise ContractError("retry approval nonce is stale or already used")
+                if question is None:
+                    raise ContractError("unknown retry approval nonce")
+                if question.get("failed_base_commit") != failure["base_commit"]:
+                    raise ContractError("retry approval is not bound to the failed attempt")
+                if answer is None or answer.get("choice") != "approve":
+                    raise ContractError("retry restore has not been approved")
             run_worktree = self._require_run_worktree(
                 started,
                 expected_head=failure["base_commit"],
@@ -1732,12 +1739,13 @@ class OptimPlansState:
             payload = {
                 "item_id": item_id,
                 "approval_nonce": approval_nonce,
+                "auto_approved": auto_approved,
                 "restored_to": failure["base_commit"],
                 "run_worktree": str(run_worktree),
             }
             return self._append_event_locked("retry_restored", payload)["payload"]
 
-    def retry_item(self, item_id: str, approval_nonce: str) -> dict[str, Any]:
+    def retry_item(self, item_id: str, approval_nonce: str | None) -> dict[str, Any]:
         self.restore_retry(item_id, approval_nonce)
         return self.run_item(item_id)
 

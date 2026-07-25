@@ -81,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     retry = sub.add_parser("retry-item")
     retry.add_argument("--repo", required=True)
     retry.add_argument("--item-id", required=True)
-    retry.add_argument("--approval-nonce", required=True)
+    retry.add_argument("--approval-nonce")
 
     finish = sub.add_parser("finish-run")
     finish.add_argument("--repo", required=True)

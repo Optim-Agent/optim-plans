@@ -337,7 +337,7 @@ The implemented guardrails include:
 - serial item execution with checkpoint commits in stable DAG order;
 - adapter-only argv launch with `shell=False` after adapter CLI smoke;
 - controller verification and Git audits for path allowlists and protected Git metadata;
-- `awaiting_retry_decision` with bounded evidence and explicit retry approval before restoration;
+- `awaiting_retry_decision` with bounded evidence, automatic first retry restore, and explicit retry approval for later retries;
 - automatic non-destructive `run_finished` / `kept` after every item and final audit pass;
 - manual recovery `finish-run` outcomes: `integrated`, `pr-opened`, `kept`, `discarded`, `failed`, and `aborted`;
 - path-scope rejection and delta audits for symlinks, gitlinks, nested repos, ignored files, untracked files, staged files, and tracked changes;
@@ -404,9 +404,9 @@ Implemented:
 - serial item execution with checkpoint commits;
 - adapter-only argv launch with `shell=False`, using worker stdout for the result JSON envelope;
 - controller verification and Git audits for path allowlists and protected Git metadata;
-- explicit retry approval;
+- automatic first retry restore and explicit retry approval for later retries;
 - automatic non-destructive `run_finished` / `kept` after clean final audits;
-- manual evidence-backed `finish-run` outcomes;
+- manual recovery `finish-run` outcomes with evidence;
 - hook guard dispatcher and configs;
 - CI and tests.
 

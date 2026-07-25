@@ -1027,12 +1027,21 @@ class ExecutionTests(unittest.TestCase):
             with self.assertRaises(ContractError):
                 state.restore_retry("TASK-001", "missing")
 
+            restored = state.restore_retry("TASK-001", None)
+            self.assertTrue(restored["auto_approved"])
+            self.assertFalse(dirty.exists())
+
+            state.begin_item("TASK-001")
+            (run_worktree / "src").mkdir(exist_ok=True)
+            dirty.write_text("second bad attempt\n", encoding="utf-8")
+            state.record_worker_failure("TASK-001", evidence="worker failed again")
+            with self.assertRaises(ContractError):
+                state.restore_retry("TASK-001", None)
+
             retry = state.request_retry("TASK-001")
             state.record_answer(retry["nonce"], "approve")
             state.restore_retry("TASK-001", retry["nonce"])
             self.assertFalse(dirty.exists())
-            with self.assertRaises(ContractError):
-                state.restore_retry("TASK-001", retry["nonce"])
 
             state.begin_item("TASK-001")
             (run_worktree / "src").mkdir(exist_ok=True)

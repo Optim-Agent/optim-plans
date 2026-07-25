@@ -10,6 +10,8 @@ first, ISO dates, and grouped change types.
 
 ### Changed
 
+- First failed execution retry now restores automatically; approval is only
+  required if that retry fails again.
 - Planning agent and same-platform worker preferences are now reused from the
   repository's Git common directory, with pre-manifest worker configuration.
 - Codex read-only worker commands now load normal user configuration instead of

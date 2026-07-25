@@ -120,7 +120,7 @@ When native cards are available, render the controller's pending question as car
 - Execution requires a clean committed Git base and explicit manifest-bound human launch approval.
 - Worker adapter manifests include same-agent CLI smoke argv before immutable recording, then run only through adapter argv with `shell=False` in one controller-owned run worktree and branch.
 - Controller verification, path audits, and protected Git metadata audits are authoritative; worker prose is evidence only.
-- Verified items become checkpoint commits in serial DAG order. Failed attempts require explicit retry approval before restoration.
+- Verified items become checkpoint commits in serial DAG order. The first retry restores automatically; later failed attempts require explicit retry approval before restoration.
 - All verified items plus final audits automatically record a non-destructive `kept` terminal outcome; `finish-run` remains a manual recovery command.
 - The trust boundary is repository-integrity detection and integration gating, not host confinement.
 - Hooks only inject context and deny unsafe tool calls; they are defense in depth and the controller owns continuation.
