@@ -111,6 +111,22 @@ def _background_model_options() -> tuple[tuple[str, str, str], list[tuple[str, s
     )
 
 
+def _agent_choice_default(events: list[dict[str, Any]]) -> tuple[str, str] | None:
+    questions: dict[str, dict[str, Any]] = {}
+    for event in events:
+        payload = event.get("payload", {})
+        if event["type"] == "pending_question" and payload.get("stage") == "agent-choice":
+            questions[payload["nonce"]] = payload
+        elif event["type"] == "answer_recorded" and payload.get("nonce") in questions:
+            source_nonce = payload["nonce"]
+            choice = payload.get("choice")
+            if choice == "auto":
+                choice = questions[source_nonce].get("recommended_option_id")
+            if choice in {"background", "foreground"}:
+                return source_nonce, choice
+    return None
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     state = OptimPlansState.initialize(Path(args.repo), topic=args.topic, plan_hash=sha256_text(args.topic))
     state.append_event("initialized", {"topic": args.topic})
@@ -158,8 +174,22 @@ def cmd_ask(args: argparse.Namespace) -> None:
     expected_seq = len(state.replay().events) + 1
     payload = question.to_json(expected_seq=expected_seq)
     payload["plan_level"] = level.to_json()
-    state.append_event("pending_question", payload)
-    print_json(payload)
+    if args.stage != "default":
+        payload["stage"] = args.stage
+    default = _agent_choice_default(state.replay().events) if args.stage == "agent-choice" else None
+    if default:
+        source_nonce, choice = default
+        with state.controller_lock():
+            state._append_event_locked("pending_question", payload)
+            state._append_event_locked(
+                "agent_choice_default_applied",
+                {"defaulted_nonce": payload["nonce"], "source_nonce": source_nonce, "choice": choice},
+            )
+            answer = state._append_event_locked("answer_recorded", {"nonce": payload["nonce"], "choice": choice})
+        print_json(answer["payload"])
+    else:
+        state.append_event("pending_question", payload)
+        print_json(payload)
 
 
 def cmd_answer(args: argparse.Namespace) -> None:

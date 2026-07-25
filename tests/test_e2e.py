@@ -7,11 +7,35 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from helpers import git, make_executable, make_repo
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def controller_json(*args: str) -> dict[str, Any]:
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/optim_plans.py"), *args],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def init_controller(repo: Path, topic: str) -> None:
+    controller_json("init", "--repo", str(repo), "--topic", topic)
+
+
+def ask_agent_choice(repo: Path, prompt: str = "Choose agent") -> dict[str, Any]:
+    return controller_json("ask", "--repo", str(repo), "--prompt", prompt, "--stage", "agent-choice")
+
+
+def answer_choice(repo: Path, nonce: str, choice: str) -> dict[str, Any]:
+    return controller_json("answer", "--repo", str(repo), "--nonce", nonce, "--choice", choice)
 
 
 class E2ETests(unittest.TestCase):
@@ -118,35 +142,72 @@ class E2ETests(unittest.TestCase):
     def test_cli_ask_agent_choice_stage_offers_background_path(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
-            subprocess.run(
-                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "Agent Choice"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            question = subprocess.run(
-                [
-                    sys.executable,
-                    str(ROOT / "scripts/optim_plans.py"),
-                    "ask",
-                    "--repo",
-                    str(repo),
-                    "--prompt",
-                    "Choose agent",
-                    "--stage",
-                    "agent-choice",
-                ],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            q = json.loads(question.stdout)
+            init_controller(repo, "Agent Choice")
+            q = ask_agent_choice(repo)
             self.assertEqual(q["recommended_option_id"], "background")
             self.assertEqual([option["id"] for option in q["options"]], ["background", "foreground", "other", "auto"])
+            self.assertEqual(q["stage"], "agent-choice")
             self.assertEqual(q["options"][0]["label"], "Delegated foreground run")
             self.assertIn("standalone sub-agent", q["options"][0]["reason"])
+
+    def test_cli_ask_agent_choice_defaults_from_first_background_or_foreground_answer(self) -> None:
+        for choice in ("background", "foreground"):
+            with self.subTest(choice=choice), tempfile.TemporaryDirectory() as raw:
+                repo = make_repo(Path(raw))
+                init_controller(repo, f"Agent Choice {choice}")
+                q1 = ask_agent_choice(repo)
+                answer_choice(repo, q1["nonce"], choice)
+                q2 = ask_agent_choice(repo, "Choose agent again")
+
+                self.assertEqual(q2["choice"], choice)
+                self.assertNotIn("options", q2)
+                self.assertNotEqual(q2["nonce"], q1["nonce"])
+
+    def test_cli_ask_agent_choice_auto_defaults_to_recommended_background(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Agent Choice Auto")
+            q1 = ask_agent_choice(repo)
+            answer_choice(repo, q1["nonce"], "auto")
+
+            self.assertEqual(ask_agent_choice(repo, "Choose agent again")["choice"], "background")
+
+    def test_cli_ask_agent_choice_other_does_not_default_next_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Agent Choice Other")
+            q1 = ask_agent_choice(repo)
+            answer_choice(repo, q1["nonce"], "other")
+            q2 = ask_agent_choice(repo, "Choose agent again")
+
+            self.assertEqual(q2["recommended_option_id"], "background")
+            self.assertEqual([option["id"] for option in q2["options"]], ["background", "foreground", "other", "auto"])
+            self.assertEqual(q2["stage"], "agent-choice")
+
+    def test_cli_ask_agent_choice_default_records_source_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Agent Choice Metadata")
+            q1 = ask_agent_choice(repo)
+            answer_choice(repo, q1["nonce"], "background")
+            q2 = ask_agent_choice(repo, "Choose agent again")
+
+            from scripts.optim_plans_core import OptimPlansState
+
+            events = OptimPlansState.load_active(repo).replay().events
+            default_events = [event for event in events if event["type"] == "agent_choice_default_applied"]
+            self.assertEqual(len(default_events), 1)
+            self.assertEqual(
+                default_events[0]["payload"],
+                {"defaulted_nonce": q2["nonce"], "source_nonce": q1["nonce"], "choice": "background"},
+            )
+            self.assertTrue(
+                any(
+                    event["type"] == "answer_recorded"
+                    and event["payload"] == {"nonce": q2["nonce"], "choice": "background"}
+                    for event in events
+                )
+            )
 
     def test_cli_ask_background_model_stage_offers_model_effort_choices(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

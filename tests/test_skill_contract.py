@@ -42,6 +42,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("delegated foreground run first", text)
         self.assertIn("recommend `Delegated foreground run` first", refinement)
         self.assertIn("Auto-complete uses a standalone visible run", refinement)
+        self.assertIn("first foreground or delegated-foreground answer becomes the active-run default", refinement)
 
     def test_criticizer_questions_gate_plan_revision(self) -> None:
         text = (ROOT / "skills/optim-plans/references/refinement.md").read_text(encoding="utf-8")
