@@ -86,6 +86,7 @@ class AgentAdapterTests(unittest.TestCase):
             self.assertIn("--plugin-dir", execute.argv)
             self.assertIn("--allowedTools", execute.argv)
             self.assertIn("--settings", execute.argv)
+            self.assertNotIn("--setting-sources", execute.argv)
             self.assertEqual(
                 json.loads(execute.argv[execute.argv.index("--mcp-config") + 1]),
                 {"mcpServers": {}},

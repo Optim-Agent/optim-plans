@@ -170,8 +170,6 @@ def build_claude_command(
             agents,
             "--agent",
             agent_name,
-            "--setting-sources",
-            "",
             "--settings",
             str(settings),
             "--strict-mcp-config",
