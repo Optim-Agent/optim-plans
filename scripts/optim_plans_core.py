@@ -356,6 +356,10 @@ def _status_entries(repo: Path) -> list[tuple[str, str]]:
     return entries
 
 
+def _is_allowed_ignored_audit_noise(path: str) -> bool:
+    return path.endswith(".pyc")
+
+
 def _diff_paths(repo: Path, base_commit: str, head_commit: str) -> list[str]:
     result = subprocess.run(
         ["git", "diff", "--name-only", "-z", base_commit, head_commit],
@@ -436,6 +440,8 @@ def audit_git_delta(
     paths: dict[str, str] = {}
     for status_code, path in _status_entries(repo):
         if status_code == "!!":
+            if _is_allowed_ignored_audit_noise(path):
+                continue
             raise ContractError(f"ignored change is not allowed: {path}")
         paths[path] = "status"
     if base_commit is not None:
@@ -1077,7 +1083,10 @@ class OptimPlansState:
                 raise ContractError("run worktree is no longer on the controller-owned branch")
             if git(run_worktree, "rev-parse", "--verify", "HEAD") != expected_head:
                 raise ContractError("run worktree HEAD is not the latest controller checkpoint")
-            if clean and _status_entries(run_worktree):
+            if clean and any(
+                status_code != "!!" or not _is_allowed_ignored_audit_noise(path)
+                for status_code, path in _status_entries(run_worktree)
+            ):
                 raise ContractError("run worktree is not clean at the latest controller checkpoint")
         except (subprocess.CalledProcessError, OSError) as exc:
             raise ContractError("run worktree ownership validation failed") from exc
