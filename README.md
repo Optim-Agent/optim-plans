@@ -11,6 +11,7 @@
   <img alt="Status" src="https://img.shields.io/badge/status-active-brightgreen?style=square" />
   <a href="https://code.claude.com/docs/en/skills"><img alt="Claude Skill" src="https://img.shields.io/badge/Claude-Skill-D97757?logo=claude&logoColor=white&style=square"></a>
   <a href="https://developers.openai.com/codex/skills"><img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-blue?logo=openai&logoColor=white&style=square"></a>
+  <img alt="Repo views" src="https://hits.sh/github.com/Optim-Agent/optim-plans.svg?label=repo%20views" />
 </p>
 
 <details>
@@ -73,13 +74,30 @@ AI:  Recorded the answer.
      keyboard controls, visual polish, and verification screenshots.
      Pick who should refine the plan:
 
-     1. Current foreground session — continue reviewing or questioning here
-     2. Reviewer — fresh read-only reviewer session
-     3. Criticizer — fresh read-only criticizer session
-     4. Other
-     5. Auto-complete
+     1. Reviewer — fresh read-only reviewer session
+     2. Criticizer — fresh read-only criticizer session
+     3. Jump to executor — skip refinement and launch from this plan
+     4. Auto-complete
 
-You: 3
+You: 2
+
+AI:  Choose refinement agent:
+
+     1. Delegated foreground run — choose a standalone sub-agent with visible output
+     2. Current foreground session — continue reviewing, questioning, or criticizing in this session
+     3. Other
+     4. Auto-complete
+
+You: 1
+
+AI:  Choose model and effort:
+
+     1. Codex detected defaults — use Codex model default with effort default
+     2. Codex manual model/effort — choose explicit --model and reasoning effort for Codex
+     3. Other
+     4. Auto-complete
+
+You: 1
 
 AI:  Criticizer asks: the calm puzzle goal conflicts with falling-star pressure.
      Should failed catches be harmless, score-limiting, or level-ending?
@@ -168,7 +186,7 @@ Normal `$optim-plans` and `/optim-plans` calls auto-select the smallest planning
 
 | Level | Questions | Best for | What optim-plans does |
 |---|---:|---|---|
-| `mini-plan` | 1 | Tiny, low-risk repo edits where one alignment check is enough. | Asks one focused question, writes a compact plan, and can offer `skip-refinement-execute` as the explicit launch choice. |
+| `mini-plan` | 1 | Tiny, low-risk repo edits where one alignment check is enough. | Asks one focused question, writes a compact plan, then offers the same `Reviewer` / `Criticizer` / `Jump to executor` choice. |
 | `small-plan` | 1-3 | Small docs, policy, or workflow changes that still need intent checked. | Resolves a few choices, writes `PLAN_v1.md`, then requires exactly one reviewer or criticizer pass before execution approval. |
 | `plan` | 1-5 | Normal multi-decision project or repository changes. | Runs bounded planning and up to three high-priority refinement rounds with a 600 second reviewer/criticizer timeout. |
 | `big-plan` | 5-10 | Broad features with research needs, shared-state risk, or unclear architecture. | Requires websearch during brainstorming and allows up to five high-priority refinement rounds with an 1800 second timeout. |
@@ -283,7 +301,7 @@ python3 scripts/optim_plans.py finish-run --repo <repo> --outcome kept --approva
 Agentic coding works best when the plan is durable, reviewable, and tied to verification. Chat-only planning breaks down when the context window moves, when an agent resumes later, or when a write-capable worker needs exact boundaries.
 
 - **Human-in-the-loop by default** — questions are explicit, ordered, and nonce-bound.
-- **Auto-complete with a hard stop** — recommended planning choices can proceed automatically, but execution approval cannot.
+- **Auto-complete with a hard stop** — recommended planning choices can proceed automatically, but only an explicit `Jump to executor` answer can approve execution.
 - **Markdown for people, events for machines** — artifacts explain decisions; `events.jsonl` drives recovery.
 - **Reviewer or criticizer loop** — reviewer mode audits the plan; criticizer mode challenges it with bounded follow-up questions.
 - **Hooks are defense in depth** — they inject context and deny unsafe tool calls, but controller audits decide verification and integration.

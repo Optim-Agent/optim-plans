@@ -47,6 +47,15 @@ class ContractError(RuntimeError):
     """A user-actionable optim-plans contract violation."""
 
 
+def host_agent(env: dict[str, str] | None = None) -> str:
+    env = env or os.environ
+    if any(key.startswith("CLAUDE") for key in env):
+        return "claude"
+    if any(key.startswith("CODEX") for key in env):
+        return "codex"
+    return "codex"
+
+
 def _reject_constant(value: str) -> None:
     raise ContractError(f"non-finite JSON number {value!r} is not allowed")
 
@@ -861,6 +870,27 @@ class OptimPlansState:
         }
         return self._append_event_locked("pending_question", payload)["payload"]
 
+    def _direct_execution_source_nonce(self, events: list[dict[str, Any]]) -> str | None:
+        answers = {
+            event.get("payload", {}).get("nonce"): event.get("payload", {}).get("choice")
+            for event in events
+            if event["type"] == "answer_recorded"
+        }
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if event["type"] != "pending_question" or answers.get(payload.get("nonce")) != "skip-refinement-execute":
+                continue
+            if any(option.get("id") == "skip-refinement-execute" for option in payload.get("options", [])):
+                return payload["nonce"]
+        return None
+
+    def _answer_choice(self, events: list[dict[str, Any]], nonce: str) -> str | None:
+        for event in events:
+            payload = event.get("payload", {})
+            if event["type"] == "answer_recorded" and payload.get("nonce") == nonce:
+                return payload.get("choice")
+        return None
+
     def request_finish_approval(self) -> dict[str, Any]:
         with self.controller_lock():
             replayed = self.replay()
@@ -887,6 +917,15 @@ class OptimPlansState:
                 question = existing[0]
                 if question.get("manifest") != record["manifest"] or question.get("manifest_hash") != record["manifest_hash"]:
                     raise ContractError("execution approval question is not bound to the manifest")
+                source_nonce = self._direct_execution_source_nonce(replayed.events)
+                if source_nonce and self._answer_choice(replayed.events, question["nonce"]) is None:
+                    self._append_event_locked(
+                        "answer_recorded",
+                        {"nonce": question["nonce"], "choice": "approve", "source_nonce": source_nonce},
+                    )
+                    question = dict(question)
+                    question["choice"] = "approve"
+                    question["approval_source_nonce"] = source_nonce
                 return question
 
             payload = {
@@ -904,7 +943,17 @@ class OptimPlansState:
                 "manifest": record["manifest"],
                 "manifest_hash": record["manifest_hash"],
             }
-            return self._append_event_locked("pending_question", payload)["payload"]
+            question = self._append_event_locked("pending_question", payload)["payload"]
+            source_nonce = self._direct_execution_source_nonce(replayed.events)
+            if source_nonce:
+                self._append_event_locked(
+                    "answer_recorded",
+                    {"nonce": question["nonce"], "choice": "approve", "source_nonce": source_nonce},
+                )
+                question = dict(question)
+                question["choice"] = "approve"
+                question["approval_source_nonce"] = source_nonce
+            return question
 
     def _manifest_source_base(self, manifest: dict[str, Any]) -> str:
         source_base = manifest.get("source_base", manifest.get("base_commit"))
@@ -1057,6 +1106,9 @@ class OptimPlansState:
         env = raw.get("env", {})
         if adapter not in ADAPTER_NAMES:
             raise ContractError("worker adapter must be claude or codex")
+        host = host_agent()
+        if adapter != host:
+            raise ContractError(f"cross-platform delegated worker is not allowed: {host} host cannot launch {adapter} worker")
         if not isinstance(argv, list) or not argv or not all(isinstance(part, str) for part in argv) or not argv[0]:
             raise ContractError("worker adapter argv must have a non-empty executable and string arguments")
         if Path(argv[0]).name != adapter:
@@ -2043,14 +2095,16 @@ class Question:
     options: list[Option]
 
     def to_json(self, *, expected_seq: int | None = None) -> dict[str, Any]:
-        return {
+        payload = {
             "nonce": self.nonce,
             "prompt": self.prompt,
             "options": [option.__dict__ for option in self.options],
             "recommended_option_id": self.options[0].id,
-            "free_form": {"option_id": "other", "required": False},
             "expected_seq": expected_seq,
         }
+        if any(option.id == "other" for option in self.options):
+            payload["free_form"] = {"option_id": "other", "required": False}
+        return payload
 
 
 class QuestionLedger:
@@ -2065,10 +2119,12 @@ class QuestionLedger:
         recommended: tuple[str, str, str],
         alternatives: list[tuple[str, str, str]] | None = None,
         allow_auto_complete: bool = True,
+        allow_other: bool = True,
     ) -> Question:
         options = [Option(*recommended)]
         options.extend(Option(*item) for item in (alternatives or []))
-        options.append(Option("other", "Other", "free-form answer"))
+        if allow_other:
+            options.append(Option("other", "Other", "free-form answer"))
         if allow_auto_complete:
             options.append(Option("auto", "Auto-complete", "use recommended answers until the next gate"))
         question = Question(uuid.uuid4().hex, prompt, options)

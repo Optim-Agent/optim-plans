@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
 import time
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from helpers import git, make_executable, make_repo
@@ -142,6 +144,42 @@ class ExecutionTests(unittest.TestCase):
                     "pending_question",
                 ],
             )
+
+    def test_codex_host_rejects_claude_worker_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            sentinel = raw_path / "launched"
+            worker = self._worker(
+                raw_path / "claude",
+                "from pathlib import Path\n"
+                f"Path({str(sentinel)!r}).write_text('launched', encoding='utf-8')\n"
+                "print('{}')\n",
+            )
+            from scripts.optim_plans_core import ContractError, OptimPlansState
+
+            state = OptimPlansState.initialize(repo, topic="Cross Platform", plan_hash="abc123")
+            state.persist_execution_manifest(
+                {
+                    "plan_hash": "abc123",
+                    "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                    "integration_destination": "main",
+                    "worker": {
+                        "adapter": "claude",
+                        "argv": [str(worker), "-p", "--json-schema", "{}"],
+                    },
+                    "verification_argv": [sys.executable, "-c", "pass"],
+                    "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
+                }
+            )
+            question = state.request_execution_approval()
+            state.record_answer(question["nonce"], "approve")
+            state.start_execution(question["nonce"])
+
+            with self.assertRaisesRegex(ContractError, "cross-platform delegated worker"):
+                with mock.patch.dict(os.environ, {"CODEX_PLUGIN_ROOT": "/tmp/codex"}, clear=True):
+                    state.run_item("TASK-001")
+            self.assertFalse(sentinel.exists())
 
     def test_worker_self_attestation_does_not_skip_manifest_verification(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

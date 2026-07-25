@@ -32,16 +32,21 @@ class SkillContractTests(unittest.TestCase):
 
     def test_every_user_facing_question_requires_auto_complete(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
-        self.assertIn("Every user-facing planning or refinement question must be a choice prompt", text)
-        self.assertIn("except the mini-plan `skip-refinement-execute` combined launch question", text)
+        self.assertIn("Every user-facing planning question must be a choice prompt", text)
+        self.assertIn("The refinement mode question is exactly `Reviewer`, `Criticizer`, `Jump to executor`, `Auto-complete`", text)
         self.assertIn("Asking a planning or refinement question without `Auto-complete` as the last option", text)
 
-    def test_refinement_agent_choice_recommends_delegated_foreground_run(self) -> None:
+    def test_refinement_choice_uses_mode_prompt_then_first_agent_choice(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
         refinement = (ROOT / "skills/optim-plans/references/refinement.md").read_text(encoding="utf-8")
-        self.assertIn("delegated foreground run first", text)
+        self.assertIn("recommend `Reviewer` first", text)
+        self.assertIn("`Criticizer` second", refinement)
+        self.assertIn("`Jump to executor` third", refinement)
+        self.assertIn("then ask for the detected agent and effort", refinement)
         self.assertIn("recommend `Delegated foreground run` first", refinement)
-        self.assertIn("Auto-complete uses a standalone visible run", refinement)
+        self.assertIn("same-platform delegated worker first", refinement)
+        self.assertIn("offer only that platform's default and manual options", refinement)
+        self.assertIn("Do not offer the opposite platform", refinement)
         self.assertIn("first foreground or delegated-foreground answer becomes the active-run default", refinement)
 
     def test_criticizer_questions_gate_plan_revision(self) -> None:
@@ -110,7 +115,7 @@ class SkillContractTests(unittest.TestCase):
         text = SKILL.read_text(encoding="utf-8")
         self.assertIn("only permitted writes are controller state and `docs/optim-plans/YYYY-MM-DD-topic/` artifacts", text)
         self.assertIn("before editing target files", text)
-        self.assertIn("Treating one answered planning question or ordinary refinement question as execution approval", text)
+        self.assertIn("Treating any answer except `skip-refinement-execute` as execution approval", text)
 
     def test_execution_approval_forbids_auto_complete_option(self) -> None:
         text = (ROOT / "skills/optim-plans/references/execution.md").read_text(encoding="utf-8")

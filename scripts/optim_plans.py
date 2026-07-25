@@ -14,6 +14,7 @@ try:
         ContractError,
         OptimPlansState,
         QuestionLedger,
+        host_agent,
         json_text,
         plan_level,
         sha256_text,
@@ -23,6 +24,7 @@ except ImportError:  # pragma: no cover - package import path
         ContractError,
         OptimPlansState,
         QuestionLedger,
+        host_agent,
         json_text,
         plan_level,
         sha256_text,
@@ -89,11 +91,7 @@ def print_json(payload: dict[str, Any]) -> None:
 
 
 def _host_agent(env: dict[str, str]) -> str:
-    if any(key.startswith("CLAUDE") for key in env):
-        return "claude"
-    if any(key.startswith("CODEX") for key in env):
-        return "codex"
-    return "codex"
+    return host_agent(env)
 
 
 def _background_model_options(
@@ -121,7 +119,7 @@ def _background_model_options(
         ("claude-default", "Claude detected defaults", claude_reason),
         ("claude-manual", "Claude manual model/effort", "choose explicit model and reasoning effort for Claude"),
     ]
-    ordered = claude_options + codex_options if _host_agent(env) == "claude" else codex_options + claude_options
+    ordered = claude_options if _host_agent(env) == "claude" else codex_options
     return ordered[0], ordered[1:]
 
 
@@ -158,6 +156,11 @@ def cmd_ask(args: argparse.Namespace) -> None:
     )
     reviewer = ("reviewer", "Reviewer", "fresh read-only reviewer session")
     criticizer = ("criticizer", "Criticizer", "fresh read-only criticizer session")
+    jump = (
+        "skip-refinement-execute",
+        "Jump to executor",
+        "skip refinement; use this choice as direct execution launch approval",
+    )
     if args.stage == "agent-choice":
         delegated = ("background", "Delegated foreground run", "choose a standalone sub-agent with visible output")
         question = ledger.ask(
@@ -168,22 +171,12 @@ def cmd_ask(args: argparse.Namespace) -> None:
     elif args.stage == "background-model":
         recommended, alternatives = _background_model_options()
         question = ledger.ask(args.prompt, recommended=recommended, alternatives=alternatives)
-    elif level.direct_execution_option:
-        question = ledger.ask(
-            args.prompt,
-            recommended=(
-                "skip-refinement-execute",
-                "Skip refinement and execute",
-                "skip optional refinement; this human choice is explicit execution launch approval",
-            ),
-            alternatives=[foreground, reviewer, criticizer],
-            allow_auto_complete=False,
-        )
     else:
         question = ledger.ask(
             args.prompt,
-            recommended=foreground,
-            alternatives=[reviewer, criticizer],
+            recommended=reviewer,
+            alternatives=[criticizer, jump],
+            allow_other=False,
         )
     expected_seq = len(state.replay().events) + 1
     payload = question.to_json(expected_seq=expected_seq)

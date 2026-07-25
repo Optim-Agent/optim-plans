@@ -10,7 +10,7 @@ Plan before execution. The bundled controller keeps durable state under the Git 
 This flow fixes two failure modes in order: grilling the user fixes building the *wrong thing*; adversarial reviewer/criticizer passes fix a plan that *sounds right but breaks*.
 
 <HARD-GATE>
-Do NOT write code, scaffold files, edit repo docs/config, or change target files until the plan has passed refinement and the human has explicitly approved the immutable execution manifest through the controller. Before execution approval, the only permitted writes are controller state and `docs/optim-plans/YYYY-MM-DD-topic/` artifacts. Auto-complete can answer planning questions; Auto-complete never approves execution, and execution approval questions must not offer `Auto-complete`. For mini-plan only, `skip-refinement-execute` is explicit execution approval when presented with the manifest-bound launch details and must not offer `Auto-complete`.
+Do NOT write code, scaffold files, edit repo docs/config, or change target files until the plan has passed refinement or the human selects `Jump to executor`, and the controller has recorded immutable execution-manifest approval. Before execution approval, the only permitted writes are controller state and `docs/optim-plans/YYYY-MM-DD-topic/` artifacts. Auto-complete can answer planning questions; Auto-complete never approves execution, and execution approval questions must not offer `Auto-complete`. The `Jump to executor` / `skip-refinement-execute` human choice is direct execution approval through the controller.
 </HARD-GATE>
 
 ## First Turn Contract
@@ -21,7 +21,7 @@ Treat the user's prompt as a planning target, not write authorization. After any
 
 Users may choose the planning depth in the prompt or via direct controller flags:
 
-- `mini-plan`: 1 planning question; zero or one refinement round. The refinement choice includes recommended `skip-refinement-execute` before `reviewer` and `criticizer`; that choice is explicit execution approval for the manifest-bound launch.
+- `mini-plan`: 1 planning question; zero or one refinement round. The refinement choice may jump directly to executor with `skip-refinement-execute`.
 - `small-plan`: 1 to 3 planning questions; exactly one refinement round.
 - `plan`: 1 to 5 planning questions; at most three refinement rounds, 600 seconds per reviewer/criticizer pass, and at most three high-priority comments or questions per round.
 - `big-plan`: 5 to 10 planning questions; websearch is required for brainstorming, with at most five refinement rounds, 1800 seconds per reviewer/criticizer pass, and at most five high-priority comments or questions per round.
@@ -30,6 +30,8 @@ Users may choose the planning depth in the prompt or via direct controller flags
 For `plan`, `big-plan`, and `huge-plan`, only high-priority comments or criticisms continue refinement; if a round produces none, terminate that round.
 
 If no level is named, auto-select the smallest level that fits the user's prompt and repo evidence before the first planning question. Do not ask the user to choose the level as that question.
+
+After each plan version, ask one refinement mode question: recommend `Reviewer` first, then `Criticizer`, `Jump to executor` (`skip-refinement-execute`), and `Auto-complete`. For `Reviewer` or `Criticizer`, ask the first `agent-choice` follow-up for the detected agent and effort; later `agent-choice` asks use the first foreground or delegated-foreground answer as the default. Delegated workers are same-platform only: Codex must not call Claude, and Claude must not call Codex.
 
 ## Anti-Pattern: "Too Small To Plan"
 
@@ -87,8 +89,8 @@ Direct, evidence-based, relentless until answers are real:
 - If a question can be answered by exploring the codebase, explore the codebase instead of asking. Never spend a user question on something the repo already answers.
 - If the repo can't answer but the web might (library behavior, version constraints, external API semantics, domain facts), websearch first and cite sources. The evidence ladder is: codebase → cited web research → user question.
 - Walk each branch of the decision tree, resolving dependent decisions in order. One question per message; if a topic needs more exploration, split it into multiple questions.
-- Every user-facing planning or refinement question must be a choice prompt: recommended option first with a short reason, alternatives, `Other` second-last, `Auto-complete` last, except the mini-plan `skip-refinement-execute` combined launch question.
-- When asking the user to choose an agent for reviewing, questioning, or criticizing, recommend the delegated foreground run first so Auto-complete uses a standalone visible run.
+- Every user-facing planning question must be a choice prompt: recommended option first with a short reason, alternatives, `Other` second-last, `Auto-complete` last. The refinement mode question is exactly `Reviewer`, `Criticizer`, `Jump to executor`, `Auto-complete`; the first Reviewer/Criticizer follow-up uses `agent-choice`.
+- When asking the user to choose refinement mode, recommend `Reviewer` first. If the user selects `Jump to executor`, pass the execution gate directly with `skip-refinement-execute`.
 - Challenge vague or hand-waving answers. If an answer contradicts repo evidence, say so and re-ask — never silently accept it.
 - Never answer product questions on the user's behalf unless they pick `Auto-complete`. Auto-complete may accept recommended planning and refinement answers; it never approves execution, waivers, merge, push, release, or destructive cleanup.
 
@@ -127,8 +129,8 @@ When native cards are available, render the controller's pending question as car
 
 - Implementing anything before the execution gate
 - Batching multiple questions into one message
-- Asking a planning or refinement question without `Auto-complete` as the last option, except the mini-plan `skip-refinement-execute` combined launch question
-- Treating one answered planning question or ordinary refinement question as execution approval
+- Asking a planning or refinement question without `Auto-complete` as the last option
+- Treating any answer except `skip-refinement-execute` as execution approval
 - Launching a worker outside the manifest-bound `prepare-execution` / `start-execution` / `run-item` flow
 - Treating hooks, shell parsing, worker self-attestation, or a verifier agent as the authoritative safety boundary
 - Editing target files before `PLAN_v1.md` and refinement artifacts exist

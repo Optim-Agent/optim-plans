@@ -62,8 +62,9 @@ class E2ETests(unittest.TestCase):
             )
             q = json.loads(question.stdout)
             self.assertIsInstance(q["expected_seq"], int)
-            self.assertEqual(q["recommended_option_id"], "foreground")
-            self.assertEqual([option["id"] for option in q["options"]], ["foreground", "reviewer", "criticizer", "other", "auto"])
+            self.assertEqual(q["recommended_option_id"], "reviewer")
+            self.assertEqual([option["id"] for option in q["options"]], ["reviewer", "criticizer", "skip-refinement-execute", "auto"])
+            self.assertEqual(q["options"][2]["label"], "Jump to executor")
             self.assertEqual(q["plan_level"]["name"], "plan")
             self.assertEqual(q["plan_level"]["min_questions"], 1)
             self.assertEqual(q["plan_level"]["max_questions"], 5)
@@ -77,6 +78,30 @@ class E2ETests(unittest.TestCase):
                 check=True,
             )
             self.assertEqual(json.loads(answer.stdout)["choice"], q["options"][0]["id"])
+
+    def test_cli_jump_to_executor_answer_directly_approves_execution_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            run_worktree = raw_path / "run-worktree"
+            init_controller(repo, "Jump To Executor")
+            q = controller_json("ask", "--repo", str(repo), "--prompt", "Choose refinement")
+            answer_choice(repo, q["nonce"], "skip-refinement-execute")
+            manifest = {
+                "plan_hash": "abc123",
+                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "run_worktree_path": str(run_worktree),
+                "items": [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}],
+            }
+            manifest_path = raw_path / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            prepared = controller_json("prepare-execution", "--repo", str(repo), "--manifest", str(manifest_path))
+
+            started = controller_json("start-execution", "--repo", str(repo), "--approval-nonce", prepared["nonce"])
+
+            self.assertEqual(started["approval_nonce"], prepared["nonce"])
+            self.assertTrue(run_worktree.is_dir())
 
     def test_cli_ask_emits_plan_level_and_rejects_unknown_level(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -239,7 +264,7 @@ class E2ETests(unittest.TestCase):
             q = json.loads(question.stdout)
             self.assertEqual(
                 [option["id"] for option in q["options"]],
-                ["codex-default", "codex-manual", "claude-default", "claude-manual", "other", "auto"],
+                ["codex-default", "codex-manual", "other", "auto"],
             )
             self.assertIn("model", q["options"][0]["reason"])
             self.assertIn("effort", q["options"][1]["reason"])
@@ -251,17 +276,17 @@ class E2ETests(unittest.TestCase):
         self.assertEqual(recommended[0], "claude-default")
         self.assertEqual(
             [recommended[0], *(option[0] for option in alternatives)],
-            ["claude-default", "claude-manual", "codex-default", "codex-manual"],
+            ["claude-default", "claude-manual"],
         )
 
-        recommended, alternatives = _background_model_options(env={"PATH": ""})
+        recommended, alternatives = _background_model_options(env={"PATH": "", "CODEX_PLUGIN_ROOT": "/tmp/plugin"})
         self.assertEqual(recommended[0], "codex-default")
         self.assertEqual(
             [recommended[0], *(option[0] for option in alternatives)],
-            ["codex-default", "codex-manual", "claude-default", "claude-manual"],
+            ["codex-default", "codex-manual"],
         )
 
-    def test_cli_ask_mini_plan_recommends_execution_skip_option(self) -> None:
+    def test_cli_ask_mini_plan_uses_same_refinement_mode_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
             subprocess.run(
@@ -289,14 +314,12 @@ class E2ETests(unittest.TestCase):
                 check=True,
             )
             q = json.loads(question.stdout)
-            self.assertEqual(q["recommended_option_id"], "skip-refinement-execute")
+            self.assertEqual(q["recommended_option_id"], "reviewer")
             self.assertEqual(
                 [option["id"] for option in q["options"]],
-                ["skip-refinement-execute", "foreground", "reviewer", "criticizer", "other"],
+                ["reviewer", "criticizer", "skip-refinement-execute", "auto"],
             )
-            self.assertEqual(q["options"][0]["label"], "Skip refinement and execute")
-            self.assertIn("explicit execution launch approval", q["options"][0]["reason"])
-            self.assertEqual(q["options"][1]["label"], "Current foreground session")
+            self.assertEqual(q["options"][2]["label"], "Jump to executor")
             self.assertTrue(q["plan_level"]["direct_execution_option"])
 
     def test_cli_run_worker_fails_before_process_launch(self) -> None:
