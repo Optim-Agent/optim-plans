@@ -373,7 +373,10 @@ class E2ETests(unittest.TestCase):
             worker = make_executable(
                 raw_path / "codex",
                 "#!/usr/bin/env python3\n"
-                "import json, os\n"
+                "import json, os, sys\n"
+                "if '--optim-plans-smoke' in sys.argv:\n"
+                "    print(json.dumps({'status': 'valid', 'evidence': 'adapter smoke ok'}))\n"
+                "    raise SystemExit(0)\n"
                 "from pathlib import Path\n"
                 "Path('src').mkdir(exist_ok=True)\n"
                 "Path('src/cli-run-item.txt').write_text('ok\\n', encoding='utf-8')\n"
@@ -400,6 +403,7 @@ class E2ETests(unittest.TestCase):
                 "worker": {
                     "adapter": "codex",
                     "argv": [str(worker), "exec", "-C", str(run_worktree)],
+                    "smoke": {"argv": [str(worker), "exec", "-C", str(run_worktree), "--optim-plans-smoke"]},
                     "timeout_seconds": 5,
                 },
                 "verification_argv": [
@@ -569,7 +573,10 @@ class E2ETests(unittest.TestCase):
             worker = make_executable(
                 raw_path / "codex",
                 "#!/usr/bin/env python3\n"
-                "import json, os\n"
+                "import json, os, sys\n"
+                "if '--optim-plans-smoke' in sys.argv:\n"
+                "    print(json.dumps({'status': 'valid', 'evidence': 'adapter smoke ok'}))\n"
+                "    raise SystemExit(0)\n"
                 "from pathlib import Path\n"
                 f"Path({str(sentinel)!r}).write_text('launched', encoding='utf-8')\n"
                 "Path('src').mkdir(exist_ok=True)\n"
@@ -597,6 +604,7 @@ class E2ETests(unittest.TestCase):
                 "worker": {
                     "adapter": "codex",
                     "argv": [str(worker), "exec", "-C", str(run_worktree)],
+                    "smoke": {"argv": [str(worker), "exec", "-C", str(run_worktree), "--optim-plans-smoke"]},
                     "timeout_seconds": 5,
                 },
                 "verification_argv": [

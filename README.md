@@ -292,7 +292,7 @@ python3 scripts/optim_plans.py ask --repo <repo> --prompt "Choose reviewer" --pl
 python3 scripts/optim_plans.py answer --repo <repo> --nonce <nonce> --choice <option-id>
 
 # after PLAN_vN is final, write a manifest JSON that binds the plan hash,
-# source base, adapter argv/config, item DAG, allowed paths, verification argv,
+# source base, adapter argv/config plus smoke, item DAG, allowed paths, verification argv,
 # run worktree/branch, integration destination, verification timeout, retry limits, and policy.
 python3 scripts/optim_plans.py prepare-execution --repo <repo> --manifest <manifest.json>
 python3 scripts/optim_plans.py answer --repo <repo> --nonce <approval-nonce> --choice approve
@@ -325,12 +325,13 @@ The implemented guardrails include:
 - advisory lock around event append;
 - strict JSON parsing with duplicate-key rejection;
 - collision-safe artifact directories;
+- adapter CLI smoke before immutable manifest-bound execution approval;
 - immutable manifest-bound execution approval with a single-use nonce recorded in `events.jsonl`;
 - atomic question nonce consumption;
 - fail-closed Auto-complete allowlist;
 - one controller-owned run worktree and run branch for the cumulative run;
 - serial item execution with checkpoint commits in stable DAG order;
-- adapter-only argv launch with `shell=False`;
+- adapter-only argv launch with `shell=False` after adapter CLI smoke;
 - controller verification and Git audits for path allowlists and protected Git metadata;
 - `awaiting_retry_decision` with explicit retry approval before restoration;
 - `awaiting_integration` after every item and final audit pass;
@@ -392,7 +393,7 @@ Implemented:
 - shared skill and reference docs;
 - durable state and artifact primitives;
 - question contract and nonce validation;
-- immutable manifest-bound execution approval;
+- adapter CLI smoke before immutable manifest-bound execution approval;
 - approval, execution-ledger, and refinement-ledger primitives;
 - agent discovery and role-based command builders;
 - one controller-owned run worktree and run branch;

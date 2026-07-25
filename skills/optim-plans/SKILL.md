@@ -118,7 +118,7 @@ When native cards are available, render the controller's pending question as car
 - `run.json` is immutable; `events.jsonl` is authoritative.
 - Reviewer and criticizer sessions are read-only and fresh.
 - Execution requires a clean committed Git base and explicit manifest-bound human launch approval.
-- Workers run only through adapter argv with `shell=False` in one controller-owned run worktree and branch.
+- Worker adapter manifests include same-agent CLI smoke argv before immutable recording, then run only through adapter argv with `shell=False` in one controller-owned run worktree and branch.
 - Controller verification, path audits, and protected Git metadata audits are authoritative; worker prose is evidence only.
 - Verified items become checkpoint commits in serial DAG order. Failed attempts require explicit retry approval before restoration.
 - All verified items plus final audits enter `awaiting_integration`; `finish-run` records the evidence-backed terminal outcome.

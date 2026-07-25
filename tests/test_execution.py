@@ -9,7 +9,6 @@ import sys
 import time
 import tempfile
 import unittest
-from unittest import mock
 from pathlib import Path
 
 from helpers import git, make_executable, make_repo
@@ -17,7 +16,15 @@ from helpers import git, make_executable, make_repo
 
 class ExecutionTests(unittest.TestCase):
     def _worker(self, path: Path, body: str) -> Path:
-        return make_executable(path, "#!/usr/bin/env python3\n" + body)
+        return make_executable(
+            path,
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "if '--optim-plans-smoke' in sys.argv:\n"
+            "    print(json.dumps({'status': 'valid', 'evidence': 'adapter smoke ok'}))\n"
+            "    raise SystemExit(0)\n"
+            + body,
+        )
 
     def _start_adapter_execution(
         self,
@@ -35,6 +42,7 @@ class ExecutionTests(unittest.TestCase):
         state = OptimPlansState.initialize(repo, topic="Adapter Execution", plan_hash="abc123")
         run_worktree = state.root / "run-worktrees" / state.run_id
         argv = [str(worker), "exec", "-C", str(run_worktree)]
+        smoke_argv = [*argv, "--optim-plans-smoke"]
         state.persist_execution_manifest(
             {
                 "plan_hash": "abc123",
@@ -45,6 +53,7 @@ class ExecutionTests(unittest.TestCase):
                     "adapter": "codex",
                     "argv": argv,
                     "env": worker_env or {},
+                    "smoke": {"argv": smoke_argv, "timeout_seconds": 5},
                     "timeout_seconds": worker_timeout_seconds,
                 },
                 "verification_argv": verification_argv,
@@ -159,27 +168,22 @@ class ExecutionTests(unittest.TestCase):
             from scripts.optim_plans_core import ContractError, OptimPlansState
 
             state = OptimPlansState.initialize(repo, topic="Cross Platform", plan_hash="abc123")
-            state.persist_execution_manifest(
-                {
-                    "plan_hash": "abc123",
-                    "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
-                    "integration_destination": "main",
-                    "worker": {
-                        "adapter": "claude",
-                        "argv": [str(worker), "-p", "--json-schema", "{}"],
-                    },
-                    "verification_argv": [sys.executable, "-c", "pass"],
-                    "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
-                }
-            )
-            question = state.request_execution_approval()
-            state.record_answer(question["nonce"], "approve")
-            state.start_execution(question["nonce"])
-
             with self.assertRaisesRegex(ContractError, "cross-platform delegated worker"):
-                with mock.patch.dict(os.environ, {"CODEX_PLUGIN_ROOT": "/tmp/codex"}, clear=True):
-                    state.run_item("TASK-001")
+                state.persist_execution_manifest(
+                    {
+                        "plan_hash": "abc123",
+                        "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                        "integration_destination": "main",
+                        "worker": {
+                            "adapter": "claude",
+                            "argv": [str(worker), "-p", "--json-schema", "{}"],
+                        },
+                        "verification_argv": [sys.executable, "-c", "pass"],
+                        "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
+                    }
+                )
             self.assertFalse(sentinel.exists())
+            self.assertNotIn("execution_manifest_created", [event["type"] for event in state.replay().events])
 
     def test_worker_self_attestation_does_not_skip_manifest_verification(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -301,16 +305,30 @@ class ExecutionTests(unittest.TestCase):
                 raw_path / "not-codex",
                 f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('launched', encoding='utf-8')\n",
             )
-            state, _run_worktree = self._start_adapter_execution(
-                repo,
-                worker=fake,
-                verification_argv=[sys.executable, "-c", "pass"],
-            )
+            from scripts.optim_plans_core import ContractError, OptimPlansState
 
-            with self.assertRaises(Exception):
-                state.run_item("TASK-001")
+            state = OptimPlansState.initialize(repo, topic="Adapter Validation", plan_hash="abc123")
+            run_worktree = state.root / "run-worktrees" / state.run_id
+            worker_argv = [str(fake), "exec", "-C", str(run_worktree)]
+            with self.assertRaisesRegex(ContractError, "worker adapter argv executable does not match adapter"):
+                state.persist_execution_manifest(
+                    {
+                        "plan_hash": "abc123",
+                        "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                        "integration_destination": "main",
+                        "run_worktree_path": str(run_worktree),
+                        "worker": {
+                            "adapter": "codex",
+                            "argv": worker_argv,
+                            "smoke": {"argv": [*worker_argv, "--optim-plans-smoke"]},
+                        },
+                        "verification_argv": [sys.executable, "-c", "pass"],
+                        "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
+                    }
+                )
 
             self.assertFalse(sentinel.exists())
+            self.assertNotIn("execution_manifest_created", [event["type"] for event in state.replay().events])
             self.assertNotIn("item_started", [event["type"] for event in state.replay().events])
 
     def test_adapter_generated_files_cannot_escape_controller_state(self) -> None:
@@ -327,26 +345,24 @@ class ExecutionTests(unittest.TestCase):
             state = OptimPlansState.initialize(repo, topic="Adapter Files", plan_hash="abc123")
             run_worktree = state.root / "run-worktrees" / state.run_id
             outside = raw_path / "outside-config.json"
-            state.persist_execution_manifest(
-                {
-                    "plan_hash": "abc123",
-                    "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
-                    "integration_destination": "main",
-                    "run_worktree_path": str(run_worktree),
-                    "worker": {
-                        "adapter": "codex",
-                        "argv": [str(worker), "exec", "-C", str(run_worktree)],
-                        "config_files": [{"path": str(outside), "content": {}}],
-                    },
-                    "verification_argv": [sys.executable, "-c", "pass"],
-                    "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
-                }
-            )
-            question = state.request_execution_approval()
-            state.record_answer(question["nonce"], "approve")
-            state.start_execution(question["nonce"])
+            worker_argv = [str(worker), "exec", "-C", str(run_worktree)]
             with self.assertRaises(Exception):
-                state.run_item("TASK-001")
+                state.persist_execution_manifest(
+                    {
+                        "plan_hash": "abc123",
+                        "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                        "integration_destination": "main",
+                        "run_worktree_path": str(run_worktree),
+                        "worker": {
+                            "adapter": "codex",
+                            "argv": worker_argv,
+                            "smoke": {"argv": [*worker_argv, "--optim-plans-smoke"]},
+                            "config_files": [{"path": str(outside), "content": {}}],
+                        },
+                        "verification_argv": [sys.executable, "-c", "pass"],
+                        "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
+                    }
+                )
             self.assertFalse(sentinel.exists())
             self.assertFalse(outside.exists())
             self.assertNotIn("item_started", [event["type"] for event in state.replay().events])
@@ -762,6 +778,43 @@ class ExecutionTests(unittest.TestCase):
             state.events_file.write_text("\n".join(tampered) + "\n", encoding="utf-8")
             with self.assertRaises(ContractError):
                 state.request_execution_approval()
+
+    def test_prepare_execution_smokes_worker_before_manifest_is_write_once(self) -> None:
+        from scripts.optim_plans_core import ContractError, OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            worker = make_executable(
+                raw_path / "codex",
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                "if '--optim-plans-smoke' in sys.argv:\n"
+                "    print(json.dumps({'status': 'invalid'}))\n"
+                "    raise SystemExit(0)\n"
+                "print('{}')\n",
+            )
+            state = OptimPlansState.initialize(repo, topic="Smoke", plan_hash="abc123")
+            worker_argv = [str(worker), "exec", "-C", str(raw_path / "run-worktree")]
+            manifest = {
+                "plan_hash": "abc123",
+                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "worker": {
+                    "adapter": "codex",
+                    "argv": worker_argv,
+                    "smoke": {"argv": [*worker_argv, "--optim-plans-smoke"]},
+                },
+                "verification_argv": [sys.executable, "-c", "pass"],
+                "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
+            }
+            manifest_path = raw_path / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(ContractError, "worker adapter smoke result status must be valid"):
+                state.prepare_execution(manifest_path)
+
+            self.assertNotIn("execution_manifest_created", [event["type"] for event in state.replay().events])
 
     def test_execution_approval_consumption_is_events_backed_and_single_use(self) -> None:
         import subprocess

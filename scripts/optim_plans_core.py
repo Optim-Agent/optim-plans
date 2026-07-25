@@ -729,12 +729,18 @@ class OptimPlansState:
             return event["payload"]
 
     def persist_execution_manifest(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        canonical = canonical_execution_manifest(manifest)
         with self.controller_lock():
             replayed = self.replay()
             self._require_lifecycle_locked(replayed.events, {"planning"}, "prepare-execution")
             if any(event["type"] == "execution_manifest_created" for event in replayed.events):
                 raise ContractError("execution manifest is write-once")
-            canonical = canonical_execution_manifest(manifest)
+        self._smoke_execution_manifest(canonical)
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"planning"}, "prepare-execution")
+            if any(event["type"] == "execution_manifest_created" for event in replayed.events):
+                raise ContractError("execution manifest is write-once")
             payload = {"manifest": canonical, "manifest_hash": execution_manifest_hash(canonical)}
             return self._append_event_locked("execution_manifest_created", payload)["payload"]
 
@@ -1135,6 +1141,32 @@ class OptimPlansState:
             config_files = []
         if not isinstance(config_files, list):
             raise ContractError("worker adapter config_files must be a list")
+        smoke = raw.get("smoke")
+        if not isinstance(smoke, dict):
+            raise ContractError("worker adapter smoke config is required before manifest recording")
+        smoke_argv = smoke.get("argv")
+        if (
+            not isinstance(smoke_argv, list)
+            or not smoke_argv
+            or not all(isinstance(part, str) and part for part in smoke_argv)
+        ):
+            raise ContractError("worker adapter smoke argv must be a non-empty argv array")
+        if smoke_argv[: len(argv)] != argv:
+            raise ContractError("worker adapter smoke argv must start with the worker adapter argv")
+        if Path(smoke_argv[0]).name != adapter:
+            raise ContractError("worker adapter smoke argv executable does not match adapter")
+        if adapter == "codex" and "exec" not in smoke_argv[1:]:
+            raise ContractError("codex worker smoke argv must be an exec adapter command")
+        if adapter == "claude" and "-p" not in smoke_argv[1:]:
+            raise ContractError("claude worker smoke argv must be a print-mode adapter command")
+        smoke_env = smoke.get("env", {})
+        if not isinstance(smoke_env, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in smoke_env.items()
+        ):
+            raise ContractError("worker adapter smoke env must be a string map")
+        smoke_timeout = smoke.get("timeout_seconds", 10)
+        if not isinstance(smoke_timeout, (int, float)) or smoke_timeout <= 0:
+            raise ContractError("worker adapter smoke timeout_seconds must be positive")
         legacy_timeout = raw.get("timeout_seconds", manifest.get("worker_timeout_seconds"))
         if legacy_timeout is not None and (not isinstance(legacy_timeout, (int, float)) or legacy_timeout <= 0):
             raise ContractError("worker timeout_seconds must be positive")
@@ -1143,6 +1175,7 @@ class OptimPlansState:
             "argv": list(argv),
             "env": dict(env),
             "config_files": list(config_files),
+            "smoke": {"argv": list(smoke_argv), "env": dict(smoke_env), "timeout_seconds": float(smoke_timeout)},
             "timeout_seconds": None,
         }
 
@@ -1223,6 +1256,45 @@ class OptimPlansState:
             target = self._owned_launch_path(argv[index], flag="--plugin-dir")
             if write:
                 target.mkdir(parents=True, exist_ok=True)
+
+    def _smoke_execution_manifest(self, manifest: dict[str, Any]) -> None:
+        seen: set[str] = set()
+        for item in manifest["items"]:
+            raw = item.get("worker", manifest.get("worker", manifest.get("adapter")))
+            if not isinstance(raw, dict):
+                continue
+            config = self._worker_config(manifest, item)
+            key = json_text(
+                {
+                    "argv": config["argv"],
+                    "config_files": config["config_files"],
+                    "env": config["env"],
+                    "smoke": config["smoke"],
+                }
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            self._ensure_adapter_launch_files(config)
+            env = os.environ.copy()
+            env.update(config["env"])
+            env.update(config["smoke"]["env"])
+            timeout_seconds = config["smoke"]["timeout_seconds"]
+            result = run_process_group(
+                config["smoke"]["argv"],
+                cwd=self.run_dir,
+                env=env,
+                timeout_seconds=timeout_seconds,
+            )
+            if not result.ok():
+                raise ContractError(result.evidence("worker adapter smoke", timeout_seconds=timeout_seconds))
+            if not result.stdout.strip():
+                raise ContractError("worker adapter smoke stdout result is missing")
+            payload = parse_json_strict(result.stdout.strip(), source="worker adapter smoke stdout")
+            if not isinstance(payload, dict):
+                raise ContractError("worker adapter smoke result must be a JSON object")
+            if payload.get("status") != "valid":
+                raise ContractError("worker adapter smoke result status must be valid")
 
     def _record_attempt_failure_locked(
         self,
