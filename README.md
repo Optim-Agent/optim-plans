@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/optim-plans-logo-dark.svg">
+    <img alt="optim-plans" src="docs/assets/optim-plans-logo-light.svg" width="500">
+  </picture>
+</p>
+
 <h1 align="center">optim-plans</h1>
 
 <p align="center">
