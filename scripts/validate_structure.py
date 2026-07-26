@@ -32,11 +32,32 @@ def main() -> int:
         raise AssertionError("Codex manifest name mismatch")
     if "hooks" in manifest:
         raise AssertionError("Codex manifest must not use unsupported hooks field")
+
+    expected_version = "0.1.1"
+    claude_manifest = load_json(".claude-plugin/plugin.json")
+    claude_marketplace = load_json(".claude-plugin/marketplace.json")
+    versions = {
+        ".codex-plugin/plugin.json": manifest.get("version"),
+        ".claude-plugin/plugin.json": claude_manifest.get("version"),
+    }
+    entries = [entry for entry in claude_marketplace.get("plugins", []) if entry.get("name") == "optim-plans"]
+    if len(entries) != 1:
+        raise AssertionError("Claude marketplace optim-plans entry mismatch")
+    versions[".claude-plugin/marketplace.json"] = entries[0].get("version")
+    for path, version in versions.items():
+        if version != expected_version:
+            raise AssertionError(f"{path} version must be {expected_version}")
+    changelog = require("CHANGELOG.md").read_text(encoding="utf-8")
+    if "## 0.1.1 - 2026-07-26" not in changelog:
+        raise AssertionError("CHANGELOG.md missing 0.1.1 entry")
+
     for path in (
         ".claude-plugin/plugin.json",
         ".agents/plugins/marketplace.json",
         ".claude-plugin/marketplace.json",
         "skills/optim-plans/SKILL.md",
+        "skills/analyze-and-plan/SKILL.md",
+        "skills/analyze-and-plan/agents/openai.yaml",
         "skills/mini-plan/SKILL.md",
         "skills/small-plan/SKILL.md",
         "skills/plan/SKILL.md",
@@ -53,9 +74,10 @@ def main() -> int:
         "THIRD-PARTY-NOTICES.md",
     ):
         require(path)
-    skill = require("skills/optim-plans/SKILL.md").read_text(encoding="utf-8")
-    if "[TODO:" in skill:
-        raise AssertionError("skill contains TODO placeholder")
+    for path in ("skills/optim-plans/SKILL.md", "skills/analyze-and-plan/SKILL.md"):
+        skill = require(path).read_text(encoding="utf-8")
+        if "[TODO:" in skill:
+            raise AssertionError(f"{path} contains TODO placeholder")
     print("optim-plans structure OK")
     return 0
 

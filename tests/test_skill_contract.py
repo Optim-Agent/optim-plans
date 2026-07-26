@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills/optim-plans/SKILL.md"
+ANALYZE_SKILL = ROOT / "skills/analyze-and-plan/SKILL.md"
 
 
 def skill_description(path: Path) -> str:
@@ -30,6 +31,7 @@ class SkillContractTests(unittest.TestCase):
     def test_skill_descriptions_target_planning_without_catchalls(self) -> None:
         descriptions = {
             "optim-plans": skill_description(SKILL),
+            "analyze-and-plan": skill_description(ANALYZE_SKILL),
             **{
                 level: skill_description(ROOT / "skills" / level / "SKILL.md")
                 for level in ("mini-plan", "small-plan", "plan", "big-plan", "huge-plan")
@@ -183,6 +185,57 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn("../optim-plans/SKILL.md", text)
             self.assertIn(f"`{level}`", text)
             self.assertNotIn("depth preset", text)
+
+    def test_analyze_and_plan_problem_flow_contract(self) -> None:
+        self.assertTrue(ANALYZE_SKILL.is_file())
+        text = ANALYZE_SKILL.read_text(encoding="utf-8")
+        description = skill_description(ANALYZE_SKILL).lower()
+        for trigger in (
+            "bug",
+            "ci failure",
+            "test failure",
+            "regression",
+            "incident",
+            "broken behavior",
+            "root cause",
+            "rca",
+            "debug",
+        ):
+            self.assertIn(trigger, description)
+        for boundary in (
+            "direct implementation-only",
+            "factual/explanation",
+            "trivial",
+            "explicit no-plan",
+            "ordinary feature ideas",
+            "vague product planning",
+        ):
+            self.assertIn(boundary, description)
+        for banned in ("any request", "every request", "all repo work"):
+            self.assertNotIn(banned, description)
+        for expected in (
+            "in-message RCA summary",
+            "PROBLEM_ANALYSIS.md",
+            "Do not write `PROBLEM_ANALYSIS.md` on opt-out",
+            "first controller-backed planning question",
+            "artifact_dir",
+            "`PLAN_v1.md`",
+            "../{selected-level}/SKILL.md",
+            "`mini-plan`",
+            "`small-plan`",
+            "`plan`",
+            "`big-plan`",
+            "`huge-plan`",
+            "recommended first",
+            "`Other` second-last",
+            "`Auto-complete` last",
+            "Auto-complete cannot approve execution",
+        ):
+            self.assertIn(expected, text)
+        openai_yaml = (ROOT / "skills/analyze-and-plan/agents/openai.yaml").read_text(encoding="utf-8")
+        self.assertIn('display_name: "Analyze and Plan"', openai_yaml)
+        self.assertIn('short_description: "Analyze a problem before planning"', openai_yaml)
+        self.assertIn("$analyze-and-plan", openai_yaml)
 
     def test_artifact_gate_precedes_target_repo_edits(self) -> None:
         text = SKILL.read_text(encoding="utf-8")

@@ -30,6 +30,17 @@ first, ISO dates, and grouped change types.
 - Claude executor launches now run through an explicit foreground
   `optim-plans-executor` subagent when delegated execution is selected.
 
+## 0.1.1 - 2026-07-26
+
+### Added
+
+- Added the `analyze-and-plan` skill for evidence-driven problem analysis before
+  handing off to the appropriate optim-plans planning level.
+
+### Changed
+
+- Bumped Claude and Codex plugin metadata to `0.1.1`.
+
 ## 0.1.0 - 2026-07-24
 
 ### Added

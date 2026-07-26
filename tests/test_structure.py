@@ -30,8 +30,10 @@ class StructureTests(unittest.TestCase):
             )
             self.assertNotEqual(ignored.returncode, 0, f"{relative} must not be ignored")
 
+        expected_version = "0.1.1"
         codex_manifest = json.loads((ROOT / ".codex-plugin/plugin.json").read_text())
         self.assertEqual(codex_manifest["name"], "optim-plans")
+        self.assertEqual(codex_manifest["version"], expected_version)
         self.assertEqual(codex_manifest["skills"], "./skills/")
         self.assertNotIn("hooks", codex_manifest)
         for field in ("displayName", "shortDescription", "longDescription", "developerName"):
@@ -39,7 +41,14 @@ class StructureTests(unittest.TestCase):
 
         claude_manifest = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
         self.assertEqual(claude_manifest["name"], "optim-plans")
+        self.assertEqual(claude_manifest["version"], expected_version)
         self.assertTrue((ROOT / "hooks/hooks.json").is_file())
+
+        claude_marketplace = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
+        claude_entries = [entry for entry in claude_marketplace["plugins"] if entry["name"] == "optim-plans"]
+        self.assertEqual(len(claude_entries), 1)
+        self.assertEqual(claude_entries[0]["version"], expected_version)
+        self.assertIn("## 0.1.1 - 2026-07-26", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
 
         marketplace = json.loads((ROOT / ".agents/plugins/marketplace.json").read_text())
         entries = [entry for entry in marketplace["plugins"] if entry["name"] == "optim-plans"]

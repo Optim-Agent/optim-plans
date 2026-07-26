@@ -1,0 +1,4 @@
+interface:
+  display_name: "Analyze and Plan"
+  short_description: "Analyze a problem before planning"
+  default_prompt: "Use $analyze-and-plan to analyze this problem, then ask whether to create an optim-plans solution plan."
