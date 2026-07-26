@@ -477,7 +477,7 @@ def _status_entries(repo: Path) -> list[tuple[str, str]]:
 
 
 def _is_allowed_ignored_audit_noise(path: str) -> bool:
-    return path.endswith(".pyc")
+    return path.endswith(".pyc") or path == ".pytest_cache" or path.startswith(".pytest_cache/")
 
 
 def _diff_paths(repo: Path, base_commit: str, head_commit: str) -> list[str]:

@@ -121,26 +121,29 @@ class GitIsolationTests(unittest.TestCase):
                     with self.assertRaises(ContractError):
                         state.checkpoint_item("TASK-001", evidence="unit ok")
 
-    def test_checkpoint_audit_allows_ignored_python_bytecode(self) -> None:
+    def test_checkpoint_audit_allows_ignored_test_cache_noise(self) -> None:
         from scripts.optim_plans_core import audit_git_delta
 
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
-            (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n*.log\n", encoding="utf-8")
+            (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n.pytest_cache/\n*.log\n", encoding="utf-8")
             git(repo, "add", ".gitignore")
             git(repo, "commit", "-m", "ignore fixture")
             cache = repo / "scripts" / "__pycache__"
             cache.mkdir(parents=True)
             (cache / "__init__.cpython-310.pyc").write_bytes(b"bytecode")
+            pytest_cache = repo / ".pytest_cache" / "v" / "cache"
+            pytest_cache.mkdir(parents=True)
+            (pytest_cache / "nodeids").write_text("[]\n", encoding="utf-8")
 
             audit = audit_git_delta(repo, allowed_paths=["README.md"])
 
             self.assertEqual(audit["changed_files"], [])
 
-    def test_final_audit_allows_ignored_python_bytecode_after_checkpoint(self) -> None:
+    def test_final_audit_allows_ignored_test_cache_noise_after_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
-            (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
+            (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n.pytest_cache/\n", encoding="utf-8")
             git(repo, "add", ".gitignore")
             git(repo, "commit", "-m", "ignore fixture")
             state, run_worktree = self._start_state(repo, [{"id": "TASK-001", "allowed_paths": ["README.md"]}])
@@ -149,6 +152,9 @@ class GitIsolationTests(unittest.TestCase):
             cache = run_worktree / "scripts" / "__pycache__"
             cache.mkdir(parents=True)
             (cache / "__init__.cpython-310.pyc").write_bytes(b"bytecode")
+            pytest_cache = run_worktree / ".pytest_cache" / "v" / "cache"
+            pytest_cache.mkdir(parents=True)
+            (pytest_cache / "nodeids").write_text("[]\n", encoding="utf-8")
 
             state.record_worker_completion("TASK-001", evidence="worker finished")
             state.checkpoint_item("TASK-001", evidence="unit ok")
