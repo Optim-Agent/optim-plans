@@ -12,6 +12,8 @@ first, ISO dates, and grouped change types.
 
 - First failed execution retry now restores automatically; approval is only
   required if that retry fails again.
+- Integrated finish now runs the full local proof before recording terminal
+  success, and proof failures stay in integration recovery.
 - Planning agent and same-platform worker preferences are now reused from the
   repository's Git common directory, with pre-manifest worker configuration.
 - Codex read-only worker commands now load normal user configuration instead of

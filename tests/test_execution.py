@@ -109,6 +109,23 @@ class ExecutionTests(unittest.TestCase):
         state.append_event("awaiting_integration", {"final_checkpoint": checkpoint})
         return checkpoint
 
+    def _add_passing_full_proof_files(self, repo: Path) -> None:
+        (repo / "scripts").mkdir()
+        (repo / "hooks").mkdir()
+        (repo / "tests").mkdir()
+        (repo / "scripts" / "validate_structure.py").write_text("", encoding="utf-8")
+        (repo / "scripts" / "placeholder.py").write_text("", encoding="utf-8")
+        (repo / "hooks" / "placeholder.py").write_text("", encoding="utf-8")
+        (repo / "tests" / "test_placeholder.py").write_text(
+            "import unittest\n\n"
+            "class PlaceholderTests(unittest.TestCase):\n"
+            "    def test_ok(self):\n"
+            "        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        git(repo, "add", "scripts", "hooks", "tests")
+        git(repo, "commit", "-m", "add proof harness")
+
     def test_run_item_launches_manifest_adapter_and_verifier_before_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             raw_path = Path(raw)
@@ -485,6 +502,7 @@ class ExecutionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
+            self._add_passing_full_proof_files(repo)
             state, run_worktree = self._start_execution(
                 repo, [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}]
             )
@@ -506,12 +524,70 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(finished["outcome"], "integrated")
             self.assertEqual(finished["destination_ref"], "main")
             self.assertEqual(finished["object_id"], git(repo, "rev-parse", "--verify", "main"))
+            self.assertIn("integration verification exited 0", finished["integration_verification"]["evidence"])
+
+    def test_integrated_finish_requires_full_repo_verification_before_terminal_event(self) -> None:
+        from scripts.optim_plans_core import ContractError
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            self._add_passing_full_proof_files(repo)
+            state, run_worktree = self._start_execution(
+                repo, [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}]
+            )
+            checkpoint = self._enter_manual_finish_state(state, run_worktree)
+            git(repo, "merge", "--ff-only", checkpoint)
+            (repo / "tests" / "test_placeholder.py").write_text(
+                "import unittest\n\n"
+                "class PlaceholderTests(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        self.fail('integration broke full proof')\n",
+                encoding="utf-8",
+            )
+            git(repo, "add", "tests/test_placeholder.py")
+            git(repo, "commit", "-m", "break proof")
+            nonce = self._finish_nonce(state, "integrated")
+            state.record_answer(nonce, "integrated")
+
+            with self.assertRaisesRegex(ContractError, "integration verification"):
+                state.finish_run("integrated", approval_nonce=nonce, target_ref="main")
+
+            events = state.replay().events
+            self.assertIn("integration_verification_failed", [event["type"] for event in events])
+            self.assertFalse(any(event["type"] == "run_finished" for event in events))
+            self.assertEqual(state.replay().status, "awaiting_integration")
+            failure = next(event for event in events if event["type"] == "integration_verification_failed")
+            self.assertEqual(failure["payload"]["stage"], "integration_verification")
+            self.assertLessEqual(len(failure["payload"]["evidence"]), 4096)
+
+    def test_integrated_finish_verifies_checked_out_destination(self) -> None:
+        from scripts.optim_plans_core import ContractError
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            self._add_passing_full_proof_files(repo)
+            state, run_worktree = self._start_execution(
+                repo, [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}]
+            )
+            checkpoint = self._enter_manual_finish_state(state, run_worktree)
+            git(repo, "merge", "--ff-only", checkpoint)
+            git(repo, "checkout", "-b", "other", "HEAD~1")
+            nonce = self._finish_nonce(state, "integrated")
+            state.record_answer(nonce, "integrated")
+
+            with self.assertRaisesRegex(ContractError, "checked-out"):
+                state.finish_run("integrated", approval_nonce=nonce, target_ref="main")
+
+            events = state.replay().events
+            self.assertIn("integration_verification_failed", [event["type"] for event in events])
+            self.assertFalse(any(event["type"] == "run_finished" for event in events))
 
     def test_integrated_finish_accepts_hashed_legacy_manifest_file(self) -> None:
         from scripts.optim_plans_core import OptimPlansState
 
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
+            self._add_passing_full_proof_files(repo)
             checkpoint = git(repo, "rev-parse", "--verify", "HEAD")
             state = OptimPlansState.initialize(repo, topic="Legacy Manifest", plan_hash="abc123")
             manifest = {

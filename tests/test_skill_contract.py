@@ -150,6 +150,9 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("discarded", execution)
         self.assertIn("failed", execution)
         self.assertIn("aborted", execution)
+        self.assertIn("full local proof", execution)
+        self.assertIn("integration_verification_failed", execution)
+        self.assertIn("checked-out destination", execution)
         self.assertIn("explicit confirmation", execution)
         self.assertIn("Auto-complete cannot approve finish-wrap", execution)
 

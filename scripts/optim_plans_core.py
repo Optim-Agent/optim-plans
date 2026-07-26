@@ -12,6 +12,7 @@ import re
 import signal
 import stat
 import subprocess
+import sys
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from typing import Any
 SCHEMA_VERSION = 1
 MAX_EVIDENCE_CHARS = 4096
 TIMEOUT_KILL_GRACE_SECONDS = 1.0
+FULL_INTEGRATION_VERIFICATION_TIMEOUT_SECONDS = 300.0
 ADAPTER_NAMES = {"claude", "codex"}
 FINISH_OUTCOMES = {"integrated", "pr-opened", "kept", "discarded", "failed", "aborted"}
 LEGACY_ACTIVE_EVENT_TYPES = {"item_completed", "execution_completed", "run_completed", "worker_result_recorded"}
@@ -39,6 +41,7 @@ LIFECYCLE_EVENT_TYPES = {
     "checkpoint_created",
     "final_audit_passed",
     "awaiting_integration",
+    "integration_verification_failed",
     "run_finished",
 }
 
@@ -579,6 +582,8 @@ def lifecycle_status(events: list[dict[str, Any]]) -> str:
                 return "aborted"
             return "completed"
         elif event_type == "awaiting_integration":
+            status = "awaiting_integration"
+        elif event_type == "integration_verification_failed":
             status = "awaiting_integration"
         elif event_type == "awaiting_retry_decision":
             status = "awaiting_retry_decision"
@@ -1890,6 +1895,53 @@ class OptimPlansState:
             raise ContractError("integrated target ref does not contain the final checkpoint") from exc
         return {"destination_ref": target_ref, "object_id": object_id}
 
+    def _full_integration_verification_argv(self) -> list[str]:
+        code = (
+            "import py_compile, subprocess, sys\n"
+            "from pathlib import Path\n"
+            "subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*.py', '-v'], check=True)\n"
+            "for path in sorted(Path('scripts').glob('*.py')) + sorted(Path('hooks').glob('*.py')):\n"
+            "    py_compile.compile(str(path), doraise=True)\n"
+            "subprocess.run([sys.executable, 'scripts/validate_structure.py'], check=True)\n"
+        )
+        return [sys.executable, "-c", code]
+
+    def _run_full_integration_verification(self, *, final_checkpoint: str, expected_head: str) -> dict[str, Any]:
+        current_head = git(self.repo, "rev-parse", "--verify", "HEAD")
+        if current_head != expected_head:
+            evidence = bounded_evidence(
+                "integration verification failed: "
+                f"checked-out worktree HEAD {current_head} does not match integrated target {expected_head}"
+            )
+            self._append_event_locked(
+                "integration_verification_failed",
+                {
+                    "stage": "integration_verification",
+                    "final_checkpoint": final_checkpoint,
+                    "evidence": evidence,
+                },
+            )
+            raise ContractError(evidence)
+        verifier = run_process_group(
+            self._full_integration_verification_argv(),
+            cwd=self.repo,
+            env=os.environ.copy(),
+            timeout_seconds=FULL_INTEGRATION_VERIFICATION_TIMEOUT_SECONDS,
+        )
+        evidence = verifier.evidence(
+            "integration verification",
+            timeout_seconds=FULL_INTEGRATION_VERIFICATION_TIMEOUT_SECONDS,
+        )
+        payload = {
+            "stage": "integration_verification",
+            "final_checkpoint": final_checkpoint,
+            "evidence": evidence,
+        }
+        if not verifier.ok():
+            self._append_event_locked("integration_verification_failed", payload)
+            raise ContractError(evidence)
+        return payload
+
     def _validate_pr_proof(
         self,
         *,
@@ -1991,8 +2043,11 @@ class OptimPlansState:
             if evidence.strip():
                 payload["evidence"] = bounded_evidence(evidence)
             if outcome == "integrated":
-                payload.update(
-                    self._validate_integrated_proof(record["manifest"], started, final_checkpoint, target_ref)
+                proof = self._validate_integrated_proof(record["manifest"], started, final_checkpoint, target_ref)
+                payload.update(proof)
+                payload["integration_verification"] = self._run_full_integration_verification(
+                    final_checkpoint=final_checkpoint,
+                    expected_head=proof["object_id"],
                 )
             elif outcome == "pr-opened":
                 payload.update(

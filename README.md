@@ -339,7 +339,7 @@ The implemented guardrails include:
 - controller verification and Git audits for path allowlists and protected Git metadata;
 - `awaiting_retry_decision` with bounded evidence, automatic first retry restore, and explicit retry approval for later retries;
 - automatic non-destructive `run_finished` / `kept` after every item and final audit pass;
-- manual recovery `finish-run` outcomes: `integrated`, `pr-opened`, `kept`, `discarded`, `failed`, and `aborted`;
+- manual recovery `finish-run` outcomes, with `integrated` running the full local proof before terminal success;
 - path-scope rejection and delta audits for symlinks, gitlinks, nested repos, ignored files, untracked files, staged files, and tracked changes;
 - three distinct evidenced attempts before `not_achievable` can even request confirmation;
 - Codex/Claude command builders with conservative role-specific flags;
@@ -406,7 +406,7 @@ Implemented:
 - controller verification and Git audits for path allowlists and protected Git metadata;
 - automatic first retry restore and explicit retry approval for later retries;
 - automatic non-destructive `run_finished` / `kept` after clean final audits;
-- manual recovery `finish-run` outcomes with evidence;
+- manual recovery `finish-run` outcomes with evidence and full local proof for `integrated`;
 - hook guard dispatcher and configs;
 - CI and tests.
 
