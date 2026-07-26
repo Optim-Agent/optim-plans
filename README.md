@@ -53,12 +53,12 @@ Planning-refining ring
 Execution ring
 
   prepare manifest -> approve -> start run worktree
-        -> serial item checkpoint -> final audit -> auto-kept run
+        -> serial item checkpoint -> final audit -> auto-integrated run
 ```
 
 The first ring fights the wrong-plan problem. It turns vague intent into a plan, then refines that plan with review or criticism. Each decision can open its own smaller question-answering ring, so uncertainty gets resolved before code changes.
 
-The second ring fights the wrong-execution problem. It starts only from an immutable manifest-bound human approval, runs serial checkpointed work in one controller-owned worktree and branch, verifies with controller-run commands and Git audits, then automatically records a non-destructive `kept` outcome after a clean final audit.
+The second ring fights the wrong-execution problem. It starts only from an immutable manifest-bound human approval, runs serial checkpointed work in one controller-owned worktree and branch, verifies with controller-run commands and Git audits, then automatically fast-forwards the clean checked-out destination and records `integrated` after the full local proof passes.
 
 ## See it in action
 
@@ -314,6 +314,7 @@ python3 scripts/optim_plans.py advance-item --repo <repo> --item-id TASK-001
 # CLI adapter fallback:
 python3 scripts/optim_plans.py run-item --repo <repo> --item-id TASK-001
 python3 scripts/optim_plans.py status --repo <repo>
+# if status reports awaiting_integration:
 python3 scripts/optim_plans.py answer --repo <repo> --nonce <finish-nonce> --choice kept
 python3 scripts/optim_plans.py finish-run --repo <repo> --outcome kept --approval-nonce <finish-nonce>
 ```
@@ -350,7 +351,8 @@ The implemented guardrails include:
 - host `spawn_agent` / `wait_agent` orchestration for Codex executor delegation, or adapter-only argv launch with `shell=False` after adapter CLI smoke;
 - controller verification and Git audits for path allowlists and protected Git metadata;
 - `awaiting_retry_decision` with bounded evidence, automatic first retry restore, and explicit retry approval for later retries;
-- automatic non-destructive `run_finished` / `kept` after every item and final audit pass;
+- automatic checked-out fast-forward `run_finished` / `integrated` after every item, final audit, and full local proof pass;
+- `awaiting_integration` with bounded evidence when auto-integration is unsafe or post-fast-forward proof fails;
 - manual recovery `finish-run` outcomes, with `integrated` running the full local proof before terminal success;
 - path-scope rejection and delta audits for symlinks, gitlinks, nested repos, ignored files, untracked files, staged files, and tracked changes;
 - three distinct evidenced attempts before `not_achievable` can even request confirmation;
@@ -417,7 +419,8 @@ Implemented:
 - adapter-only argv launch with `shell=False`, using worker stdout for the result JSON envelope;
 - controller verification and Git audits for path allowlists and protected Git metadata;
 - automatic first retry restore and explicit retry approval for later retries;
-- automatic non-destructive `run_finished` / `kept` after clean final audits;
+- automatic checked-out fast-forward `run_finished` / `integrated` after clean final audits and full local proof;
+- manual `awaiting_integration` recovery when checked-out fast-forward integration cannot safely finish;
 - manual recovery `finish-run` outcomes with evidence and full local proof for `integrated`;
 - hook guard dispatcher and configs;
 - CI and tests.

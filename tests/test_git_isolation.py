@@ -4,7 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import git, make_repo
+try:
+    from helpers import git, make_repo
+except ModuleNotFoundError:
+    from tests.helpers import git, make_repo
 
 
 class GitIsolationTests(unittest.TestCase):

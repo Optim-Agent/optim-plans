@@ -2467,20 +2467,8 @@ class OptimPlansState:
             active = self._matching_active_locked()
             payload = {"status": "passed", "final_commit": head, "changed_files": audit["changed_files"]}
             passed = self._append_event_locked("final_audit_passed", payload)["payload"]
-            finished = self._append_event_locked(
-                "run_finished",
-                {
-                    "outcome": "kept",
-                    "approval_nonce": started["approval_nonce"],
-                    "final_checkpoint": head,
-                    "run_branch": started["run_branch"],
-                    "run_worktree": started["run_worktree"],
-                    "preserved": True,
-                    "final_audit": passed,
-                },
-            )["payload"]
-            self._release_active_locked(active, finished)
-            return passed
+            integration = self._auto_integrate_final_checkpoint_locked(record["manifest"], started, head, passed, active)
+            return {**passed, "auto_integration": integration}
 
     def _manifest_destination_ref(self, manifest: dict[str, Any]) -> str:
         destination = None
@@ -2491,6 +2479,185 @@ class OptimPlansState:
         if not isinstance(destination, str) or not destination.strip() or destination.startswith("-"):
             raise ContractError("execution manifest integration_destination is required")
         return destination
+
+    def _destination_branch_ref(self, destination: str) -> str | None:
+        if destination.startswith("refs/heads/"):
+            branch = destination.removeprefix("refs/heads/")
+        elif destination.startswith("refs/"):
+            return None
+        else:
+            branch = destination
+        if not branch or branch.startswith("-"):
+            return None
+        return f"refs/heads/{branch}"
+
+    def _record_awaiting_integration_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if "evidence" in payload:
+            payload = {**payload, "evidence": bounded_evidence(str(payload["evidence"]))}
+        return self._append_event_locked("awaiting_integration", payload)["payload"]
+
+    def _auto_integration_awaiting_locked(
+        self,
+        *,
+        final_checkpoint: str,
+        destination_ref: str,
+        destination_oid: str | None,
+        stage: str,
+        evidence: str,
+    ) -> dict[str, Any]:
+        return self._record_awaiting_integration_locked(
+            {
+                "stage": stage,
+                "final_checkpoint": final_checkpoint,
+                "destination_ref": destination_ref,
+                "destination_oid": destination_oid,
+                "evidence": evidence,
+            }
+        )
+
+    def _auto_integrate_final_checkpoint_locked(
+        self,
+        manifest: dict[str, Any],
+        started: dict[str, Any],
+        final_checkpoint: str,
+        final_audit: dict[str, Any],
+        active: dict[str, Any],
+    ) -> dict[str, Any]:
+        destination = self._manifest_destination_ref(manifest)
+        before_oid = git_maybe(self.repo, "rev-parse", "--verify", destination)
+        branch_ref = self._destination_branch_ref(destination)
+        if branch_ref is None:
+            return self._auto_integration_awaiting_locked(
+                final_checkpoint=final_checkpoint,
+                destination_ref=destination,
+                destination_oid=before_oid,
+                stage="auto_integration_precondition",
+                evidence="manifest integration destination is not a local branch",
+            )
+        checked_out_ref = git_maybe(self.repo, "symbolic-ref", "-q", "HEAD")
+        if checked_out_ref != branch_ref:
+            return self._auto_integration_awaiting_locked(
+                final_checkpoint=final_checkpoint,
+                destination_ref=destination,
+                destination_oid=before_oid,
+                stage="auto_integration_precondition",
+                evidence=f"checked-out destination is {checked_out_ref or 'DETACHED'}, expected {branch_ref}",
+            )
+        try:
+            require_clean_source(self.repo, ignored_paths=[self.artifact_dir])
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            return self._auto_integration_awaiting_locked(
+                final_checkpoint=final_checkpoint,
+                destination_ref=destination,
+                destination_oid=before_oid,
+                stage="auto_integration_precondition",
+                evidence=f"source worktree is not clean: {exc}",
+            )
+        if before_oid is None:
+            return self._auto_integration_awaiting_locked(
+                final_checkpoint=final_checkpoint,
+                destination_ref=destination,
+                destination_oid=None,
+                stage="auto_integration_precondition",
+                evidence="manifest integration destination does not exist",
+            )
+        ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", before_oid, final_checkpoint],
+            cwd=self.repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if ancestor.returncode != 0:
+            return self._auto_integration_awaiting_locked(
+                final_checkpoint=final_checkpoint,
+                destination_ref=destination,
+                destination_oid=before_oid,
+                stage="auto_integration_fast_forward",
+                evidence="manifest integration destination is not fast-forwardable to the final checkpoint",
+            )
+
+        merge = subprocess.run(
+            ["git", "merge", "--ff-only", final_checkpoint],
+            cwd=self.repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        after_oid = git_maybe(self.repo, "rev-parse", "--verify", destination)
+        if merge.returncode != 0:
+            evidence = ProcessResult(
+                ["git", "merge", "--ff-only", final_checkpoint],
+                merge.returncode,
+                merge.stdout,
+                merge.stderr,
+            ).evidence("auto integration fast-forward", timeout_seconds=None)
+            if after_oid == before_oid:
+                return self._auto_integration_awaiting_locked(
+                    final_checkpoint=final_checkpoint,
+                    destination_ref=destination,
+                    destination_oid=before_oid,
+                    stage="auto_integration_fast_forward",
+                    evidence=evidence,
+                )
+            self._append_event_locked(
+                "integration_verification_failed",
+                {
+                    "stage": "auto_integration_fast_forward",
+                    "final_checkpoint": final_checkpoint,
+                    "destination_ref": destination,
+                    "before_destination_oid": before_oid,
+                    "after_destination_oid": after_oid,
+                    "evidence": bounded_evidence(evidence),
+                },
+            )
+            return {"stage": "auto_integration_fast_forward", "status": "failed_after_mutation"}
+
+        if after_oid != final_checkpoint:
+            evidence = f"fast-forward ended at {after_oid}, expected {final_checkpoint}"
+            self._append_event_locked(
+                "integration_verification_failed",
+                {
+                    "stage": "auto_integration_fast_forward",
+                    "final_checkpoint": final_checkpoint,
+                    "destination_ref": destination,
+                    "before_destination_oid": before_oid,
+                    "after_destination_oid": after_oid,
+                    "evidence": bounded_evidence(evidence),
+                },
+            )
+            return {"stage": "auto_integration_fast_forward", "status": "failed_after_mutation"}
+
+        proof = self._validate_integrated_proof(manifest, started, final_checkpoint, destination)
+        proof.update({"before_destination_oid": before_oid, "after_destination_oid": after_oid})
+        try:
+            integration_verification = self._run_full_integration_verification(
+                final_checkpoint=final_checkpoint,
+                expected_head=proof["object_id"],
+                failure_context={
+                    "destination_ref": destination,
+                    "before_destination_oid": before_oid,
+                    "after_destination_oid": after_oid,
+                },
+            )
+        except ContractError:
+            return {"stage": "integration_verification", "status": "failed_after_fast_forward", **proof}
+        finished = self._append_event_locked(
+            "run_finished",
+            {
+                "outcome": "integrated",
+                "approval_nonce": started["approval_nonce"],
+                "final_checkpoint": final_checkpoint,
+                "run_branch": started["run_branch"],
+                "run_worktree": started["run_worktree"],
+                "auto_integrated": True,
+                "final_audit": final_audit,
+                **proof,
+                "integration_verification": integration_verification,
+            },
+        )["payload"]
+        self._release_active_locked(active, finished)
+        return {"stage": "run_finished", "status": "integrated", **proof}
 
     def _final_checkpoint(self, events: list[dict[str, Any]], started: dict[str, Any]) -> str:
         for event in reversed(events):
@@ -2572,7 +2739,13 @@ class OptimPlansState:
         )
         return [sys.executable, "-c", code]
 
-    def _run_full_integration_verification(self, *, final_checkpoint: str, expected_head: str) -> dict[str, Any]:
+    def _run_full_integration_verification(
+        self,
+        *,
+        final_checkpoint: str,
+        expected_head: str,
+        failure_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         current_head = git(self.repo, "rev-parse", "--verify", "HEAD")
         if current_head != expected_head:
             evidence = bounded_evidence(
@@ -2584,6 +2757,7 @@ class OptimPlansState:
                 {
                     "stage": "integration_verification",
                     "final_checkpoint": final_checkpoint,
+                    **(failure_context or {}),
                     "evidence": evidence,
                 },
             )
@@ -2601,6 +2775,7 @@ class OptimPlansState:
         payload = {
             "stage": "integration_verification",
             "final_checkpoint": final_checkpoint,
+            **(failure_context or {}),
             "evidence": evidence,
         }
         if not verifier.ok():

@@ -9,7 +9,10 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from helpers import git, make_executable, make_repo
+try:
+    from helpers import git, make_executable, make_repo
+except ModuleNotFoundError:
+    from tests.helpers import git, make_executable, make_repo
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +63,24 @@ def fake_agent_env(raw_path: Path, platform: str) -> dict[str, str]:
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     return env
+
+
+def add_passing_full_proof_files(repo: Path) -> None:
+    (repo / "scripts").mkdir()
+    (repo / "hooks").mkdir()
+    (repo / "tests").mkdir()
+    (repo / "scripts" / "validate_structure.py").write_text("", encoding="utf-8")
+    (repo / "scripts" / "placeholder.py").write_text("", encoding="utf-8")
+    (repo / "hooks" / "placeholder.py").write_text("", encoding="utf-8")
+    (repo / "tests" / "test_placeholder.py").write_text(
+        "import unittest\n\n"
+        "class PlaceholderTests(unittest.TestCase):\n"
+        "    def test_ok(self):\n"
+        "        self.assertTrue(True)\n",
+        encoding="utf-8",
+    )
+    git(repo, "add", "scripts", "hooks", "tests")
+    git(repo, "commit", "-m", "add proof harness")
 
 
 class E2ETests(unittest.TestCase):
@@ -772,6 +793,7 @@ class E2ETests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             raw_path = Path(raw)
             repo = make_repo(raw_path)
+            add_passing_full_proof_files(repo)
             run_worktree = raw_path / "host-run-worktree"
             init = subprocess.run(
                 [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "Host CLI"],
@@ -951,10 +973,11 @@ class E2ETests(unittest.TestCase):
             self.assertNotIn("checkpoint-item", help_result.stdout)
             self.assertIn("complete-item", help_result.stdout)
 
-    def test_cli_lifecycle_rejects_invalid_states_before_mutation_and_finishes_kept(self) -> None:
+    def test_cli_lifecycle_rejects_invalid_states_before_mutation_and_finishes_integrated(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             raw_path = Path(raw)
             repo = make_repo(raw_path)
+            add_passing_full_proof_files(repo)
             run_worktree = raw_path / "run-worktree"
             sentinel = raw_path / "launched"
             worker = make_executable(
@@ -1120,7 +1143,9 @@ class E2ETests(unittest.TestCase):
             self.assertNotIn("awaiting_integration", event_types)
             self.assertFalse(any(event.get("payload", {}).get("stage") == "finish_run" for event in events))
             finished = next(event["payload"] for event in events if event["type"] == "run_finished")
-            self.assertEqual(finished["outcome"], "kept")
+            self.assertEqual(finished["outcome"], "integrated")
+            self.assertEqual(git(repo, "rev-parse", "--verify", "main"), finished["final_checkpoint"])
+            self.assertIn("integration verification exited 0", finished["integration_verification"]["evidence"])
             self.assertTrue(run_worktree.is_dir())
 
             second = subprocess.run(

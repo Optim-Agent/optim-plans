@@ -78,7 +78,7 @@ class StructureTests(unittest.TestCase):
             "adapter-only argv launch with `shell=False`",
             "controller verification and Git audits",
             "explicit retry approval for later retries",
-            "automatic non-destructive `run_finished` / `kept`",
+            "automatic checked-out fast-forward `run_finished` / `integrated`",
             "manual recovery `finish-run` outcomes",
         ):
             self.assertIn(expected, implemented)
@@ -88,7 +88,7 @@ class StructureTests(unittest.TestCase):
 
     def test_release_e2e_lifecycle_transcript_exists(self) -> None:
         e2e = (ROOT / "tests/test_e2e.py").read_text(encoding="utf-8")
-        self.assertIn("test_cli_lifecycle_rejects_invalid_states_before_mutation_and_finishes_kept", e2e)
+        self.assertIn("test_cli_lifecycle_rejects_invalid_states_before_mutation_and_finishes_integrated", e2e)
         for expected in (
             "prepare-execution",
             "start-execution",

@@ -11,7 +11,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import git, make_executable, make_repo
+try:
+    from helpers import git, make_executable, make_repo
+except ModuleNotFoundError:
+    from tests.helpers import git, make_executable, make_repo
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class ExecutionTests(unittest.TestCase):
@@ -110,7 +116,7 @@ class ExecutionTests(unittest.TestCase):
         state.start_execution(question["nonce"])
         return state, run_worktree
 
-    def _start_execution(self, repo: Path, items: list[dict[str, object]]):
+    def _start_execution(self, repo: Path, items: list[dict[str, object]], *, integration_destination: str = "main"):
         from scripts.optim_plans_core import OptimPlansState
 
         state = OptimPlansState.initialize(repo, topic="Execution", plan_hash="abc123")
@@ -118,7 +124,7 @@ class ExecutionTests(unittest.TestCase):
             {
                 "plan_hash": "abc123",
                 "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
-                "integration_destination": "main",
+                "integration_destination": integration_destination,
                 "items": items,
             }
         )
@@ -217,6 +223,7 @@ class ExecutionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
+            self._add_passing_full_proof_files(repo)
             state, run_worktree = self._start_host_execution(
                 repo,
                 verification_argv=[
@@ -342,6 +349,7 @@ class ExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             raw_path = Path(raw)
             repo = make_repo(raw_path)
+            self._add_passing_full_proof_files(repo)
             argv_log = raw_path / "argv.json"
             sentinel = raw_path / "shell-expanded"
             worker = self._worker(
@@ -710,11 +718,13 @@ class ExecutionTests(unittest.TestCase):
             failure = next(event for event in events if event["type"] == "audit_failed")
             self.assertLessEqual(len(failure["payload"]["evidence"]), 4096)
 
-    def test_all_verified_auto_keeps_and_releases_active(self) -> None:
+    def test_all_verified_auto_integrates_checked_out_destination_and_releases_active(self) -> None:
         from scripts.optim_plans_core import OptimPlansState
 
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
+            self._add_passing_full_proof_files(repo)
+            before = git(repo, "rev-parse", "--verify", "main")
             state, run_worktree = self._start_execution(
                 repo, [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}]
             )
@@ -728,14 +738,78 @@ class ExecutionTests(unittest.TestCase):
             self.assertFalse(any(event.get("payload", {}).get("stage") == "finish_run" for event in state.replay().events))
 
             finished = next(event["payload"] for event in state.replay().events if event["type"] == "run_finished")
-            self.assertEqual(finished["outcome"], "kept")
+            self.assertEqual(finished["outcome"], "integrated")
             self.assertEqual(finished["final_checkpoint"], checkpoint)
+            self.assertEqual(finished["destination_ref"], "main")
+            self.assertEqual(finished["before_destination_oid"], before)
+            self.assertEqual(finished["after_destination_oid"], checkpoint)
+            self.assertEqual(git(repo, "rev-parse", "--verify", "main"), checkpoint)
+            self.assertIn("integration verification exited 0", finished["integration_verification"]["evidence"])
             self.assertEqual(state.replay().status, "completed")
             self.assertFalse(state.active_file.exists())
             self.assertTrue(run_worktree.is_dir())
             self.assertEqual(git(repo, "rev-parse", "--verify", finished["run_branch"]), checkpoint)
             second = OptimPlansState.initialize(repo, topic="Second", plan_hash="def456")
             self.assertTrue(second.active_file.exists())
+
+    def test_final_audit_awaits_integration_when_destination_is_not_checked_out(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            git(repo, "branch", "release", "main")
+            release_before = git(repo, "rev-parse", "--verify", "release")
+            state, run_worktree = self._start_execution(
+                repo,
+                [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}],
+                integration_destination="release",
+            )
+            checkpoint = self._checkpoint_one_item(state, run_worktree)
+
+            audit = state.final_audit()
+
+            self.assertEqual(audit["status"], "passed")
+            self.assertEqual(git(repo, "rev-parse", "--verify", "release"), release_before)
+            self.assertEqual(state.replay().status, "awaiting_integration")
+            self.assertTrue(state.active_file.exists())
+            awaiting = next(event["payload"] for event in state.replay().events if event["type"] == "awaiting_integration")
+            self.assertEqual(awaiting["final_checkpoint"], checkpoint)
+            self.assertEqual(awaiting["destination_ref"], "release")
+            self.assertEqual(awaiting["destination_oid"], release_before)
+            self.assertIn("checked-out destination", awaiting["evidence"])
+            self.assertLessEqual(len(awaiting["evidence"]), 4096)
+
+    def test_auto_integration_proof_failure_records_destination_oids_and_status_creates_finish_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            before = git(repo, "rev-parse", "--verify", "main")
+            state, run_worktree = self._start_execution(
+                repo, [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}]
+            )
+            checkpoint = self._checkpoint_one_item(state, run_worktree)
+
+            audit = state.final_audit()
+
+            self.assertEqual(audit["status"], "passed")
+            self.assertEqual(git(repo, "rev-parse", "--verify", "main"), checkpoint)
+            self.assertEqual(state.replay().status, "awaiting_integration")
+            failure = next(
+                event["payload"] for event in state.replay().events if event["type"] == "integration_verification_failed"
+            )
+            self.assertEqual(failure["stage"], "integration_verification")
+            self.assertEqual(failure["before_destination_oid"], before)
+            self.assertEqual(failure["after_destination_oid"], checkpoint)
+            self.assertLessEqual(len(failure["evidence"]), 4096)
+
+            status = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "status", "--repo", str(repo)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            payload = json.loads(status.stdout)
+            self.assertEqual(payload["status"], "awaiting_integration")
+            self.assertIn("finish_approval_nonce", payload)
+            self.assertIn("pr-opened", payload["finish_choices"])
 
     def test_integrated_finish_requires_manifest_destination_containing_checkpoint(self) -> None:
         from scripts.optim_plans_core import ContractError

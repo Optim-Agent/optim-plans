@@ -462,7 +462,7 @@ def cmd_status(args: argparse.Namespace) -> None:
             "answer the finish approval nonce, then run finish-run "
             "--outcome kept|failed|aborted to release the active pointer without deleting evidence"
         )
-    elif replayed.status in {"awaiting_retry_decision", "awaiting_integration"}:
+    elif replayed.status == "awaiting_retry_decision":
         for event in reversed(replayed.events):
             event_payload = event.get("payload", {})
             if event["type"] == "pending_question" and event_payload.get("stage") == "execution_retry":
@@ -473,6 +473,11 @@ def cmd_status(args: argparse.Namespace) -> None:
             if event["type"] == "pending_question" and event_payload.get("stage") == "finish_run":
                 payload["finish_approval_nonce"] = event_payload["nonce"]
                 break
+    elif replayed.status == "awaiting_integration":
+        approval = state.request_finish_approval()
+        payload["events"] = len(state.replay().events)
+        payload["finish_approval_nonce"] = approval["nonce"]
+        payload["finish_choices"] = [option["id"] for option in approval["options"]]
     print_json(payload)
 
 
