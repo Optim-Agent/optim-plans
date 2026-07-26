@@ -21,6 +21,7 @@ try:
         read_optim_plans_config,
         save_optim_plans_config_value,
         sha256_text,
+        worker_launch_files,
     )
 except ImportError:  # pragma: no cover - package import path
     from scripts.optim_plans_core import (
@@ -34,6 +35,7 @@ except ImportError:  # pragma: no cover - package import path
         read_optim_plans_config,
         save_optim_plans_config_value,
         sha256_text,
+        worker_launch_files,
     )
 
 
@@ -335,13 +337,14 @@ def cmd_worker_config(args: argparse.Namespace) -> None:
     )
     cwd = Path(args.cwd)
     files: dict[str, str] = {}
+    launch_files = worker_launch_files(state.repo) if args.role == "executor" else {}
     if platform == "codex":
-        config_home = state.run_dir / "executor-codex-home" if args.role == "executor" else None
+        config_home = launch_files.get("codex_home")
         command = build_codex_command(info, role=args.role, cwd=cwd, config_home=config_home)
         env = {"CODEX_HOME": str(config_home)} if config_home else {}
     else:
-        settings = state.run_dir / "executor-settings" / "settings.json"
-        plugin_dir = state.run_dir / "executor-plugin"
+        settings = launch_files.get("claude_settings")
+        plugin_dir = launch_files.get("claude_plugin_dir")
         command = build_claude_command(
             info,
             role=args.role,

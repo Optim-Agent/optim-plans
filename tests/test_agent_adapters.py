@@ -61,8 +61,8 @@ class AgentAdapterTests(unittest.TestCase):
                     "/tmp/repo",
                     "--model",
                     "gpt-test",
-                    "--reasoning-effort",
-                    "max",
+                    "-c",
+                    'model_reasoning_effort="max"',
                 ],
             )
             self.assertEqual(execute.env["CODEX_HOME"], str(config_home))

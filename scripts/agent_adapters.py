@@ -125,7 +125,7 @@ def build_codex_command(
     if info.configured_model:
         argv.extend(["--model", info.configured_model])
     if info.configured_effort:
-        argv.extend(["--reasoning-effort", info.configured_effort])
+        argv.extend(["-c", f"model_reasoning_effort={json.dumps(info.configured_effort)}"])
     if config_home is not None:
         command_env["CODEX_HOME"] = str(config_home)
     return AgentCommand(argv, command_env)

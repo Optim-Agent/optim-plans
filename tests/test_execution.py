@@ -358,6 +358,34 @@ class ExecutionTests(unittest.TestCase):
             self.assertNotIn("execution_manifest_created", [event["type"] for event in state.replay().events])
             self.assertNotIn("item_started", [event["type"] for event in state.replay().events])
 
+    def test_codex_home_cannot_escape_controller_state(self) -> None:
+        from scripts.optim_plans_core import ContractError, OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            worker = self._worker(raw_path / "codex", "print('{}')\n")
+            state = OptimPlansState.initialize(repo, topic="Codex Home", plan_hash="abc123")
+            run_worktree = state.root / "run-worktrees" / state.run_id
+            worker_argv = [str(worker), "exec", "-C", str(run_worktree)]
+            with self.assertRaisesRegex(ContractError, "CODEX_HOME path must live"):
+                state.persist_execution_manifest(
+                    {
+                        "plan_hash": "abc123",
+                        "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                        "integration_destination": "main",
+                        "run_worktree_path": str(run_worktree),
+                        "worker": {
+                            "adapter": "codex",
+                            "argv": worker_argv,
+                            "env": {"CODEX_HOME": str(raw_path / "outside-codex-home")},
+                            "smoke": {"argv": [*worker_argv, "--optim-plans-smoke"]},
+                        },
+                        "verification_argv": [sys.executable, "-c", "pass"],
+                        "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
+                    }
+                )
+
     def test_adapter_generated_files_cannot_escape_controller_state(self) -> None:
         from scripts.optim_plans_core import OptimPlansState
 
@@ -902,6 +930,66 @@ class ExecutionTests(unittest.TestCase):
                 state.prepare_execution(manifest_path)
 
             self.assertNotIn("execution_manifest_created", [event["type"] for event in state.replay().events])
+
+    def test_launch_files_are_refreshed_before_smoke_cache_skip(self) -> None:
+        from scripts.optim_plans_core import OptimPlansState, worker_launch_files
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            count_path = raw_path / "smoke-count.txt"
+            worker = make_executable(
+                raw_path / "codex",
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "if '--optim-plans-smoke' in sys.argv:\n"
+                "    count = Path(os.environ['SMOKE_COUNT'])\n"
+                "    value = int(count.read_text(encoding='utf-8') or '0') if count.exists() else 0\n"
+                "    count.write_text(str(value + 1), encoding='utf-8')\n"
+                "    print(json.dumps({'status': 'valid', 'evidence': 'adapter smoke'}))\n"
+                "    raise SystemExit(0)\n"
+                "print('{}')\n",
+            )
+            paths = worker_launch_files(repo)
+            worker_argv = [str(worker), "exec", "-C", str(raw_path / "run-worktree")]
+            manifest = {
+                "plan_hash": "abc123",
+                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "worker": {
+                    "adapter": "codex",
+                    "argv": worker_argv,
+                    "env": {"CODEX_HOME": str(paths["codex_home"])},
+                    "smoke": {"argv": [*worker_argv, "--optim-plans-smoke"], "env": {"SMOKE_COUNT": str(count_path)}},
+                },
+                "verification_argv": [sys.executable, "-c", "pass"],
+                "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
+            }
+            state = OptimPlansState.initialize(repo, topic="Launch Refresh", plan_hash="abc123")
+            state.persist_execution_manifest(manifest)
+            self.assertEqual(count_path.read_text(encoding="utf-8"), "1")
+
+            codex_home = paths["codex_home"]
+            (codex_home / "config.toml").write_text("tampered = true\n", encoding="utf-8")
+            second_repo = raw_path / "repo-2"
+            git(repo, "worktree", "add", "--detach", str(second_repo), "HEAD")
+            second = OptimPlansState.initialize(second_repo, topic="Launch Refresh 2", plan_hash="abc123")
+            second.persist_execution_manifest(manifest)
+
+            self.assertEqual(count_path.read_text(encoding="utf-8"), "1")
+            self.assertTrue(codex_home.is_dir())
+            self.assertFalse((codex_home / "config.toml").exists())
+
+    def test_worker_launch_file_config_rejects_controller_state_collision(self) -> None:
+        from scripts.optim_plans_core import save_optim_plans_config_value, worker_launch_files
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            config_path = repo / ".git" / "optim-plans" / "config.json"
+            save_optim_plans_config_value(repo, "worker_launch_files", {"codex_home": str(config_path)})
+            with self.assertRaisesRegex(Exception, "worker_launch_files.codex_home"):
+                worker_launch_files(repo)
 
     def test_successful_smoke_is_cached_for_matching_later_manifest(self) -> None:
         from scripts.optim_plans_core import OptimPlansState

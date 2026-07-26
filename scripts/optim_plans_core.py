@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -27,6 +28,7 @@ FULL_INTEGRATION_VERIFICATION_TIMEOUT_SECONDS = 300.0
 ADAPTER_NAMES = {"claude", "codex"}
 FINISH_OUTCOMES = {"integrated", "pr-opened", "kept", "discarded", "failed", "aborted"}
 SMOKE_TESTED_WORKERS_CONFIG_KEY = "smoke_tested_workers"
+WORKER_LAUNCH_FILES_CONFIG_KEY = "worker_launch_files"
 LEGACY_ACTIVE_EVENT_TYPES = {"item_completed", "execution_completed", "run_completed", "worker_result_recorded"}
 LIFECYCLE_EVENT_TYPES = {
     "execution_manifest_created",
@@ -154,8 +156,12 @@ def git_common_dir(repo: Path) -> Path:
     return path.absolute()
 
 
+def optim_plans_state_dir(repo: Path) -> Path:
+    return (git_common_dir(repo) / "optim-plans").resolve()
+
+
 def optim_plans_config_path(repo: Path) -> Path:
-    return git_common_dir(repo) / "optim-plans" / "config.json"
+    return optim_plans_state_dir(repo) / "config.json"
 
 
 def read_optim_plans_config(repo: Path) -> dict[str, Any]:
@@ -170,6 +176,38 @@ def save_optim_plans_config_value(repo: Path, key: str, value: Any) -> None:
     config = read_optim_plans_config(repo)
     config.update({"schema": 1, key: value})
     write_json_atomic(optim_plans_config_path(repo), config)
+
+
+def _default_worker_launch_files(repo: Path) -> dict[str, Path]:
+    root = optim_plans_state_dir(repo) / "launch-files"
+    return {
+        "codex_home": root / "codex-home",
+        "claude_settings": root / "claude-settings" / "settings.json",
+        "claude_plugin_dir": root / "claude-plugin",
+    }
+
+
+def worker_launch_files(repo: Path) -> dict[str, Path]:
+    defaults = _default_worker_launch_files(repo)
+    expected = {key: str(path) for key, path in defaults.items()}
+    raw = read_optim_plans_config(repo).get(WORKER_LAUNCH_FILES_CONFIG_KEY)
+    if raw is None:
+        save_optim_plans_config_value(repo, WORKER_LAUNCH_FILES_CONFIG_KEY, expected)
+        return defaults
+    if not isinstance(raw, dict):
+        raise ContractError("worker_launch_files config must be an object")
+    merged = dict(raw)
+    changed = False
+    for key, value in expected.items():
+        configured = raw.get(key)
+        if configured is None:
+            merged[key] = value
+            changed = True
+        elif configured != value:
+            raise ContractError(f"worker_launch_files.{key} must be {value}")
+    if changed:
+        save_optim_plans_config_value(repo, WORKER_LAUNCH_FILES_CONFIG_KEY, merged)
+    return defaults
 
 
 def _smoke_worker_payload(worker: dict[str, Any]) -> dict[str, Any]:
@@ -348,6 +386,14 @@ def _tree_signature(root: Path) -> dict[str, dict[str, Any]]:
             rel = path.relative_to(root).as_posix()
             out[rel] = _path_signature(path)
     return out
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
 
 
 def _protected_refs_snapshot(repo: Path, *, run_branch: str) -> dict[str, str]:
@@ -1275,6 +1321,11 @@ class OptimPlansState:
             raise ContractError("verification timeout_seconds must be positive")
         return {"argv": list(argv), "env": env, "timeout_seconds": float(timeout_seconds)}
 
+    def _owned_generated_path(self, target: Path) -> bool:
+        return _path_is_under(target, self.run_dir) or _path_is_under(
+            target, optim_plans_state_dir(self.repo) / "launch-files"
+        )
+
     def _write_manifest_config_files(self, files: list[Any], *, write: bool = True) -> None:
         for entry in files:
             if not isinstance(entry, dict):
@@ -1286,10 +1337,8 @@ class OptimPlansState:
             target = Path(path)
             if not target.is_absolute():
                 target = self.run_dir / target
-            try:
-                target.resolve().relative_to(self.run_dir.resolve())
-            except ValueError as exc:
-                raise ContractError("worker adapter config files must live under the run directory") from exc
+            if not self._owned_generated_path(target):
+                raise ContractError("worker adapter config files must live under the controller run directory or launch-files state")
             if isinstance(content, (dict, list)):
                 text = json_text(content, pretty=True) + "\n"
             elif isinstance(content, str):
@@ -1301,37 +1350,57 @@ class OptimPlansState:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
 
-    def _owned_launch_path(self, raw: str, *, flag: str) -> Path:
+    def _owned_launch_path(self, raw: str, *, flag: str, canonical_key: str | None = None) -> Path:
         target = Path(raw)
         if not target.is_absolute():
             raise ContractError(f"{flag} path must be absolute")
-        try:
-            target.resolve().relative_to(self.run_dir.resolve())
-        except ValueError as exc:
-            raise ContractError(f"{flag} path must live under the controller run directory") from exc
-        return target
+        if _path_is_under(target, self.run_dir):
+            return target
+        if canonical_key is not None:
+            expected = worker_launch_files(self.repo)[canonical_key]
+            if target.resolve(strict=False) == expected.resolve(strict=False):
+                return target
+        raise ContractError(f"{flag} path must live under the controller run directory or canonical launch-files state")
+
+    def _refresh_launch_dir(self, target: Path) -> None:
+        if target.is_symlink() or (target.exists() and not target.is_dir()):
+            raise ContractError(f"launch path must be a directory: {target}")
+        if target.exists():
+            for child in target.iterdir():
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+        target.mkdir(parents=True, exist_ok=True)
+
+    def _refresh_launch_json(self, target: Path) -> None:
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            raise ContractError(f"launch path must be a file: {target}")
+        write_json_atomic(target, {})
 
     def _ensure_adapter_launch_files(self, config: dict[str, Any], *, write: bool = True) -> None:
         argv = config["argv"]
         self._write_manifest_config_files(config["config_files"], write=write)
+        if config["adapter"] == "codex" and config["env"].get("CODEX_HOME"):
+            target = self._owned_launch_path(config["env"]["CODEX_HOME"], flag="CODEX_HOME", canonical_key="codex_home")
+            if write:
+                self._refresh_launch_dir(target)
         for flag in ("--settings",):
             if flag not in argv:
                 continue
             index = argv.index(flag) + 1
             if index >= len(argv):
                 raise ContractError(f"{flag} requires a path")
-            target = self._owned_launch_path(argv[index], flag=flag)
-            if not write:
-                continue
-            if not target.exists():
-                write_json_atomic(target, {})
+            target = self._owned_launch_path(argv[index], flag=flag, canonical_key="claude_settings")
+            if write:
+                self._refresh_launch_json(target)
         if "--plugin-dir" in argv:
             index = argv.index("--plugin-dir") + 1
             if index >= len(argv):
                 raise ContractError("--plugin-dir requires a path")
-            target = self._owned_launch_path(argv[index], flag="--plugin-dir")
+            target = self._owned_launch_path(argv[index], flag="--plugin-dir", canonical_key="claude_plugin_dir")
             if write:
-                target.mkdir(parents=True, exist_ok=True)
+                self._refresh_launch_dir(target)
 
     def _smoke_execution_manifest(self, manifest: dict[str, Any]) -> None:
         seen: set[str] = set()
@@ -1351,9 +1420,9 @@ class OptimPlansState:
             if key in seen:
                 continue
             seen.add(key)
+            self._ensure_adapter_launch_files(config)
             if smoke_tested_worker_is_cached(self.repo, config):
                 continue
-            self._ensure_adapter_launch_files(config)
             env = os.environ.copy()
             env.update(config["env"])
             env.update(config["smoke"]["env"])

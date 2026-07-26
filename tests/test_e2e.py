@@ -468,7 +468,20 @@ class E2ETests(unittest.TestCase):
             )
             self.assertEqual(resolved["adapter"], platform)
             self.assertIn("model-test", resolved["argv"])
-            self.assertIn("high", resolved["argv"])
+            self.assertIn("high", " ".join(resolved["argv"]))
+            config = json.loads(config_path(repo).read_text(encoding="utf-8"))
+            launch_files = config["worker_launch_files"]
+            root = config_path(repo).parent.resolve() / "launch-files"
+            self.assertEqual(launch_files["codex_home"], str(root / "codex-home"))
+            self.assertEqual(resolved["env"]["CODEX_HOME"], launch_files["codex_home"])
+
+            second_repo = raw_path / "repo-2"
+            git(repo, "worktree", "add", "--detach", str(second_repo), "HEAD")
+            init_controller(second_repo, "Executor Worker 2")
+            reused = controller_json(
+                "worker-config", "--repo", str(second_repo), "--role", "executor", "--cwd", str(second_repo), env=env
+            )
+            self.assertEqual(reused["env"]["CODEX_HOME"], launch_files["codex_home"])
 
     def test_worker_config_reuses_cached_smoke_tested_worker_block(self) -> None:
         from scripts.optim_plans_core import host_agent
