@@ -1,6 +1,6 @@
 ---
 name: mini-plan
-description: Plan a subtle, low-risk project change where one alignment question is enough and direct execution is usually the right next step.
+description: Use mini-plan for subtle low-risk repo changes needing one alignment question before execution; exclude direct implementation-only, factual/explanation, trivial, or explicit no-plan requests.
 ---
 
 # Mini Plan

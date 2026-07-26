@@ -1,6 +1,6 @@
 ---
 name: huge-plan
-description: Plan an open-ended, high-risk effort that needs websearch during brainstorming and refinement, looping until no high-priority issue remains.
+description: Use huge-plan for open-ended high-risk repo efforts needing websearch during brainstorming and refinement until convergence; exclude direct implementation-only, factual/explanation, trivial, or explicit no-plan requests.
 ---
 
 # Huge Plan

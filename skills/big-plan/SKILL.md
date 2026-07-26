@@ -1,6 +1,6 @@
 ---
 name: big-plan
-description: Plan a broad or risky change that needs codebase inspection plus websearch during brainstorming and up to five high-priority refinement rounds.
+description: Use big-plan for broad or risky repo changes needing codebase inspection, websearch, and deeper refinement; exclude direct implementation-only, factual/explanation, trivial, or explicit no-plan requests.
 ---
 
 # Big Plan

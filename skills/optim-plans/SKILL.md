@@ -1,6 +1,6 @@
 ---
 name: optim-plans
-description: Use when turning a rough idea, feature request, repo change, or project goal into a plan before implementation in Claude or Codex — especially when requirements are vague, assumptions unexamined, or execution touches shared state.
+description: MUST USE when a user asks to plan, brainstorm, design, scope, review, or evaluate a repo change before implementation; do not use for direct implementation-only requests, factual/explanation questions, trivial operations, or explicit no-plan requests.
 ---
 
 # Optim Plans

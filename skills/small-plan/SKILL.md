@@ -1,6 +1,6 @@
 ---
 name: small-plan
-description: Plan a small project change that needs up to three intent checks and exactly one review or critique round before execution approval.
+description: Use small-plan for small repo changes needing up to three intent checks and exactly one refinement round; exclude direct implementation-only, factual/explanation, trivial, or explicit no-plan requests.
 ---
 
 # Small Plan

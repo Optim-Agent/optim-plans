@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Plan a normal repo change with a few decisions, bounded refinement, and high-priority review or critique handling before execution.
+description: Use plan for normal repo changes needing bounded decisions, refinement, and high-priority review before execution; exclude direct implementation-only, factual/explanation, trivial, or explicit no-plan requests.
 ---
 
 # Plan

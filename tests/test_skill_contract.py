@@ -9,16 +9,64 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills/optim-plans/SKILL.md"
 
 
+def skill_description(path: Path) -> str:
+    match = re.search(r"^description:\s*(.+)$", path.read_text(encoding="utf-8"), re.M)
+    if not match:
+        raise AssertionError(f"missing skill description in {path}")
+    return match.group(1).strip()
+
+
 class SkillContractTests(unittest.TestCase):
     def test_skill_entrypoint_is_concise_and_links_references(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---\n"))
         self.assertLessEqual(len(text.splitlines()), 180)
         self.assertIn("name: optim-plans", text)
-        self.assertRegex(text, r"description: .*Use when")
+        self.assertRegex(text, r"description: .*(?:MUST USE|Use) when")
         for reference in ("planning.md", "refinement.md", "execution.md", "artifacts.md"):
             self.assertIn(f"references/{reference}", text)
             self.assertTrue((ROOT / "skills/optim-plans/references" / reference).is_file())
+
+    def test_skill_descriptions_target_planning_without_catchalls(self) -> None:
+        descriptions = {
+            "optim-plans": skill_description(SKILL),
+            **{
+                level: skill_description(ROOT / "skills" / level / "SKILL.md")
+                for level in ("mini-plan", "small-plan", "plan", "big-plan", "huge-plan")
+            },
+        }
+        main = descriptions["optim-plans"]
+        main_lower = main.lower()
+        first_sentence = main_lower.split(".", 1)[0]
+        for term in ("plan", "brainstorm", "design", "scope", "review"):
+            self.assertIn(term, first_sentence)
+        self.assertIn("must use when", first_sentence)
+        self.assertIn("repo change", first_sentence)
+
+        banned = ("any request", "every request", "all repo work")
+        boundary = ("direct implementation-only", "factual/explanation", "trivial", "explicit no-plan")
+        for name, description in descriptions.items():
+            lower = description.lower()
+            for phrase in boundary:
+                self.assertIn(phrase, lower, name)
+            for phrase in banned:
+                self.assertNotIn(phrase, lower, name)
+
+        wrapper_expectations = {
+            "mini-plan": ("low-risk", "one alignment question"),
+            "small-plan": ("small repo changes", "up to three"),
+            "plan": ("normal repo changes", "bounded"),
+            "big-plan": ("broad or risky", "websearch"),
+            "huge-plan": ("open-ended", "high-risk"),
+        }
+        wrappers = {level: descriptions[level] for level in wrapper_expectations}
+        self.assertEqual(len(set(wrappers.values())), len(wrappers))
+        for level, terms in wrapper_expectations.items():
+            description = wrappers[level]
+            self.assertEqual(description.count("."), 1, level)
+            self.assertLessEqual(len(description.rstrip(".").split()), 45, level)
+            for term in terms:
+                self.assertIn(term, description.lower(), level)
 
     def test_choice_ordering_and_execution_gate_are_explicit(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
