@@ -201,6 +201,47 @@ Then invoke the skill:
 $optim-plans Turn this idea into a reviewed plan before implementation.
 ```
 
+### Worker configuration
+
+`.git/optim-plans/config.json` stores background worker preferences, not the foreground controller. Choose the controller/main-session model and effort when launching Codex or Claude.
+
+For cost-effective workflows, use:
+
+| Host | Controller/main session | Reviewer/criticizer | Executor |
+|---|---|---|---|
+| Codex | `gpt-5.6-terra`, `high` | `gpt-5.6-sol`, `medium` | `gpt-5.6-terra`, `xhigh` |
+| Claude | `sonnet-5`, `high` | `fable-5`, `medium` | `opus-5`, `high` |
+
+You can edit this template by hand:
+
+```json
+{
+  "schema": 1,
+  "refinement_worker": {
+    "choice": "background",
+    "platform": "codex",
+    "mode": "manual",
+    "model": "gpt-5.6-sol",
+    "effort": "medium"
+  },
+  "executor_worker": {
+    "choice": "background",
+    "platform": "codex",
+    "mode": "manual",
+    "model": "gpt-5.6-terra",
+    "effort": "xhigh",
+    "execution_mode": "host-multi-agent"
+  }
+}
+```
+
+- `refinement_worker.choice` is `background` or `foreground`. Set `executor_worker.choice` to `background`: foreground executor execution is unsupported.
+- `platform` is `codex` or `claude`, and must match the current host platform; otherwise the stored preference is ignored.
+- `mode` is `default` or `manual`. `manual` requires non-empty `model` and `effort` values.
+- `execution_mode` applies only to a Codex executor: use `host-multi-agent` by default or `cli-adapter` as a fallback. Claude executors use the CLI adapter path.
+
+`worker_launch_files` and `smoke_tested_workers` are controller-managed internal state. Leave them out of manual configuration.
+
 Normal `$optim-plans` and `/optim-plans` calls auto-select the smallest planning depth that fits the prompt and repo evidence. Name a level only when you want to override that choice:
 
 | Level | Questions | Best for | What optim-plans does |
