@@ -466,14 +466,13 @@ class E2ETests(unittest.TestCase):
             resolved = controller_json(
                 "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo), env=env
             )
-            self.assertEqual(resolved["adapter"], platform)
-            self.assertIn("model-test", resolved["argv"])
-            self.assertIn("high", " ".join(resolved["argv"]))
+            self.assertEqual(resolved["mode"], "host-multi-agent")
+            self.assertEqual(resolved["platform"], platform)
+            self.assertEqual(resolved["model"], "model-test")
+            self.assertEqual(resolved["reasoning_effort"], "high")
+            self.assertEqual(resolved["prompt_protocol"], "optim-plans-host-executor-v1")
             config = json.loads(config_path(repo).read_text(encoding="utf-8"))
-            launch_files = config["worker_launch_files"]
-            root = config_path(repo).parent.resolve() / "launch-files"
-            self.assertEqual(launch_files["codex_home"], str(root / "codex-home"))
-            self.assertEqual(resolved["env"]["CODEX_HOME"], launch_files["codex_home"])
+            self.assertNotIn("worker_launch_files", config)
 
             second_repo = raw_path / "repo-2"
             git(repo, "worktree", "add", "--detach", str(second_repo), "HEAD")
@@ -481,7 +480,43 @@ class E2ETests(unittest.TestCase):
             reused = controller_json(
                 "worker-config", "--repo", str(second_repo), "--role", "executor", "--cwd", str(second_repo), env=env
             )
-            self.assertEqual(reused["env"]["CODEX_HOME"], launch_files["codex_home"])
+            self.assertEqual(reused["mode"], "host-multi-agent")
+            self.assertEqual(reused["model"], "model-test")
+
+    def test_worker_config_executor_cli_fallback_uses_stored_manual_values(self) -> None:
+        from scripts.optim_plans_core import host_agent
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            init_controller(repo, "Executor CLI Worker")
+            platform = host_agent(os.environ)
+            env = fake_agent_env(raw_path, platform)
+            question = controller_json(
+                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo), env=env
+            )
+            answer_choice(
+                repo,
+                question["nonce"],
+                f"{platform}-cli-manual",
+                "--model",
+                "model-test",
+                "--effort",
+                "high",
+            )
+
+            resolved = controller_json(
+                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo), env=env
+            )
+            self.assertEqual(resolved["adapter"], platform)
+            self.assertIn("model-test", resolved["argv"])
+            self.assertIn("high", " ".join(resolved["argv"]))
+            config = json.loads(config_path(repo).read_text(encoding="utf-8"))
+            self.assertEqual(config["executor_worker"]["execution_mode"], "cli-adapter")
+            launch_files = config["worker_launch_files"]
+            root = config_path(repo).parent.resolve() / "launch-files"
+            self.assertEqual(launch_files["codex_home"], str(root / "codex-home"))
+            self.assertEqual(resolved["env"]["CODEX_HOME"], launch_files["codex_home"])
 
     def test_worker_config_reuses_cached_smoke_tested_worker_block(self) -> None:
         from scripts.optim_plans_core import host_agent
@@ -498,7 +533,7 @@ class E2ETests(unittest.TestCase):
             answer_choice(
                 repo,
                 question["nonce"],
-                f"{platform}-manual",
+                f"{platform}-cli-manual",
                 "--model",
                 "model-test",
                 "--effort",
@@ -518,7 +553,13 @@ class E2ETests(unittest.TestCase):
                 json.dumps(
                     {
                         "schema": 1,
-                        "executor_worker": {"platform": platform, "mode": "manual", "model": "model-test", "effort": "high"},
+                        "executor_worker": {
+                            "platform": platform,
+                            "mode": "manual",
+                            "model": "model-test",
+                            "effort": "high",
+                            "execution_mode": "cli-adapter",
+                        },
                         "smoke_tested_workers": [cached],
                     }
                 ),
@@ -725,6 +766,107 @@ class E2ETests(unittest.TestCase):
             )
             self.assertEqual(git(run_worktree, "rev-parse", "--verify", "HEAD"), json.loads(run_item.stdout)["commit"])
 
+    def test_cli_host_workflow_assigns_registers_completes_and_advances(self) -> None:
+        from scripts.optim_plans_core import host_executor_prompt_hash
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            run_worktree = raw_path / "host-run-worktree"
+            init = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "Host CLI"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            run_id = json.loads(init.stdout)["run_id"]
+            manifest = {
+                "plan_hash": "abc123",
+                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "run_worktree_path": str(run_worktree),
+                "worker": {
+                    "mode": "host-multi-agent",
+                    "platform": "codex",
+                    "agent_type": "optim-plans-executor",
+                    "model": "gpt-test",
+                    "reasoning_effort": "high",
+                    "prompt_protocol": "optim-plans-host-executor-v1",
+                    "prompt_hash": host_executor_prompt_hash(),
+                    "allowed_tools": ["Read", "Write", "Edit", "MultiEdit", "Bash"],
+                    "sandbox": "workspace-write",
+                    "result_schema": "optim-plans-worker-result-v1",
+                },
+                "verification_argv": [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; assert Path('src/host-cli.txt').read_text() == 'ok\\n'",
+                ],
+                "items": [{"id": "TASK-001", "allowed_paths": ["src/host-cli.txt"]}],
+            }
+            manifest_path = raw_path / "host-manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            prepared = controller_json("prepare-execution", "--repo", str(repo), "--manifest", str(manifest_path))
+            answer_choice(repo, prepared["nonce"], "approve")
+            controller_json("start-execution", "--repo", str(repo), "--approval-nonce", prepared["nonce"])
+
+            assignment = controller_json("assign-item", "--repo", str(repo), "--item-id", "TASK-001")
+            launch_block = json.dumps(assignment["launch_block"], sort_keys=True)
+            authorized = controller_json(
+                "authorize-spawn",
+                "--repo",
+                str(repo),
+                "--item-id",
+                "TASK-001",
+                "--assignment-nonce",
+                assignment["assignment_nonce"],
+                "--launch-block",
+                launch_block,
+            )
+            controller_json(
+                "register-agent",
+                "--repo",
+                str(repo),
+                "--item-id",
+                "TASK-001",
+                "--assignment-nonce",
+                assignment["assignment_nonce"],
+                "--launch-nonce",
+                authorized["launch_nonce"],
+                "--agent-handle",
+                "agent-cli",
+                "--launch-block",
+                launch_block,
+            )
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/host-cli.txt").write_text("ok\n", encoding="utf-8")
+            controller_json(
+                "complete-item",
+                "--repo",
+                str(repo),
+                "--item-id",
+                "TASK-001",
+                "--assignment-nonce",
+                assignment["assignment_nonce"],
+                "--agent-handle",
+                "agent-cli",
+                "--evidence",
+                "wait_agent completed",
+            )
+            advanced = controller_json("advance-item", "--repo", str(repo), "--item-id", "TASK-001")
+            self.assertIn("commit", advanced)
+
+            events = [
+                json.loads(line)
+                for line in (repo / ".git" / "optim-plans" / "runs" / run_id / "events.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertIn("host_spawn_authorized", [event["type"] for event in events])
+            self.assertIn("host_agent_registered", [event["type"] for event in events])
+            self.assertIn("run_finished", [event["type"] for event in events])
+
     def test_cli_execution_manifest_approval_and_start_flow(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
@@ -807,7 +949,7 @@ class E2ETests(unittest.TestCase):
                 check=True,
             )
             self.assertNotIn("checkpoint-item", help_result.stdout)
-            self.assertNotIn("complete-item", help_result.stdout)
+            self.assertIn("complete-item", help_result.stdout)
 
     def test_cli_lifecycle_rejects_invalid_states_before_mutation_and_finishes_kept(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

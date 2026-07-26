@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ try:
         QuestionLedger,
         cached_smoke_tested_worker,
         host_agent,
+        host_executor_prompt_hash,
         json_text,
         plan_level,
         read_optim_plans_config,
@@ -30,6 +32,7 @@ except ImportError:  # pragma: no cover - package import path
         QuestionLedger,
         cached_smoke_tested_worker,
         host_agent,
+        host_executor_prompt_hash,
         json_text,
         plan_level,
         read_optim_plans_config,
@@ -80,6 +83,43 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run-item")
     run.add_argument("--repo", required=True)
     run.add_argument("--item-id", required=True)
+
+    assign = sub.add_parser("assign-item")
+    assign.add_argument("--repo", required=True)
+    assign.add_argument("--item-id", required=True)
+
+    authorize = sub.add_parser("authorize-spawn")
+    authorize.add_argument("--repo", required=True)
+    authorize.add_argument("--item-id", required=True)
+    authorize.add_argument("--assignment-nonce", required=True)
+    authorize.add_argument("--launch-block", required=True)
+
+    register = sub.add_parser("register-agent")
+    register.add_argument("--repo", required=True)
+    register.add_argument("--item-id", required=True)
+    register.add_argument("--assignment-nonce", required=True)
+    register.add_argument("--launch-nonce", required=True)
+    register.add_argument("--agent-handle", required=True)
+    register.add_argument("--launch-block", required=True)
+
+    complete = sub.add_parser("complete-item")
+    complete.add_argument("--repo", required=True)
+    complete.add_argument("--item-id", required=True)
+    complete.add_argument("--assignment-nonce", required=True)
+    complete.add_argument("--agent-handle", required=True)
+    complete.add_argument("--evidence", required=True)
+
+    fail = sub.add_parser("fail-item")
+    fail.add_argument("--repo", required=True)
+    fail.add_argument("--item-id", required=True)
+    fail.add_argument("--assignment-nonce", required=True)
+    fail.add_argument("--agent-handle")
+    fail.add_argument("--launch-nonce")
+    fail.add_argument("--evidence", required=True)
+
+    advance = sub.add_parser("advance-item")
+    advance.add_argument("--repo", required=True)
+    advance.add_argument("--item-id", required=True)
 
     retry = sub.add_parser("retry-item")
     retry.add_argument("--repo", required=True)
@@ -140,7 +180,7 @@ def _worker_preference(repo: Path, key: str, *, env: dict[str, str] | None = Non
 
 
 def _background_model_options(
-    *, env: dict[str, str] | None = None
+    *, env: dict[str, str] | None = None, role: str = "refinement"
 ) -> tuple[tuple[str, str, str], list[tuple[str, str, str]]]:
     env = env or os.environ.copy()
     codex_reason = "use detected Codex defaults for model and effort"
@@ -156,10 +196,18 @@ def _background_model_options(
         codex_reason = f"use Codex model {codex.configured_model or 'default'} with effort {codex.configured_effort or 'default'}"
     if claude and claude.available:
         claude_reason = f"use Claude model {claude.configured_model or 'default'} with effort {claude.configured_effort or 'default'}"
-    codex_options = [
-        ("codex-default", "Codex detected defaults", codex_reason),
-        ("codex-manual", "Codex manual model/effort", "choose explicit --model and reasoning effort for Codex"),
-    ]
+    if role == "executor":
+        codex_options = [
+            ("codex-default", "Codex host multi-agent defaults", codex_reason),
+            ("codex-manual", "Codex host multi-agent manual", "choose explicit model and effort for Codex host spawning"),
+            ("codex-cli-default", "Codex CLI fallback defaults", "use Codex CLI subprocess execution with detected defaults"),
+            ("codex-cli-manual", "Codex CLI fallback manual", "use Codex CLI subprocess execution with explicit model and effort"),
+        ]
+    else:
+        codex_options = [
+            ("codex-default", "Codex detected defaults", codex_reason),
+            ("codex-manual", "Codex manual model/effort", "choose explicit --model and reasoning effort for Codex"),
+        ]
     claude_options = [
         ("claude-default", "Claude detected defaults", claude_reason),
         ("claude-manual", "Claude manual model/effort", "choose explicit model and reasoning effort for Claude"),
@@ -199,13 +247,15 @@ def _record_default(state: OptimPlansState, payload: dict[str, Any], choice: str
 
 
 def _worker_question(state: OptimPlansState, *, prompt: str, level: Any, key: str, reuse: bool = True) -> None:
-    recommended, alternatives = _background_model_options()
+    role = "executor" if key == "executor_worker" else "refinement"
+    recommended, alternatives = _background_model_options(role=role)
     question = QuestionLedger().ask(prompt, recommended=recommended, alternatives=alternatives)
     payload = question.to_json(expected_seq=len(state.replay().events) + 1)
     payload.update({"plan_level": level.to_json(), "stage": "background-model", "config_key": key})
     stored = _worker_preference(state.repo, key) if reuse else None
     if stored:
-        choice = f"{stored['platform']}-{stored['mode']}"
+        cli = "-cli" if key == "executor_worker" and stored.get("execution_mode") == "cli-adapter" else ""
+        choice = f"{stored['platform']}{cli}-{stored['mode']}"
         extra = {field: stored[field] for field in ("model", "effort") if field in stored}
         _record_default(state, payload, choice, **extra)
     else:
@@ -286,17 +336,35 @@ def cmd_answer(args: argparse.Namespace) -> None:
     if pending and choice == "auto":
         choice = pending.get("recommended_option_id", choice)
     worker: dict[str, Any] | None = None
-    if pending and pending.get("stage") == "background-model" and choice.endswith("-manual"):
-        if not args.model or not args.model.strip() or not args.effort or not args.effort.strip():
-            raise ContractError("manual worker choice requires non-empty --model and --effort")
-        worker = {
-            "platform": choice.removesuffix("-manual"),
-            "mode": "manual",
-            "model": args.model.strip(),
-            "effort": args.effort.strip(),
-        }
-    elif pending and pending.get("stage") == "background-model" and choice.endswith("-default"):
-        worker = {"platform": choice.removesuffix("-default"), "mode": "default"}
+    if pending and pending.get("stage") == "background-model" and (
+        choice.endswith("-manual") or choice.endswith("-default")
+    ):
+        manual = choice.endswith("-manual")
+        suffix = "-manual" if manual else "-default"
+        base = choice.removesuffix(suffix)
+        execution_mode = None
+        if base.endswith("-cli"):
+            platform = base.removesuffix("-cli")
+            execution_mode = "cli-adapter"
+        else:
+            platform = base
+            if pending.get("config_key") == "executor_worker" and platform == "codex":
+                execution_mode = "host-multi-agent"
+        if platform not in {"codex", "claude"}:
+            raise ContractError(f"invalid worker platform {platform!r}")
+        if manual:
+            if not args.model or not args.model.strip() or not args.effort or not args.effort.strip():
+                raise ContractError("manual worker choice requires non-empty --model and --effort")
+            worker = {
+                "platform": platform,
+                "mode": "manual",
+                "model": args.model.strip(),
+                "effort": args.effort.strip(),
+            }
+        else:
+            worker = {"platform": platform, "mode": "default"}
+        if execution_mode is not None:
+            worker["execution_mode"] = execution_mode
     payload = state.record_answer(args.nonce, args.choice)
     if pending and pending.get("stage") == "agent-choice" and choice in {"foreground", "background"}:
         _save_config(state.repo, pending.get("config_key", "refinement_worker"), {"choice": choice})
@@ -337,6 +405,22 @@ def cmd_worker_config(args: argparse.Namespace) -> None:
     )
     cwd = Path(args.cwd)
     files: dict[str, str] = {}
+    if args.role == "executor" and platform == "codex" and preference.get("execution_mode") != "cli-adapter":
+        print_json(
+            {
+                "mode": "host-multi-agent",
+                "platform": "codex",
+                "agent_type": "optim-plans-executor",
+                "model": info.configured_model or "default",
+                "reasoning_effort": info.configured_effort or "default",
+                "prompt_protocol": "optim-plans-host-executor-v1",
+                "prompt_hash": host_executor_prompt_hash(),
+                "allowed_tools": ["Read", "Write", "Edit", "MultiEdit", "Bash"],
+                "sandbox": "workspace-write",
+                "result_schema": "optim-plans-worker-result-v1",
+            }
+        )
+        return
     launch_files = worker_launch_files(state.repo) if args.role == "executor" else {}
     if platform == "codex":
         config_home = launch_files.get("codex_home")
@@ -407,6 +491,75 @@ def cmd_run_item(args: argparse.Namespace) -> None:
     print_json(state.run_item(args.item_id))
 
 
+def _json_object_arg(raw: str, *, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ContractError(f"{label} must be valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ContractError(f"{label} must be a JSON object")
+    return payload
+
+
+def cmd_assign_item(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(state.assign_item(args.item_id))
+
+
+def cmd_authorize_spawn(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.authorize_spawn(
+            args.item_id,
+            args.assignment_nonce,
+            _json_object_arg(args.launch_block, label="launch block"),
+        )
+    )
+
+
+def cmd_register_agent(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.register_agent(
+            args.item_id,
+            assignment_nonce=args.assignment_nonce,
+            launch_nonce=args.launch_nonce,
+            agent_handle=args.agent_handle,
+            launch_block=_json_object_arg(args.launch_block, label="launch block"),
+        )
+    )
+
+
+def cmd_complete_item(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.complete_host_item(
+            args.item_id,
+            assignment_nonce=args.assignment_nonce,
+            agent_handle=args.agent_handle,
+            evidence=args.evidence,
+        )
+    )
+
+
+def cmd_fail_item(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.fail_host_item(
+            args.item_id,
+            assignment_nonce=args.assignment_nonce,
+            agent_handle=args.agent_handle,
+            launch_nonce=args.launch_nonce,
+            evidence=args.evidence,
+        )
+    )
+
+
+def cmd_advance_item(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(state.advance_item(args.item_id))
+
+
 def cmd_retry_item(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     print_json(state.retry_item(args.item_id, args.approval_nonce))
@@ -456,6 +609,12 @@ def main(argv: list[str] | None = None) -> int:
             "prepare-execution": cmd_prepare_execution,
             "start-execution": cmd_start_execution,
             "run-item": cmd_run_item,
+            "assign-item": cmd_assign_item,
+            "authorize-spawn": cmd_authorize_spawn,
+            "register-agent": cmd_register_agent,
+            "complete-item": cmd_complete_item,
+            "fail-item": cmd_fail_item,
+            "advance-item": cmd_advance_item,
             "retry-item": cmd_retry_item,
             "finish-run": cmd_finish_run,
             "run-worker": cmd_run_worker,

@@ -286,6 +286,17 @@ class SkillContractTests(unittest.TestCase):
             "prepare-execution",
             "start-execution",
             "run-item",
+            "assign-item",
+            "authorize-spawn",
+            "register-agent",
+            "complete-item",
+            "advance-item",
+            "host-multi-agent",
+            "`spawn_agent`",
+            "`wait_agent`",
+            "single-use launch nonce",
+            "assignment nonce",
+            "registered handle",
             "retry-item",
             "finish-run",
             "adapter",
@@ -313,6 +324,7 @@ class SkillContractTests(unittest.TestCase):
             "defense in depth",
         ):
             self.assertIn(expected, execution)
+        self.assertNotIn("Workers launch only through a Claude or Codex adapter argv array", execution)
         self.assertNotIn("--worker-command", execution)
         self.assertNotIn("Run one fresh foreground worker", execution)
         self.assertNotIn("future layers", execution)
@@ -322,6 +334,13 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("Use the controller directly", readme)
         self.assertIn("prepare-execution", readme)
         self.assertIn("start-execution", readme)
+        self.assertIn("assign-item", readme)
+        self.assertIn("authorize-spawn", readme)
+        self.assertIn("register-agent", readme)
+        self.assertIn("complete-item", readme)
+        self.assertIn("advance-item", readme)
+        self.assertIn("spawn_agent", readme)
+        self.assertIn("wait_agent", readme)
         self.assertIn("run-item", readme)
         self.assertIn("finish-run", readme)
         self.assertIn("automatic non-destructive `run_finished` / `kept`", readme)

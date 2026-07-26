@@ -29,11 +29,23 @@ ADAPTER_NAMES = {"claude", "codex"}
 FINISH_OUTCOMES = {"integrated", "pr-opened", "kept", "discarded", "failed", "aborted"}
 SMOKE_TESTED_WORKERS_CONFIG_KEY = "smoke_tested_workers"
 WORKER_LAUNCH_FILES_CONFIG_KEY = "worker_launch_files"
+HOST_EXECUTOR_PROMPT_PROTOCOL = "optim-plans-host-executor-v1"
+HOST_EXECUTOR_RESULT_SCHEMA = "optim-plans-worker-result-v1"
+HOST_EXECUTOR_PROMPT_CONTRACT = {
+    "instructions": [
+        "Modify only the assigned run worktree.",
+        "Return concise completion evidence to the host.",
+        "The controller, not the worker, performs verification, audit, checkpoint, retry, and finalization.",
+    ],
+    "required_result_fields": ["status", "evidence"],
+}
 LEGACY_ACTIVE_EVENT_TYPES = {"item_completed", "execution_completed", "run_completed", "worker_result_recorded"}
 LIFECYCLE_EVENT_TYPES = {
     "execution_manifest_created",
     "execution_started",
     "item_started",
+    "host_spawn_authorized",
+    "host_agent_registered",
     "worker_completed",
     "worker_failed",
     "verification_failed",
@@ -351,6 +363,14 @@ def canonical_execution_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 
 def execution_manifest_hash(manifest: dict[str, Any]) -> str:
     return hashlib.sha256(json_text(canonical_execution_manifest(manifest)).encode()).hexdigest()
+
+
+def stable_json_hash(value: Any) -> str:
+    return hashlib.sha256(json_text(value).encode()).hexdigest()
+
+
+def host_executor_prompt_hash() -> str:
+    return stable_json_hash(HOST_EXECUTOR_PROMPT_CONTRACT)
 
 
 def _hash_file(path: Path) -> str:
@@ -712,7 +732,16 @@ def lifecycle_status(events: list[dict[str, Any]]) -> str:
             status = "awaiting_approval"
         elif event_type == "execution_manifest_created":
             status = "awaiting_approval"
-        elif event_type in {"execution_started", "item_started", "retry_restored", "item_verified", "checkpoint_created", "final_audit_passed"}:
+        elif event_type in {
+            "execution_started",
+            "item_started",
+            "host_spawn_authorized",
+            "host_agent_registered",
+            "retry_restored",
+            "item_verified",
+            "checkpoint_created",
+            "final_audit_passed",
+        }:
             status = "executing"
     return status
 
@@ -850,8 +879,18 @@ class OptimPlansState:
             event = self._append_event_locked("answer_recorded", {"nonce": nonce, "choice": choice})
             return event["payload"]
 
+    def _canonicalize_execution_manifest(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        canonical = _json_clone(manifest, source="execution manifest")
+        if isinstance(canonical.get("worker"), dict):
+            worker_item = {"id": "__manifest_worker__", "worker": canonical["worker"], "allowed_paths": []}
+            canonical["worker"] = self._worker_config(canonical, worker_item)
+        for item in canonical.get("items", []):
+            if isinstance(item, dict) and isinstance(item.get("worker"), dict):
+                item["worker"] = self._worker_config(canonical, item)
+        return canonical
+
     def persist_execution_manifest(self, manifest: dict[str, Any]) -> dict[str, Any]:
-        canonical = canonical_execution_manifest(manifest)
+        canonical = self._canonicalize_execution_manifest(canonical_execution_manifest(manifest))
         with self.controller_lock():
             replayed = self.replay()
             self._require_lifecycle_locked(replayed.events, {"planning"}, "prepare-execution")
@@ -890,7 +929,7 @@ class OptimPlansState:
         manifest_hash = payload.get("manifest_hash")
         if not isinstance(manifest, dict) or not isinstance(manifest_hash, str):
             raise ContractError("execution manifest event is invalid")
-        canonical = canonical_execution_manifest(manifest)
+        canonical = self._canonicalize_execution_manifest(canonical_execution_manifest(manifest))
         if manifest != canonical or execution_manifest_hash(canonical) != manifest_hash:
             raise ContractError("execution manifest hash mismatch")
         return {"manifest": canonical, "manifest_hash": manifest_hash}
@@ -918,7 +957,7 @@ class OptimPlansState:
             raise ContractError(f"cannot read legacy execution manifest {path}: {exc}") from exc
         if not isinstance(manifest, dict):
             raise ContractError("legacy execution manifest must be a JSON object")
-        canonical = canonical_execution_manifest(manifest)
+        canonical = self._canonicalize_execution_manifest(canonical_execution_manifest(manifest))
         canonical_hash = execution_manifest_hash(canonical)
         if manifest_hash not in {canonical_hash, hashlib.sha256(raw).hexdigest()}:
             raise ContractError("legacy execution manifest hash mismatch")
@@ -1238,6 +1277,8 @@ class OptimPlansState:
         raw = item.get("worker", manifest.get("worker", manifest.get("adapter")))
         if not isinstance(raw, dict):
             raise ContractError("execution manifest worker adapter config is required")
+        if raw.get("mode") == "host-multi-agent":
+            return self._host_worker_config(raw)
         adapter = raw.get("adapter", raw.get("name"))
         argv = raw.get("argv")
         env = raw.get("env", {})
@@ -1300,6 +1341,55 @@ class OptimPlansState:
             "smoke": {"argv": list(smoke_argv), "env": dict(smoke_env), "timeout_seconds": float(smoke_timeout)},
             "timeout_seconds": None,
         }
+
+    def _host_worker_config(self, raw: dict[str, Any]) -> dict[str, Any]:
+        platform = raw.get("platform")
+        if platform != "codex":
+            raise ContractError("host multi-agent worker platform must be codex")
+        host = host_agent()
+        if platform != host:
+            raise ContractError(f"cross-platform delegated worker is not allowed: {host} host cannot launch {platform} worker")
+        required = {
+            "agent_type",
+            "model",
+            "reasoning_effort",
+            "prompt_protocol",
+            "prompt_hash",
+            "allowed_tools",
+            "sandbox",
+            "result_schema",
+        }
+        missing = sorted(key for key in required if key not in raw)
+        if missing:
+            raise ContractError(f"host multi-agent worker config missing {missing[0]}")
+        for key in ("agent_type", "model", "reasoning_effort", "prompt_protocol", "prompt_hash", "sandbox", "result_schema"):
+            if not isinstance(raw.get(key), str) or not raw[key].strip():
+                raise ContractError(f"host multi-agent worker {key} must be a non-empty string")
+        service_tier = raw.get("service_tier")
+        if service_tier is not None and (not isinstance(service_tier, str) or not service_tier.strip()):
+            raise ContractError("host multi-agent worker service_tier must be a string")
+        allowed_tools = raw.get("allowed_tools")
+        if not isinstance(allowed_tools, list) or not allowed_tools or not all(
+            isinstance(tool, str) and tool.strip() for tool in allowed_tools
+        ):
+            raise ContractError("host multi-agent worker allowed_tools must be a non-empty string list")
+        if len(set(allowed_tools)) != len(allowed_tools):
+            raise ContractError("host multi-agent worker allowed_tools must not contain duplicates")
+        config = {
+            "mode": "host-multi-agent",
+            "platform": platform,
+            "agent_type": raw["agent_type"],
+            "model": raw["model"],
+            "reasoning_effort": raw["reasoning_effort"],
+            "prompt_protocol": raw["prompt_protocol"],
+            "prompt_hash": raw["prompt_hash"],
+            "allowed_tools": list(allowed_tools),
+            "sandbox": raw["sandbox"],
+            "result_schema": raw["result_schema"],
+        }
+        if service_tier is not None:
+            config["service_tier"] = service_tier
+        return config
 
     def _verification_config(self, manifest: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
         raw = item.get("verification", manifest.get("verification"))
@@ -1409,6 +1499,12 @@ class OptimPlansState:
             if not isinstance(raw, dict):
                 continue
             config = self._worker_config(manifest, item)
+            if config.get("mode") == "host-multi-agent":
+                key = json_text(config)
+                if key in seen:
+                    continue
+                seen.add(key)
+                continue
             key = json_text(
                 {
                     "argv": config["argv"],
@@ -1451,6 +1547,7 @@ class OptimPlansState:
         *,
         evidence: str,
         start: dict[str, Any],
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = {
             "item_id": item_id,
@@ -1458,6 +1555,8 @@ class OptimPlansState:
             "base_commit": start["base_commit"],
             "run_worktree": start["run_worktree"],
         }
+        if extra:
+            payload.update(extra)
         self._append_event_locked(event_type, payload)
         self._append_event_locked(
             "awaiting_retry_decision",
@@ -1504,6 +1603,437 @@ class OptimPlansState:
             raise ContractError("worker result evidence is required")
         return bounded_evidence(payload["evidence"])
 
+    def _require_host_worker_config(self, manifest: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+        config = self._worker_config(manifest, item)
+        if config.get("mode") != "host-multi-agent":
+            raise ContractError("item is not configured for host-multi-agent execution; use run-item for CLI adapter workers")
+        return config
+
+    def _host_launch_block(self, *, item_id: str, start: dict[str, Any], worker_config: dict[str, Any]) -> dict[str, Any]:
+        block = {
+            "run_id": self.run_id,
+            "item_id": item_id,
+            "attempt": start["attempt"],
+            "assignment_nonce": start["assignment_nonce"],
+            "base_commit": start["base_commit"],
+            "cwd": start["run_worktree"],
+            "allowed_paths": list(start["allowed_paths"]),
+            "worker": worker_config,
+        }
+        return block
+
+    def _latest_host_registration(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        assignment_nonce: str,
+        agent_handle: str | None = None,
+    ) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if event["type"] != "host_agent_registered" or payload.get("assignment_nonce") != assignment_nonce:
+                continue
+            if agent_handle is None or payload.get("agent_handle") == agent_handle:
+                return payload
+        return None
+
+    def _latest_host_authorization(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        assignment_nonce: str,
+        launch_nonce: str | None = None,
+    ) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if event["type"] != "host_spawn_authorized" or payload.get("assignment_nonce") != assignment_nonce:
+                continue
+            if launch_nonce is None or payload.get("launch_nonce") == launch_nonce:
+                return payload
+        return None
+
+    def _host_assignment_response_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        item: dict[str, Any],
+        start: dict[str, Any],
+        worker_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        launch_block = self._host_launch_block(item_id=item["id"], start=start, worker_config=worker_config)
+        statuses = self._item_statuses(events, manifest)
+        phase = statuses[item["id"]]
+        if phase == "in_progress":
+            if self._latest_host_registration(events, assignment_nonce=start["assignment_nonce"]) is not None:
+                phase = "agent_registered"
+            elif self._latest_host_authorization(events, assignment_nonce=start["assignment_nonce"]) is not None:
+                phase = "spawn_authorized"
+            else:
+                phase = "assigned"
+        elif phase == "completed":
+            phase = "worker_completed"
+        elif phase == "verified":
+            phase = "checkpointed"
+        return {
+            **start,
+            "phase": phase,
+            "worker": worker_config,
+            "worker_config_hash": stable_json_hash(worker_config),
+            "launch_block": launch_block,
+            "launch_block_hash": stable_json_hash(launch_block),
+        }
+
+    def assign_item(self, item_id: str) -> dict[str, Any]:
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing"}, "assign-item")
+            record = self._execution_manifest_record(replayed.events)
+            started = self._execution_started_record(replayed.events)
+            self._require_protected_metadata_clean(started)
+            item = self._manifest_item(record["manifest"], item_id)
+            worker_config = self._require_host_worker_config(record["manifest"], item)
+            worker_config_hash = stable_json_hash(worker_config)
+            statuses = self._item_statuses(replayed.events, record["manifest"])
+            if statuses[item_id] == "in_progress":
+                start = self._latest_item_start(replayed.events, item_id)
+                if not isinstance(start.get("assignment_nonce"), str) or not start["assignment_nonce"]:
+                    raise ContractError(f"{item_id} active attempt is not a host assignment")
+                if start.get("worker_config_hash") != worker_config_hash:
+                    raise ContractError(f"{item_id} active assignment is not bound to the approved host worker config")
+                return self._host_assignment_response_locked(
+                    replayed.events,
+                    record["manifest"],
+                    item,
+                    start,
+                    worker_config,
+                )
+            if statuses[item_id] != "pending":
+                raise ContractError(f"{item_id} is not ready for host assignment; current status is {statuses[item_id]}")
+            blocked = [
+                current_id
+                for current_id, status in statuses.items()
+                if status in {"in_progress", "completed", "failed"}
+            ]
+            if blocked:
+                raise ContractError(f"another item attempt must be resolved first: {blocked[0]}")
+            next_item = next(
+                (current["id"] for current in record["manifest"]["items"] if statuses[current["id"]] == "pending"),
+                None,
+            )
+            if next_item != item_id:
+                raise ContractError(f"{item_id} is not next in the approved serial order")
+            for dependency in item.get("depends_on", []):
+                if statuses.get(dependency) != "verified":
+                    raise ContractError(f"{item_id} dependency {dependency} is not verified")
+            run_worktree = self._require_run_worktree(
+                started,
+                expected_head=self._latest_checkpoint(replayed.events, started),
+                clean=True,
+            )
+            start = {
+                "item_id": item_id,
+                "attempt": sum(
+                    1
+                    for event in replayed.events
+                    if event["type"] == "item_started" and event.get("payload", {}).get("item_id") == item_id
+                )
+                + 1,
+                "base_commit": git(run_worktree, "rev-parse", "--verify", "HEAD"),
+                "run_worktree": str(run_worktree),
+                "run_branch": started["run_branch"],
+                "allowed_paths": self._item_allowed_paths(item),
+                "assignment_nonce": uuid.uuid4().hex,
+                "worker_config_hash": worker_config_hash,
+            }
+            payload = self._append_event_locked("item_started", start)["payload"]
+            return self._host_assignment_response_locked(
+                [*replayed.events, {"type": "item_started", "payload": payload}],
+                record["manifest"],
+                item,
+                payload,
+                worker_config,
+            )
+
+    def _require_host_assignment_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        item: dict[str, Any],
+        assignment_nonce: str,
+    ) -> dict[str, Any]:
+        if not isinstance(assignment_nonce, str) or not assignment_nonce.strip():
+            raise ContractError("assignment nonce is required")
+        statuses = self._item_statuses(events, manifest)
+        if statuses[item["id"]] != "in_progress":
+            raise ContractError(f"{item['id']} does not have an active host assignment")
+        start = self._latest_item_start(events, item["id"])
+        if start.get("assignment_nonce") != assignment_nonce:
+            raise ContractError("assignment nonce does not match active item assignment")
+        worker_config = self._require_host_worker_config(manifest, item)
+        if start.get("worker_config_hash") != stable_json_hash(worker_config):
+            raise ContractError("active assignment is not bound to the approved host worker config")
+        return start
+
+    def authorize_spawn(self, item_id: str, assignment_nonce: str, launch_block: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(launch_block, dict):
+            raise ContractError("launch block must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing"}, "authorize-spawn")
+            record = self._execution_manifest_record(replayed.events)
+            item = self._manifest_item(record["manifest"], item_id)
+            worker_config = self._require_host_worker_config(record["manifest"], item)
+            start = self._require_host_assignment_locked(replayed.events, record["manifest"], item, assignment_nonce)
+            expected = self._host_launch_block(item_id=item_id, start=start, worker_config=worker_config)
+            if launch_block != expected:
+                raise ContractError("host launch block does not match the approved item assignment")
+            existing_registration = self._latest_host_registration(replayed.events, assignment_nonce=assignment_nonce)
+            if existing_registration is not None:
+                raise ContractError("host agent is already registered for this assignment")
+            launch_block_hash = stable_json_hash(launch_block)
+            existing = self._latest_host_authorization(replayed.events, assignment_nonce=assignment_nonce)
+            if existing is not None:
+                if existing.get("launch_block_hash") != launch_block_hash:
+                    raise ContractError("active host spawn authorization is bound to a different launch block")
+                return existing
+            payload = {
+                "item_id": item_id,
+                "attempt": start["attempt"],
+                "assignment_nonce": assignment_nonce,
+                "launch_nonce": uuid.uuid4().hex,
+                "worker_config_hash": stable_json_hash(worker_config),
+                "launch_block_hash": launch_block_hash,
+                "launch_block": launch_block,
+            }
+            return self._append_event_locked("host_spawn_authorized", payload)["payload"]
+
+    def register_agent(
+        self,
+        item_id: str,
+        *,
+        assignment_nonce: str,
+        launch_nonce: str,
+        agent_handle: str,
+        launch_block: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(agent_handle, str) or not agent_handle.strip():
+            raise ContractError("agent handle is required")
+        if not isinstance(launch_nonce, str) or not launch_nonce.strip():
+            raise ContractError("launch nonce is required")
+        if not isinstance(launch_block, dict):
+            raise ContractError("launch block must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing"}, "register-agent")
+            record = self._execution_manifest_record(replayed.events)
+            item = self._manifest_item(record["manifest"], item_id)
+            worker_config = self._require_host_worker_config(record["manifest"], item)
+            start = self._require_host_assignment_locked(replayed.events, record["manifest"], item, assignment_nonce)
+            expected = self._host_launch_block(item_id=item_id, start=start, worker_config=worker_config)
+            if launch_block != expected:
+                raise ContractError("host launch block does not match the approved item assignment")
+            authorization = self._latest_host_authorization(
+                replayed.events,
+                assignment_nonce=assignment_nonce,
+                launch_nonce=launch_nonce,
+            )
+            if authorization is None:
+                raise ContractError("unknown or stale host launch nonce")
+            if authorization.get("launch_block_hash") != stable_json_hash(launch_block):
+                raise ContractError("host launch nonce is not bound to this launch block")
+            if any(
+                event["type"] == "host_agent_registered"
+                and event.get("payload", {}).get("launch_nonce") == launch_nonce
+                for event in replayed.events
+            ):
+                raise ContractError("host launch nonce is stale or already used")
+            payload = {
+                "item_id": item_id,
+                "attempt": start["attempt"],
+                "assignment_nonce": assignment_nonce,
+                "launch_nonce": launch_nonce,
+                "agent_handle": agent_handle,
+                "worker_config_hash": stable_json_hash(worker_config),
+                "launch_block_hash": stable_json_hash(launch_block),
+            }
+            return self._append_event_locked("host_agent_registered", payload)["payload"]
+
+    def _require_registered_host_agent_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        item: dict[str, Any],
+        *,
+        assignment_nonce: str,
+        agent_handle: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not isinstance(agent_handle, str) or not agent_handle.strip():
+            raise ContractError("agent handle is required")
+        start = self._require_host_assignment_locked(events, manifest, item, assignment_nonce)
+        registration = self._latest_host_registration(
+            events,
+            assignment_nonce=assignment_nonce,
+            agent_handle=agent_handle,
+        )
+        if registration is None:
+            raise ContractError("registered host agent handle does not match active assignment")
+        return start, registration
+
+    def complete_host_item(
+        self,
+        item_id: str,
+        *,
+        assignment_nonce: str,
+        agent_handle: str,
+        evidence: str,
+    ) -> dict[str, Any]:
+        if not evidence.strip():
+            raise ContractError("worker completion evidence is required")
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            item = self._manifest_item(record["manifest"], item_id)
+            _start, registration = self._require_registered_host_agent_locked(
+                replayed.events,
+                record["manifest"],
+                item,
+                assignment_nonce=assignment_nonce,
+                agent_handle=agent_handle,
+            )
+            payload = {
+                "item_id": item_id,
+                "assignment_nonce": assignment_nonce,
+                "agent_handle": agent_handle,
+                "launch_nonce": registration["launch_nonce"],
+                "evidence": bounded_evidence(evidence),
+            }
+            return self._append_event_locked("worker_completed", payload)["payload"]
+
+    def fail_host_item(
+        self,
+        item_id: str,
+        *,
+        assignment_nonce: str,
+        agent_handle: str | None = None,
+        launch_nonce: str | None = None,
+        evidence: str,
+    ) -> dict[str, Any]:
+        if not evidence.strip():
+            raise ContractError("worker failure evidence is required")
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            item = self._manifest_item(record["manifest"], item_id)
+            if agent_handle is not None:
+                start, registration = self._require_registered_host_agent_locked(
+                    replayed.events,
+                    record["manifest"],
+                    item,
+                    assignment_nonce=assignment_nonce,
+                    agent_handle=agent_handle,
+                )
+                extra = {
+                    "assignment_nonce": assignment_nonce,
+                    "agent_handle": agent_handle,
+                    "launch_nonce": registration["launch_nonce"],
+                }
+            else:
+                if not isinstance(launch_nonce, str) or not launch_nonce.strip():
+                    raise ContractError("launch nonce is required when failing a host item without an agent handle")
+                start = self._require_host_assignment_locked(replayed.events, record["manifest"], item, assignment_nonce)
+                authorization = self._latest_host_authorization(
+                    replayed.events,
+                    assignment_nonce=assignment_nonce,
+                    launch_nonce=launch_nonce,
+                )
+                if authorization is None:
+                    raise ContractError("unknown or stale host launch nonce")
+                if any(
+                    event["type"] == "host_agent_registered"
+                    and event.get("payload", {}).get("launch_nonce") == launch_nonce
+                    for event in replayed.events
+                ):
+                    raise ContractError("agent handle is required after host launch nonce registration")
+                extra = {
+                    "assignment_nonce": assignment_nonce,
+                    "launch_nonce": launch_nonce,
+                    "agent_handle_lost": True,
+                }
+            return self._record_attempt_failure_locked(
+                "worker_failed",
+                item_id,
+                evidence=evidence,
+                start=start,
+                extra=extra,
+            )
+
+    def advance_item(self, item_id: str) -> dict[str, Any]:
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            item = self._manifest_item(record["manifest"], item_id)
+            worker_config = self._require_host_worker_config(record["manifest"], item)
+            verification_config = self._verification_config(record["manifest"], item)
+            statuses = self._item_statuses(replayed.events, record["manifest"])
+            status = statuses[item_id]
+            if status == "pending":
+                return {"item_id": item_id, "phase": "pending"}
+            if status == "in_progress":
+                start = self._latest_item_start(replayed.events, item_id)
+                return self._host_assignment_response_locked(
+                    replayed.events,
+                    record["manifest"],
+                    item,
+                    start,
+                    worker_config,
+                )
+            if status == "failed":
+                return {"item_id": item_id, "phase": "failed"}
+            if status == "verified":
+                all_verified = all(current == "verified" for current in statuses.values())
+                checkpoint = next(
+                    event["payload"]
+                    for event in reversed(replayed.events)
+                    if event["type"] == "checkpoint_created" and event.get("payload", {}).get("item_id") == item_id
+                )
+                if not all_verified:
+                    return {"item_id": item_id, "phase": "checkpointed", **checkpoint}
+            elif status != "completed":
+                raise ContractError(f"{item_id} cannot be advanced from status {status}")
+
+        if status == "completed":
+            self._assert_protected_metadata_before_verification(item_id)
+            start = self._latest_item_start(self.replay().events, item_id)
+            verifier_env = os.environ.copy()
+            verifier_env.update(verification_config["env"])
+            verifier = run_process_group(
+                verification_config["argv"],
+                cwd=Path(start["run_worktree"]),
+                env=verifier_env,
+                timeout_seconds=verification_config["timeout_seconds"],
+            )
+            verifier_evidence = verifier.evidence(
+                "verification",
+                timeout_seconds=verification_config["timeout_seconds"],
+            )
+            if not verifier.ok():
+                self.record_attempt_failure("verification_failed", item_id, evidence=verifier_evidence)
+                raise ContractError(verifier_evidence)
+            checkpoint = self.checkpoint_item(item_id, evidence=verifier_evidence)
+        else:
+            checkpoint = None
+
+        try:
+            final = self.final_audit()
+            payload: dict[str, Any] = {"item_id": item_id, "phase": "finalized", "final_audit": final}
+        except ContractError:
+            if lifecycle_status(self.replay().events) == "awaiting_retry_decision":
+                raise
+            payload = {"item_id": item_id, "phase": "checkpointed"}
+        if checkpoint is not None:
+            payload.update(checkpoint)
+        return payload
+
     def _assert_protected_metadata_before_verification(self, item_id: str) -> None:
         try:
             with self.controller_lock():
@@ -1520,6 +2050,11 @@ class OptimPlansState:
         record = self._execution_manifest_record(replayed.events)
         item = self._manifest_item(record["manifest"], item_id)
         worker_config = self._worker_config(record["manifest"], item)
+        if worker_config.get("mode") == "host-multi-agent":
+            raise ContractError(
+                "host-multi-agent workers require assign-item, authorize-spawn, register-agent, "
+                "complete-item or fail-item, and advance-item; run-item is CLI adapter fallback only"
+            )
         verification_config = self._verification_config(record["manifest"], item)
         self._ensure_adapter_launch_files(worker_config, write=False)
 

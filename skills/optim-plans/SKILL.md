@@ -123,7 +123,7 @@ When native cards are available, render the controller's pending question as car
 - `run.json` is immutable; `events.jsonl` is authoritative.
 - Reviewer and criticizer sessions are read-only and fresh.
 - Execution requires a clean committed Git base and explicit manifest-bound human launch approval.
-- Worker adapter manifests include same-agent CLI smoke argv before immutable recording, unless they exactly match a cached smoke-tested worker block, then run only through adapter argv with `shell=False` in one controller-owned run worktree and branch.
+- Executor manifests use same-platform delegation. Codex delegated executors prefer host-multi-agent mode with `assign-item` / `authorize-spawn` / host `spawn_agent` / `register-agent` / host `wait_agent` / `complete-item` or `fail-item` / `advance-item`; CLI adapter fallback still requires same-agent smoke argv before immutable recording and runs through adapter argv with `shell=False` in one controller-owned run worktree and branch.
 - Controller verification, path audits, and protected Git metadata audits are authoritative; worker prose is evidence only.
 - Verified items become checkpoint commits in serial DAG order. The first retry restores automatically; later failed attempts require explicit retry approval before restoration.
 - All verified items plus final audits automatically record a non-destructive `kept` terminal outcome; `finish-run` remains a manual recovery command, and `integrated` finish runs the full local proof before terminal success.

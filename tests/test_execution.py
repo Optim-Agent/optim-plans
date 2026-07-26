@@ -15,6 +15,22 @@ from helpers import git, make_executable, make_repo
 
 
 class ExecutionTests(unittest.TestCase):
+    def _host_worker(self) -> dict[str, object]:
+        from scripts.optim_plans_core import host_executor_prompt_hash
+
+        return {
+            "mode": "host-multi-agent",
+            "platform": "codex",
+            "agent_type": "optim-plans-executor",
+            "model": "gpt-test",
+            "reasoning_effort": "high",
+            "prompt_protocol": "optim-plans-host-executor-v1",
+            "prompt_hash": host_executor_prompt_hash(),
+            "allowed_tools": ["Read", "Write", "Edit", "MultiEdit", "Bash"],
+            "sandbox": "workspace-write",
+            "result_schema": "optim-plans-worker-result-v1",
+        }
+
     def _worker(self, path: Path, body: str) -> Path:
         return make_executable(
             path,
@@ -59,6 +75,34 @@ class ExecutionTests(unittest.TestCase):
                 "verification_argv": verification_argv,
                 "verification_timeout_seconds": verification_timeout_seconds,
                 "items": [{"id": "TASK-001", "allowed_paths": allowed_paths or ["src/app.txt"]}],
+            }
+        )
+        question = state.request_execution_approval()
+        state.record_answer(question["nonce"], "approve")
+        state.start_execution(question["nonce"])
+        return state, run_worktree
+
+    def _start_host_execution(
+        self,
+        repo: Path,
+        *,
+        verification_argv: list[str],
+        allowed_paths: list[str] | None = None,
+    ):
+        from scripts.optim_plans_core import OptimPlansState
+
+        state = OptimPlansState.initialize(repo, topic="Host Execution", plan_hash="abc123")
+        run_worktree = state.root / "run-worktrees" / state.run_id
+        state.persist_execution_manifest(
+            {
+                "plan_hash": "abc123",
+                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "run_worktree_path": str(run_worktree),
+                "worker": self._host_worker(),
+                "verification_argv": verification_argv,
+                "verification_timeout_seconds": 5,
+                "items": [{"id": "TASK-001", "allowed_paths": allowed_paths or ["src/host.txt"]}],
             }
         )
         question = state.request_execution_approval()
@@ -125,6 +169,174 @@ class ExecutionTests(unittest.TestCase):
         )
         git(repo, "add", "scripts", "hooks", "tests")
         git(repo, "commit", "-m", "add proof harness")
+
+    def test_host_manifest_accepts_codex_block_without_smoke_and_run_item_rejects_it(self) -> None:
+        from scripts.optim_plans_core import ContractError, OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, _run_worktree = self._start_host_execution(
+                repo,
+                verification_argv=[sys.executable, "-c", "pass"],
+            )
+            manifest = next(
+                event["payload"]["manifest"]
+                for event in state.replay().events
+                if event["type"] == "execution_manifest_created"
+            )
+            self.assertEqual(manifest["worker"]["mode"], "host-multi-agent")
+            self.assertNotIn("smoke", manifest["worker"])
+
+            with self.assertRaisesRegex(ContractError, "host-multi-agent workers require assign-item"):
+                state.run_item("TASK-001")
+
+            for label, worker, message in (
+                ("missing", {**self._host_worker(), "prompt_hash": None}, "prompt_hash"),
+                ("cross_platform", {**self._host_worker(), "platform": "claude"}, "platform must be codex"),
+                ("duplicate_tools", {**self._host_worker(), "allowed_tools": ["Read", "Read"]}, "duplicates"),
+            ):
+                with self.subTest(label=label):
+                    case_root = Path(raw) / label
+                    case_root.mkdir()
+                    bad_repo = make_repo(case_root)
+                    bad_state = OptimPlansState.initialize(bad_repo, topic=label, plan_hash="abc123")
+                    with self.assertRaisesRegex(ContractError, message):
+                        bad_state.persist_execution_manifest(
+                            {
+                                "plan_hash": "abc123",
+                                "source_base": git(bad_repo, "rev-parse", "--verify", "HEAD"),
+                                "integration_destination": "main",
+                                "worker": worker,
+                                "verification_argv": [sys.executable, "-c", "pass"],
+                                "items": [{"id": "TASK-001", "allowed_paths": ["src/host.txt"]}],
+                            }
+                        )
+
+    def test_host_assignment_authorization_registration_and_completion_are_bound(self) -> None:
+        from scripts.optim_plans_core import ContractError, OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_execution(
+                repo,
+                verification_argv=[
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; assert Path('src/host.txt').read_text() == 'ok\\n'",
+                ],
+            )
+            assignment = state.assign_item("TASK-001")
+            reloaded = OptimPlansState.load_active(repo).assign_item("TASK-001")
+            self.assertEqual(reloaded["assignment_nonce"], assignment["assignment_nonce"])
+            self.assertEqual(
+                1,
+                sum(event["type"] == "item_started" for event in state.replay().events),
+            )
+
+            altered = json.loads(json.dumps(assignment["launch_block"]))
+            altered["worker"]["model"] = "other-model"
+            with self.assertRaisesRegex(ContractError, "launch block does not match"):
+                state.authorize_spawn("TASK-001", assignment["assignment_nonce"], altered)
+
+            authorized = state.authorize_spawn("TASK-001", assignment["assignment_nonce"], assignment["launch_block"])
+            authorized_again = state.authorize_spawn("TASK-001", assignment["assignment_nonce"], assignment["launch_block"])
+            self.assertEqual(authorized_again["launch_nonce"], authorized["launch_nonce"])
+
+            registered = state.register_agent(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                launch_nonce=authorized["launch_nonce"],
+                agent_handle="agent-123",
+                launch_block=assignment["launch_block"],
+            )
+            self.assertEqual(registered["agent_handle"], "agent-123")
+            with self.assertRaisesRegex(ContractError, "stale or already used"):
+                state.register_agent(
+                    "TASK-001",
+                    assignment_nonce=assignment["assignment_nonce"],
+                    launch_nonce=authorized["launch_nonce"],
+                    agent_handle="agent-123",
+                    launch_block=assignment["launch_block"],
+                )
+            with self.assertRaisesRegex(ContractError, "registered host agent handle"):
+                state.complete_host_item(
+                    "TASK-001",
+                    assignment_nonce=assignment["assignment_nonce"],
+                    agent_handle="wrong-handle",
+                    evidence="done",
+                )
+
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/host.txt").write_text("ok\n", encoding="utf-8")
+            state.complete_host_item(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                agent_handle="agent-123",
+                evidence="wait_agent completed",
+            )
+            checkpoint = state.advance_item("TASK-001")
+
+            self.assertIn("commit", checkpoint)
+            event_types = [event["type"] for event in state.replay().events]
+            self.assertIn("host_spawn_authorized", event_types)
+            self.assertIn("host_agent_registered", event_types)
+            self.assertIn("checkpoint_created", event_types)
+            self.assertIn("run_finished", event_types)
+
+    def test_host_advance_reports_resume_phases_and_failure_enters_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, _run_worktree = self._start_host_execution(
+                repo,
+                verification_argv=[sys.executable, "-c", "pass"],
+            )
+            assignment = state.assign_item("TASK-001")
+            self.assertEqual(state.advance_item("TASK-001")["phase"], "assigned")
+            authorized = state.authorize_spawn("TASK-001", assignment["assignment_nonce"], assignment["launch_block"])
+            self.assertEqual(state.advance_item("TASK-001")["phase"], "spawn_authorized")
+            state.register_agent(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                launch_nonce=authorized["launch_nonce"],
+                agent_handle="agent-fail",
+                launch_block=assignment["launch_block"],
+            )
+            self.assertEqual(state.advance_item("TASK-001")["phase"], "agent_registered")
+            state.fail_host_item(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                agent_handle="agent-fail",
+                evidence="wait_agent failed",
+            )
+
+            events = state.replay().events
+            self.assertEqual(state.replay().status, "awaiting_retry_decision")
+            self.assertIn("worker_failed", [event["type"] for event in events])
+            self.assertNotIn("checkpoint_created", [event["type"] for event in events])
+            failure = next(event["payload"] for event in events if event["type"] == "worker_failed")
+            self.assertEqual(failure["agent_handle"], "agent-fail")
+
+    def test_host_failure_can_record_lost_handle_after_spawn_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, _run_worktree = self._start_host_execution(
+                repo,
+                verification_argv=[sys.executable, "-c", "pass"],
+            )
+            assignment = state.assign_item("TASK-001")
+            authorized = state.authorize_spawn("TASK-001", assignment["assignment_nonce"], assignment["launch_block"])
+
+            state.fail_host_item(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                launch_nonce=authorized["launch_nonce"],
+                evidence="spawned host agent handle was lost before registration",
+            )
+
+            failure = next(event["payload"] for event in state.replay().events if event["type"] == "worker_failed")
+            self.assertTrue(failure["agent_handle_lost"])
+            self.assertEqual(failure["launch_nonce"], authorized["launch_nonce"])
+            self.assertEqual(state.replay().status, "awaiting_retry_decision")
 
     def test_run_item_launches_manifest_adapter_and_verifier_before_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

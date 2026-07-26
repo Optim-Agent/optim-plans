@@ -296,11 +296,22 @@ python3 scripts/optim_plans.py worker-config --repo <repo> --role reviewer --cwd
 python3 scripts/optim_plans.py worker-config --repo <repo> --role executor --cwd <run-worktree>
 
 # after PLAN_vN is final, write a manifest JSON that binds the plan hash,
-# source base, adapter argv/config plus smoke, item DAG, allowed paths, verification argv,
+# source base, host launch block or adapter argv/config plus smoke, item DAG, allowed paths, verification argv,
 # run worktree/branch, integration destination, verification timeout, retry limits, and policy.
 python3 scripts/optim_plans.py prepare-execution --repo <repo> --manifest <manifest.json>
 python3 scripts/optim_plans.py answer --repo <repo> --nonce <approval-nonce> --choice approve
 python3 scripts/optim_plans.py start-execution --repo <repo> --approval-nonce <approval-nonce>
+
+# Codex host-multi-agent executor path:
+python3 scripts/optim_plans.py assign-item --repo <repo> --item-id TASK-001
+python3 scripts/optim_plans.py authorize-spawn --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --launch-block '<json>'
+# call host spawn_agent with the approved launch block, then:
+python3 scripts/optim_plans.py register-agent --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
+# call host wait_agent, then:
+python3 scripts/optim_plans.py complete-item --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --agent-handle <handle> --evidence "<summary>"
+python3 scripts/optim_plans.py advance-item --repo <repo> --item-id TASK-001
+
+# CLI adapter fallback:
 python3 scripts/optim_plans.py run-item --repo <repo> --item-id TASK-001
 python3 scripts/optim_plans.py status --repo <repo>
 python3 scripts/optim_plans.py answer --repo <repo> --nonce <finish-nonce> --choice kept
@@ -329,13 +340,14 @@ The implemented guardrails include:
 - advisory lock around event append;
 - strict JSON parsing with duplicate-key rejection;
 - collision-safe artifact directories;
-- adapter CLI smoke before immutable manifest-bound execution approval, with exact smoke-tested worker blocks cached in Git-common config;
+- host-multi-agent executor assignment, pre-spawn authorization, agent handle registration, wait result completion/failure, and replayable `advance-item`;
+- adapter CLI smoke before immutable manifest-bound execution approval for CLI fallback, with exact smoke-tested worker blocks cached in Git-common config;
 - immutable manifest-bound execution approval with a single-use nonce recorded in `events.jsonl`;
 - atomic question nonce consumption;
 - fail-closed Auto-complete allowlist;
 - one controller-owned run worktree and run branch for the cumulative run;
 - serial item execution with checkpoint commits in stable DAG order;
-- adapter-only argv launch with `shell=False` after adapter CLI smoke;
+- host `spawn_agent` / `wait_agent` orchestration for Codex executor delegation, or adapter-only argv launch with `shell=False` after adapter CLI smoke;
 - controller verification and Git audits for path allowlists and protected Git metadata;
 - `awaiting_retry_decision` with bounded evidence, automatic first retry restore, and explicit retry approval for later retries;
 - automatic non-destructive `run_finished` / `kept` after every item and final audit pass;
