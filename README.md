@@ -169,6 +169,17 @@ claude plugin marketplace add ./ --scope user
 claude plugin install optim-plans@optim-plans-dev --scope user
 ```
 
+If an installed local development plugin looks stale, refresh it and restart Claude Code:
+
+```bash
+claude plugin marketplace update optim-plans-dev
+claude plugin update optim-plans@optim-plans-dev --scope user
+claude plugin list
+claude plugin details optim-plans@optim-plans-dev
+```
+
+Restart is required for updated plugin code to apply. `.git/optim-plans/config.json` is not an install artifact; it is created per target repo when worker/model choices or execution prep need persisted config. Delegated worker choices persist under `refinement_worker.choice` and `executor_worker.choice`.
+
 For one-off development without installing, load this checkout for a single Claude session:
 
 ```bash

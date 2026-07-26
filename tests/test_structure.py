@@ -67,6 +67,23 @@ class StructureTests(unittest.TestCase):
             text = (ROOT / relative).read_text(encoding="utf-8")
             self.assertIn(expected, text, relative)
 
+    def test_claude_quick_start_documents_stale_install_recovery(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        claude_start = readme.split("### Install for local Claude Code development", 1)[1].split(
+            "### Install for local Codex development",
+            1,
+        )[0]
+        for expected in (
+            "claude plugin marketplace update optim-plans-dev",
+            "claude plugin update optim-plans@optim-plans-dev --scope user",
+            "claude plugin list",
+            "claude plugin details optim-plans@optim-plans-dev",
+            "Restart is required for updated plugin code to apply.",
+            "`.git/optim-plans/config.json` is not an install artifact",
+            "`refinement_worker.choice` and `executor_worker.choice`",
+        ):
+            self.assertIn(expected, claude_start)
+
     def test_documented_scope_matches_execution_lifecycle(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         implemented = readme.split("Implemented:", 1)[1].split("Not implemented yet:", 1)[0]
