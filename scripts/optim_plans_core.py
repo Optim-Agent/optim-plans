@@ -1774,17 +1774,6 @@ class OptimPlansState:
             try:
                 for path in audit["changed_files"]:
                     git(run_worktree, "add", "-A", "--", path)
-                env = os.environ.copy()
-                env.update(
-                    {
-                        "GIT_AUTHOR_NAME": "Optim Plans",
-                        "GIT_AUTHOR_EMAIL": "optim-plans@example.invalid",
-                        "GIT_COMMITTER_NAME": "Optim Plans",
-                        "GIT_COMMITTER_EMAIL": "optim-plans@example.invalid",
-                        "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
-                        "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
-                    }
-                )
                 subprocess.run(
                     [
                         "git",
@@ -1800,7 +1789,6 @@ class OptimPlansState:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     check=True,
-                    env=env,
                 )
                 commit = git(run_worktree, "rev-parse", "--verify", "HEAD")
                 clean_audit = audit_git_delta(run_worktree, allowed_paths=self._item_allowed_paths(item))

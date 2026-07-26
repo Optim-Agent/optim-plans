@@ -1132,9 +1132,11 @@ class ExecutionTests(unittest.TestCase):
             state.record_answer(question["nonce"], "approve")
             self.assertTrue(state.start_execution(question["nonce"])["source_clean"])
 
-    def test_run_worktree_checkpoint_uses_fixed_identity_and_preserves_source(self) -> None:
+    def test_run_worktree_checkpoint_uses_git_identity_and_preserves_source(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
+            git(repo, "config", "user.name", "Ada User")
+            git(repo, "config", "user.email", "ada@example.invalid")
             (repo / "src").mkdir()
             (repo / "src/app.py").write_text("v1\n", encoding="utf-8")
             git(repo, "add", "src/app.py")
@@ -1155,10 +1157,17 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(git(repo, "rev-parse", "--verify", "HEAD"), source_head)
             self.assertEqual((repo / "src/app.py").read_text(encoding="utf-8"), "v1\n")
             self.assertEqual(git(run_worktree, "rev-parse", "--verify", "HEAD"), checkpoint["commit"])
-            self.assertEqual(
-                git(run_worktree, "show", "-s", "--format=%an <%ae>", checkpoint["commit"]),
-                "Optim Plans <optim-plans@example.invalid>",
-            )
+            metadata = git(
+                run_worktree,
+                "show",
+                "-s",
+                "--format=%an <%ae>%n%cn <%ce>%n%aI%n%cI",
+                checkpoint["commit"],
+            ).splitlines()
+            self.assertEqual(metadata[0], "Ada User <ada@example.invalid>")
+            self.assertEqual(metadata[1], "Ada User <ada@example.invalid>")
+            self.assertFalse(metadata[2].startswith("2000-01-01T00:00:00"))
+            self.assertFalse(metadata[3].startswith("2000-01-01T00:00:00"))
             self.assertEqual(git(repo, "status", "--porcelain=v1"), "")
             self.assertEqual(
                 [event["type"] for event in state.replay().events[-4:]],
