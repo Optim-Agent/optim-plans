@@ -173,6 +173,8 @@ class SkillContractTests(unittest.TestCase):
             "`--agent`",
             "`optim-plans-executor`",
             "same-platform delegated worker",
+            "exact cached smoke-tested worker block",
+            "`smoke_tested_workers`",
             "`codex` host -> Codex sub-agent",
             "`claude` host -> Claude sub-agent",
             "foreground standalone agent",

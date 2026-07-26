@@ -14,6 +14,8 @@ first, ISO dates, and grouped change types.
   required if that retry fails again.
 - Integrated finish now runs the full local proof before recording terminal
   success, and proof failures stay in integration recovery.
+- Successful delegated worker smoke tests now cache exact worker blocks in
+  Git-common config for matching later manifests.
 - Planning agent and same-platform worker preferences are now reused from the
   repository's Git common directory, with pre-manifest worker configuration.
 - Codex read-only worker commands now load normal user configuration instead of

@@ -26,6 +26,7 @@ TIMEOUT_KILL_GRACE_SECONDS = 1.0
 FULL_INTEGRATION_VERIFICATION_TIMEOUT_SECONDS = 300.0
 ADAPTER_NAMES = {"claude", "codex"}
 FINISH_OUTCOMES = {"integrated", "pr-opened", "kept", "discarded", "failed", "aborted"}
+SMOKE_TESTED_WORKERS_CONFIG_KEY = "smoke_tested_workers"
 LEGACY_ACTIVE_EVENT_TYPES = {"item_completed", "execution_completed", "run_completed", "worker_result_recorded"}
 LIFECYCLE_EVENT_TYPES = {
     "execution_manifest_created",
@@ -151,6 +152,76 @@ def git_common_dir(repo: Path) -> Path:
     if not path.is_absolute():
         path = repo / path
     return path.absolute()
+
+
+def optim_plans_config_path(repo: Path) -> Path:
+    return git_common_dir(repo) / "optim-plans" / "config.json"
+
+
+def read_optim_plans_config(repo: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(optim_plans_config_path(repo).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) and payload.get("schema") == 1 else {}
+
+
+def save_optim_plans_config_value(repo: Path, key: str, value: Any) -> None:
+    config = read_optim_plans_config(repo)
+    config.update({"schema": 1, key: value})
+    write_json_atomic(optim_plans_config_path(repo), config)
+
+
+def _smoke_worker_payload(worker: dict[str, Any]) -> dict[str, Any]:
+    return _json_clone(
+        {
+            "adapter": worker.get("adapter"),
+            "argv": worker.get("argv"),
+            "env": worker.get("env", {}),
+            "config_files": worker.get("config_files", []),
+            "smoke": worker.get("smoke"),
+        },
+        source="smoke-tested worker config",
+    )
+
+
+def _smoke_worker_identity(worker: dict[str, Any]) -> dict[str, Any]:
+    return _json_clone(
+        {
+            "adapter": worker.get("adapter"),
+            "argv": worker.get("argv"),
+            "env": worker.get("env", {}),
+            "config_files": worker.get("config_files", []),
+        },
+        source="worker config identity",
+    )
+
+
+def _smoke_tested_workers(repo: Path) -> list[dict[str, Any]]:
+    entries = read_optim_plans_config(repo).get(SMOKE_TESTED_WORKERS_CONFIG_KEY, [])
+    if not isinstance(entries, list):
+        return []
+    return [_json_clone(entry, source="smoke-tested worker entry") for entry in entries if isinstance(entry, dict)]
+
+
+def smoke_tested_worker_is_cached(repo: Path, worker: dict[str, Any]) -> bool:
+    return _smoke_worker_payload(worker) in _smoke_tested_workers(repo)
+
+
+def cached_smoke_tested_worker(repo: Path, worker: dict[str, Any]) -> dict[str, Any] | None:
+    identity = _smoke_worker_identity(worker)
+    for entry in _smoke_tested_workers(repo):
+        if _smoke_worker_identity(entry) == identity:
+            return entry
+    return None
+
+
+def remember_smoke_tested_worker(repo: Path, worker: dict[str, Any]) -> None:
+    entry = _smoke_worker_payload(worker)
+    entries = _smoke_tested_workers(repo)
+    if entry in entries:
+        return
+    save_optim_plans_config_value(repo, SMOKE_TESTED_WORKERS_CONFIG_KEY, [*entries, entry])
 
 
 def canonical_worktree_id(repo: Path) -> str:
@@ -1280,6 +1351,8 @@ class OptimPlansState:
             if key in seen:
                 continue
             seen.add(key)
+            if smoke_tested_worker_is_cached(self.repo, config):
+                continue
             self._ensure_adapter_launch_files(config)
             env = os.environ.copy()
             env.update(config["env"])
@@ -1300,6 +1373,7 @@ class OptimPlansState:
                 raise ContractError("worker adapter smoke result must be a JSON object")
             if payload.get("status") != "valid":
                 raise ContractError("worker adapter smoke result status must be valid")
+            remember_smoke_tested_worker(self.repo, config)
 
     def _record_attempt_failure_locked(
         self,

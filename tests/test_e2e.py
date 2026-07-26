@@ -406,6 +406,52 @@ class E2ETests(unittest.TestCase):
             self.assertIn("model-test", resolved["argv"])
             self.assertIn("high", resolved["argv"])
 
+    def test_worker_config_reuses_cached_smoke_tested_worker_block(self) -> None:
+        from scripts.optim_plans_core import host_agent
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Cached Worker")
+            platform = host_agent(os.environ)
+            question = controller_json(
+                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo)
+            )
+            answer_choice(
+                repo,
+                question["nonce"],
+                f"{platform}-manual",
+                "--model",
+                "model-test",
+                "--effort",
+                "high",
+            )
+            resolved = controller_json(
+                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo)
+            )
+            cached = {
+                "adapter": resolved["adapter"],
+                "argv": resolved["argv"],
+                "env": resolved["env"],
+                "config_files": [],
+                "smoke": {"argv": [*resolved["argv"], "--optim-plans-smoke"], "env": {}, "timeout_seconds": 10.0},
+            }
+            config_path(repo).write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "executor_worker": {"platform": platform, "mode": "manual", "model": "model-test", "effort": "high"},
+                        "smoke_tested_workers": [cached],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            reused = controller_json(
+                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo)
+            )
+
+            self.assertEqual(reused, cached)
+
     def test_cli_ask_mini_plan_uses_same_refinement_mode_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))

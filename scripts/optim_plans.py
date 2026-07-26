@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -15,24 +14,26 @@ try:
         ContractError,
         OptimPlansState,
         QuestionLedger,
-        git_common_dir,
+        cached_smoke_tested_worker,
         host_agent,
         json_text,
         plan_level,
+        read_optim_plans_config,
+        save_optim_plans_config_value,
         sha256_text,
-        write_json_atomic,
     )
 except ImportError:  # pragma: no cover - package import path
     from scripts.optim_plans_core import (
         ContractError,
         OptimPlansState,
         QuestionLedger,
-        git_common_dir,
+        cached_smoke_tested_worker,
         host_agent,
         json_text,
         plan_level,
+        read_optim_plans_config,
+        save_optim_plans_config_value,
         sha256_text,
-        write_json_atomic,
     )
 
 
@@ -107,26 +108,12 @@ def _host_agent(env: dict[str, str]) -> str:
     return host_agent(env)
 
 
-def _config_path(repo: Path) -> Path:
-    return git_common_dir(repo) / "optim-plans" / "config.json"
-
-
-def _read_config(repo: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(_config_path(repo).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) and payload.get("schema") == 1 else {}
-
-
 def _save_config(repo: Path, key: str, value: dict[str, Any]) -> None:
-    config = _read_config(repo)
-    config.update({"schema": 1, key: value})
-    write_json_atomic(_config_path(repo), config)
+    save_optim_plans_config_value(repo, key, value)
 
 
 def _worker_preference(repo: Path, key: str, *, env: dict[str, str] | None = None) -> dict[str, str] | None:
-    value = _read_config(repo).get(key)
+    value = read_optim_plans_config(repo).get(key)
     platform = host_agent(env)
     if not isinstance(value, dict) or value.get("platform") != platform or value.get("mode") not in {"default", "manual"}:
         return None
@@ -257,7 +244,7 @@ def cmd_ask(args: argparse.Namespace) -> None:
     payload["plan_level"] = level.to_json()
     if args.stage != "default":
         payload["stage"] = args.stage
-    stored_agent_choice = _read_config(state.repo).get("agent_choice")
+    stored_agent_choice = read_optim_plans_config(state.repo).get("agent_choice")
     stored_choice = stored_agent_choice.get("choice") if isinstance(stored_agent_choice, dict) else None
     if args.stage == "agent-choice" and stored_choice in {"background", "foreground"}:
         _record_default(state, payload, stored_choice)
@@ -349,7 +336,9 @@ def cmd_worker_config(args: argparse.Namespace) -> None:
         env = {"PWD": str(cwd)}
         if args.role == "executor":
             files = {"settings": str(settings), "plugin_dir": str(plugin_dir)}
-    print_json({"adapter": platform, "argv": command.argv, "env": env, **files})
+    worker = {"adapter": platform, "argv": command.argv, "env": env, "config_files": []}
+    cached = cached_smoke_tested_worker(state.repo, worker)
+    print_json(cached if cached is not None else {"adapter": platform, "argv": command.argv, "env": env, **files})
 
 
 def cmd_status(args: argparse.Namespace) -> None:

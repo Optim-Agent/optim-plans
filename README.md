@@ -329,7 +329,7 @@ The implemented guardrails include:
 - advisory lock around event append;
 - strict JSON parsing with duplicate-key rejection;
 - collision-safe artifact directories;
-- adapter CLI smoke before immutable manifest-bound execution approval;
+- adapter CLI smoke before immutable manifest-bound execution approval, with exact smoke-tested worker blocks cached in Git-common config;
 - immutable manifest-bound execution approval with a single-use nonce recorded in `events.jsonl`;
 - atomic question nonce consumption;
 - fail-closed Auto-complete allowlist;
@@ -397,7 +397,7 @@ Implemented:
 - shared skill and reference docs;
 - durable state and artifact primitives;
 - question contract and nonce validation;
-- adapter CLI smoke before immutable manifest-bound execution approval;
+- adapter CLI smoke before immutable manifest-bound execution approval, with exact smoke-tested worker block reuse;
 - approval, execution-ledger, and refinement-ledger primitives;
 - agent discovery and role-based command builders;
 - one controller-owned run worktree and run branch;

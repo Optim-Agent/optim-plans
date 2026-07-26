@@ -903,6 +903,59 @@ class ExecutionTests(unittest.TestCase):
 
             self.assertNotIn("execution_manifest_created", [event["type"] for event in state.replay().events])
 
+    def test_successful_smoke_is_cached_for_matching_later_manifest(self) -> None:
+        from scripts.optim_plans_core import OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            count_path = raw_path / "smoke-count.txt"
+            fail_path = raw_path / "fail-smoke"
+            worker = make_executable(
+                raw_path / "codex",
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "if '--optim-plans-smoke' in sys.argv:\n"
+                "    count = Path(os.environ['SMOKE_COUNT'])\n"
+                "    value = int(count.read_text(encoding='utf-8') or '0') if count.exists() else 0\n"
+                "    count.write_text(str(value + 1), encoding='utf-8')\n"
+                "    status = 'invalid' if Path(os.environ['SMOKE_FAIL']).exists() else 'valid'\n"
+                "    print(json.dumps({'status': status, 'evidence': 'adapter smoke'}))\n"
+                "    raise SystemExit(0)\n"
+                "print('{}')\n",
+            )
+            worker_argv = [str(worker), "exec", "-C", str(raw_path / "run-worktree")]
+            manifest = {
+                "plan_hash": "abc123",
+                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "worker": {
+                    "adapter": "codex",
+                    "argv": worker_argv,
+                    "smoke": {
+                        "argv": [*worker_argv, "--optim-plans-smoke"],
+                        "env": {"SMOKE_COUNT": str(count_path), "SMOKE_FAIL": str(fail_path)},
+                    },
+                },
+                "verification_argv": [sys.executable, "-c", "pass"],
+                "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
+            }
+            state = OptimPlansState.initialize(repo, topic="Smoke Cache", plan_hash="abc123")
+            state.persist_execution_manifest(manifest)
+            self.assertEqual(count_path.read_text(encoding="utf-8"), "1")
+            config_path = repo / ".git" / "optim-plans" / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(config["smoke_tested_workers"][0]["smoke"]["argv"], [*worker_argv, "--optim-plans-smoke"])
+
+            second_repo = raw_path / "repo-2"
+            git(repo, "worktree", "add", "--detach", str(second_repo), "HEAD")
+            fail_path.write_text("fail\n", encoding="utf-8")
+            second = OptimPlansState.initialize(second_repo, topic="Smoke Cache 2", plan_hash="abc123")
+            second.persist_execution_manifest(manifest)
+
+            self.assertEqual(count_path.read_text(encoding="utf-8"), "1")
+
     def test_execution_approval_consumption_is_events_backed_and_single_use(self) -> None:
         import subprocess
         import sys
