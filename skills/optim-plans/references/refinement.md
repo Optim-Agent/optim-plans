@@ -8,6 +8,8 @@ Evidence fields cite verifiable sources: repo paths for codebase claims, URLs fo
 
 Criticizer mode asks zero to five adaptive questions. It is not reviewer mode: do not batch findings, do not self-apply fixes, and do not let the criticizer answer its own challenges. Each fresh turn receives the full validated transcript and unresolved ledger, then returns exactly one schema-validated user-facing question or `no_question`. Before presenting criticizer-question options, show the original criticism and summarize the main criticizing point in at most three sentences; highlight the most important point. That question may include evidence and a recommended answer, but it must be asked with the normal card ordering contract. No question means convergence only when the ledger has no unresolved material finding.
 
+During criticizing, challenge applicable edge-case dimensions: boundaries, empty or invalid inputs, failure and retry paths, state transitions, concurrency, and compatibility.
+
 Do not write `PLAN_vN_criticizer_comments.md` or `PLAN_v(N+1).md` until every criticizer question has a recorded user answer or an Auto-complete answer recorded by the controller. The criticizer comments file records challenge, presented options, selected answer, answer source, and summarized fix; only then revise the plan.
 
 Write only the comment artifact matching the selected mode: `PLAN_vN_reviewer_comments.md` or `PLAN_vN_criticizer_comments.md`. Then write `PLAN_v(N+1).md` with a revision ledger.

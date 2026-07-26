@@ -9,6 +9,7 @@ Plan before execution. The bundled controller keeps durable state under the Git 
 
 This flow fixes two failure modes in order: grilling the user fixes building the *wrong thing*; adversarial reviewer/criticizer passes fix a plan that *sounds right but breaks*.
 
+QA work is not a rubber stamp: during brainstorming and criticizing, actively hunt applicable edge cases before the plan can sound settled.
 <HARD-GATE>
 Do NOT write code, scaffold files, edit repo docs/config, or change target files until the plan has passed refinement or the human selects `Jump to executor`, and the controller has recorded immutable execution-manifest approval. Before execution approval, the only permitted writes are controller state and `docs/optim-plans/YYYY-MM-DD-topic/` artifacts. Auto-complete can answer planning questions; Auto-complete never approves execution, and execution approval questions must not offer `Auto-complete`. The `Jump to executor` / `skip-refinement-execute` human choice is direct execution approval through the controller.
 </HARD-GATE>

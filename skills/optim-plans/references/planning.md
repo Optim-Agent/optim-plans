@@ -2,6 +2,8 @@
 
 Inspect the target repo first and collect evidence before asking unresolved questions. Record that evidence in `PLAN_v1.md` when writing the plan.
 
+During brainstorming QA, probe applicable edge-case dimensions before `PLAN_v1.md`: boundaries, empty or invalid inputs, failure and retry paths, state transitions, concurrency, and compatibility.
+
 Resolve unknowns by the evidence ladder: codebase first, cited web research second, user question last. When a recommended option rests on a web-verifiable claim, websearch it before presenting the question and record the source in `PLAN_v1.md`. Never present a recommendation backed only by an unchecked assumption.
 
 One answered question is not a launch approval. When the decision tree is resolved, write `PLAN_v1.md` under `docs/optim-plans/YYYY-MM-DD-topic/`, then run refinement before any target repo file edit.
