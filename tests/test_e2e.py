@@ -15,12 +15,13 @@ from helpers import git, make_executable, make_repo
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def controller_json(*args: str) -> dict[str, Any]:
+def controller_json(*args: str, env: dict[str, str] | None = None) -> dict[str, Any]:
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts/optim_plans.py"), *args],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=env,
         check=True,
     )
     return json.loads(result.stdout)
@@ -42,6 +43,23 @@ def config_path(repo: Path) -> Path:
     from scripts.optim_plans_core import git_common_dir
 
     return git_common_dir(repo) / "optim-plans" / "config.json"
+
+
+def fake_agent_env(raw_path: Path, platform: str) -> dict[str, str]:
+    bin_dir = raw_path / "bin"
+    bin_dir.mkdir()
+    make_executable(
+        bin_dir / platform,
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "if '--version' in sys.argv:\n"
+        "    print('fake agent 1.0')\n"
+        "elif len(sys.argv) >= 2 and sys.argv[1] == 'config':\n"
+        "    print(json.dumps({'model': 'detected-model', 'effort': 'detected-effort'}))\n",
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    return env
 
 
 class E2ETests(unittest.TestCase):
@@ -382,11 +400,13 @@ class E2ETests(unittest.TestCase):
         from scripts.optim_plans_core import host_agent
 
         with tempfile.TemporaryDirectory() as raw:
-            repo = make_repo(Path(raw))
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
             init_controller(repo, "Executor Worker")
             platform = host_agent(os.environ)
+            env = fake_agent_env(raw_path, platform)
             question = controller_json(
-                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo)
+                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo), env=env
             )
             self.assertEqual(question["config_key"], "executor_worker")
             answer_choice(
@@ -400,7 +420,7 @@ class E2ETests(unittest.TestCase):
             )
 
             resolved = controller_json(
-                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo)
+                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo), env=env
             )
             self.assertEqual(resolved["adapter"], platform)
             self.assertIn("model-test", resolved["argv"])
@@ -410,11 +430,13 @@ class E2ETests(unittest.TestCase):
         from scripts.optim_plans_core import host_agent
 
         with tempfile.TemporaryDirectory() as raw:
-            repo = make_repo(Path(raw))
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
             init_controller(repo, "Cached Worker")
             platform = host_agent(os.environ)
+            env = fake_agent_env(raw_path, platform)
             question = controller_json(
-                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo)
+                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo), env=env
             )
             answer_choice(
                 repo,
@@ -426,7 +448,7 @@ class E2ETests(unittest.TestCase):
                 "high",
             )
             resolved = controller_json(
-                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo)
+                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo), env=env
             )
             cached = {
                 "adapter": resolved["adapter"],
@@ -447,7 +469,7 @@ class E2ETests(unittest.TestCase):
             )
 
             reused = controller_json(
-                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo)
+                "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo), env=env
             )
 
             self.assertEqual(reused, cached)
