@@ -13,6 +13,8 @@ from typing import Any
 try:
     from optim_plans_core import (
         ContractError,
+        HOST_VALIDATOR_PROMPT_PROTOCOL,
+        HOST_VALIDATOR_RESULT_SCHEMA,
         OptimPlansState,
         QuestionLedger,
         cached_smoke_tested_worker,
@@ -23,11 +25,14 @@ try:
         read_optim_plans_config,
         save_optim_plans_config_value,
         sha256_text,
+        validator_prompt_hash,
         worker_launch_files,
     )
 except ImportError:  # pragma: no cover - package import path
     from scripts.optim_plans_core import (
         ContractError,
+        HOST_VALIDATOR_PROMPT_PROTOCOL,
+        HOST_VALIDATOR_RESULT_SCHEMA,
         OptimPlansState,
         QuestionLedger,
         cached_smoke_tested_worker,
@@ -38,6 +43,7 @@ except ImportError:  # pragma: no cover - package import path
         read_optim_plans_config,
         save_optim_plans_config_value,
         sha256_text,
+        validator_prompt_hash,
         worker_launch_files,
     )
 
@@ -55,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--prompt", required=True)
     ask.add_argument("--plan-level", default="plan")
     ask.add_argument("--stage", choices=["default", "agent-choice", "background-model"], default="default")
-    ask.add_argument("--role", choices=["refinement", "executor"], default="refinement")
+    ask.add_argument("--role", choices=["refinement", "executor", "validator"], default="refinement")
 
     answer = sub.add_parser("answer")
     answer.add_argument("--repo", required=True)
@@ -66,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     worker_config = sub.add_parser("worker-config")
     worker_config.add_argument("--repo", required=True)
-    worker_config.add_argument("--role", required=True, choices=["reviewer", "criticizer", "executor"])
+    worker_config.add_argument("--role", required=True, choices=["reviewer", "criticizer", "executor", "validator"])
     worker_config.add_argument("--cwd", required=True)
 
     status = sub.add_parser("status")
@@ -121,6 +127,40 @@ def build_parser() -> argparse.ArgumentParser:
     advance.add_argument("--repo", required=True)
     advance.add_argument("--item-id", required=True)
 
+    assign_validator = sub.add_parser("assign-validator")
+    assign_validator.add_argument("--repo", required=True)
+    assign_validator.add_argument("--item-id", required=True)
+
+    authorize_validator = sub.add_parser("authorize-validator-spawn")
+    authorize_validator.add_argument("--repo", required=True)
+    authorize_validator.add_argument("--item-id", required=True)
+    authorize_validator.add_argument("--validator-nonce", required=True)
+    authorize_validator.add_argument("--launch-block", required=True)
+
+    register_validator = sub.add_parser("register-validator")
+    register_validator.add_argument("--repo", required=True)
+    register_validator.add_argument("--item-id", required=True)
+    register_validator.add_argument("--validator-nonce", required=True)
+    register_validator.add_argument("--launch-nonce", required=True)
+    register_validator.add_argument("--agent-handle", required=True)
+    register_validator.add_argument("--launch-block", required=True)
+
+    complete_validator = sub.add_parser("complete-validator")
+    complete_validator.add_argument("--repo", required=True)
+    complete_validator.add_argument("--item-id", required=True)
+    complete_validator.add_argument("--validator-nonce", required=True)
+    complete_validator.add_argument("--agent-handle")
+    complete_validator.add_argument("--result", required=True)
+
+    fail_validator = sub.add_parser("fail-validator")
+    fail_validator.add_argument("--repo", required=True)
+    fail_validator.add_argument("--item-id", required=True)
+    fail_validator.add_argument("--reason", required=True, choices=["process", "crash", "timeout", "interrupted", "unknown"])
+    fail_validator.add_argument("--validator-nonce")
+    fail_validator.add_argument("--agent-handle")
+    fail_validator.add_argument("--launch-nonce")
+    fail_validator.add_argument("--evidence", default="")
+
     retry = sub.add_parser("retry-item")
     retry.add_argument("--repo", required=True)
     retry.add_argument("--item-id", required=True)
@@ -158,7 +198,11 @@ def _save_config(repo: Path, key: str, value: dict[str, Any]) -> None:
 
 
 def _worker_config_key(role: str) -> str:
-    return "executor_worker" if role == "executor" else "refinement_worker"
+    if role == "executor":
+        return "executor_worker"
+    if role == "validator":
+        return "validator_worker"
+    return "refinement_worker"
 
 
 def _agent_choice_preference(repo: Path, key: str) -> str | None:
@@ -177,6 +221,16 @@ def _worker_preference(repo: Path, key: str, *, env: dict[str, str] | None = Non
     if value["mode"] == "manual" and not all(isinstance(value.get(field), str) and value[field].strip() for field in ("model", "effort")):
         return None
     return value
+
+
+def _manifest_requests_validator(manifest_path: Path) -> bool:
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ContractError(f"cannot read execution manifest {manifest_path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ContractError("execution manifest must be a JSON object")
+    return any(key in payload for key in ("schema_version", "protocol_version", "validator_worker"))
 
 
 def _background_model_options(
@@ -202,6 +256,13 @@ def _background_model_options(
             ("codex-manual", "Codex host multi-agent manual", "choose explicit model and effort for Codex host spawning"),
             ("codex-cli-default", "Codex CLI fallback defaults", "use Codex CLI subprocess execution with detected defaults"),
             ("codex-cli-manual", "Codex CLI fallback manual", "use Codex CLI subprocess execution with explicit model and effort"),
+        ]
+    elif role == "validator":
+        codex_options = [
+            ("codex-default", "Codex host validator defaults", codex_reason),
+            ("codex-manual", "Codex host validator manual", "choose explicit model and effort for Codex host validation"),
+            ("codex-cli-default", "Codex validator CLI fallback defaults", "use Codex CLI subprocess validation with detected defaults"),
+            ("codex-cli-manual", "Codex validator CLI fallback manual", "use Codex CLI subprocess validation with explicit model and effort"),
         ]
     else:
         codex_options = [
@@ -247,7 +308,7 @@ def _record_default(state: OptimPlansState, payload: dict[str, Any], choice: str
 
 
 def _worker_question(state: OptimPlansState, *, prompt: str, level: Any, key: str, reuse: bool = True) -> None:
-    role = "executor" if key == "executor_worker" else "refinement"
+    role = "executor" if key == "executor_worker" else "validator" if key == "validator_worker" else "refinement"
     recommended, alternatives = _background_model_options(role=role)
     question = QuestionLedger().ask(prompt, recommended=recommended, alternatives=alternatives)
     payload = question.to_json(expected_seq=len(state.replay().events) + 1)
@@ -286,7 +347,8 @@ def cmd_ask(args: argparse.Namespace) -> None:
         "skip refinement; use this choice as direct execution launch approval",
     )
     if args.stage == "agent-choice":
-        delegated = ("background", "Delegated foreground run", "choose a standalone sub-agent with visible output")
+        delegated_label = "Delegated validator run" if args.role == "validator" else "Delegated foreground run"
+        delegated = ("background", delegated_label, "choose a standalone sub-agent with visible output")
         question = ledger.ask(
             args.prompt,
             recommended=delegated,
@@ -348,7 +410,7 @@ def cmd_answer(args: argparse.Namespace) -> None:
             execution_mode = "cli-adapter"
         else:
             platform = base
-            if pending.get("config_key") == "executor_worker" and platform == "codex":
+            if pending.get("config_key") in {"executor_worker", "validator_worker"} and platform == "codex":
                 execution_mode = "host-multi-agent"
         if platform not in {"codex", "claude"}:
             raise ContractError(f"invalid worker platform {platform!r}")
@@ -367,7 +429,25 @@ def cmd_answer(args: argparse.Namespace) -> None:
             worker["execution_mode"] = execution_mode
     payload = state.record_answer(args.nonce, args.choice)
     if pending and pending.get("stage") == "agent-choice" and choice in {"foreground", "background"}:
-        _save_config(state.repo, pending.get("config_key", "refinement_worker"), {"choice": choice})
+        config_key = pending.get("config_key", "refinement_worker")
+        _save_config(state.repo, config_key, {"choice": choice})
+        if config_key == "executor_worker" and _agent_choice_preference(state.repo, "validator_worker") is None:
+            question = QuestionLedger().ask(
+                "Choose validator worker",
+                recommended=("background", "Delegated validator run", "run the validator in a fresh read-only worker"),
+                alternatives=[
+                    (
+                        "foreground",
+                        "Current foreground session",
+                        "run validator recovery or review steps in this session",
+                    )
+                ],
+            )
+            follow_up = question.to_json(expected_seq=len(state.replay().events) + 1)
+            follow_up.update({"plan_level": plan_level("plan").to_json(), "stage": "agent-choice", "config_key": "validator_worker"})
+            state.append_event("pending_question", follow_up)
+            print_json(follow_up)
+            return
     elif worker and worker["platform"] == host_agent():
         _save_config(state.repo, pending.get("config_key", "refinement_worker"), worker)
     print_json(payload)
@@ -376,6 +456,17 @@ def cmd_answer(args: argparse.Namespace) -> None:
 def cmd_worker_config(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     key = _worker_config_key(args.role)
+    if args.role == "validator" and _agent_choice_preference(state.repo, key) == "foreground":
+        print_json(
+            {
+                "mode": "foreground",
+                "platform": host_agent(),
+                "prompt_protocol": HOST_VALIDATOR_PROMPT_PROTOCOL,
+                "prompt_hash": validator_prompt_hash(),
+                "result_schema": HOST_VALIDATOR_RESULT_SCHEMA,
+            }
+        )
+        return
     preference = _worker_preference(state.repo, key)
     if preference is None:
         _worker_question(state, prompt=f"Choose {args.role} model and effort", level=plan_level("plan"), key=key)
@@ -418,6 +509,22 @@ def cmd_worker_config(args: argparse.Namespace) -> None:
                 "allowed_tools": ["Read", "Write", "Edit", "MultiEdit", "Bash"],
                 "sandbox": "workspace-write",
                 "result_schema": "optim-plans-worker-result-v1",
+            }
+        )
+        return
+    if args.role == "validator" and platform == "codex" and preference.get("execution_mode") != "cli-adapter":
+        print_json(
+            {
+                "mode": "host-multi-agent",
+                "platform": "codex",
+                "agent_type": "optim-plans-validator",
+                "model": info.configured_model or "default",
+                "reasoning_effort": info.configured_effort or "default",
+                "prompt_protocol": HOST_VALIDATOR_PROMPT_PROTOCOL,
+                "prompt_hash": validator_prompt_hash(),
+                "allowed_tools": ["Read", "Bash"],
+                "sandbox": "read-only",
+                "result_schema": HOST_VALIDATOR_RESULT_SCHEMA,
             }
         )
         return
@@ -489,6 +596,18 @@ def cmd_prepare_execution(args: argparse.Namespace) -> None:
             prompt="Choose executor model and effort",
             level=plan_level("plan"),
             key="executor_worker",
+        )
+        return
+    if (
+        _manifest_requests_validator(Path(args.manifest))
+        and _worker_preference(state.repo, "validator_worker") is None
+        and _agent_choice_preference(state.repo, "validator_worker") != "foreground"
+    ):
+        _worker_question(
+            state,
+            prompt="Choose validator model and effort",
+            level=plan_level("plan"),
+            key="validator_worker",
         )
         return
     print_json(state.prepare_execution(Path(args.manifest)))
@@ -573,6 +692,61 @@ def cmd_advance_item(args: argparse.Namespace) -> None:
     print_json(state.advance_item(args.item_id))
 
 
+def cmd_assign_validator(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(state.assign_validator(args.item_id))
+
+
+def cmd_authorize_validator_spawn(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.authorize_validator_spawn(
+            args.item_id,
+            args.validator_nonce,
+            _json_object_arg(args.launch_block, label="validator launch block"),
+        )
+    )
+
+
+def cmd_register_validator(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.register_validator_agent(
+            args.item_id,
+            validator_nonce=args.validator_nonce,
+            launch_nonce=args.launch_nonce,
+            agent_handle=args.agent_handle,
+            launch_block=_json_object_arg(args.launch_block, label="validator launch block"),
+        )
+    )
+
+
+def cmd_complete_validator(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.record_validator_result(
+            args.item_id,
+            validator_nonce=args.validator_nonce,
+            agent_handle=args.agent_handle,
+            result=_json_object_arg(args.result, label="validator result"),
+        )
+    )
+
+
+def cmd_fail_validator(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.fail_validator(
+            args.item_id,
+            reason=args.reason,
+            validator_nonce=args.validator_nonce,
+            agent_handle=args.agent_handle,
+            launch_nonce=args.launch_nonce,
+            evidence=args.evidence,
+        )
+    )
+
+
 def cmd_retry_item(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     print_json(state.retry_item(args.item_id, args.approval_nonce))
@@ -628,6 +802,11 @@ def main(argv: list[str] | None = None) -> int:
             "complete-item": cmd_complete_item,
             "fail-item": cmd_fail_item,
             "advance-item": cmd_advance_item,
+            "assign-validator": cmd_assign_validator,
+            "authorize-validator-spawn": cmd_authorize_validator_spawn,
+            "register-validator": cmd_register_validator,
+            "complete-validator": cmd_complete_validator,
+            "fail-validator": cmd_fail_validator,
             "retry-item": cmd_retry_item,
             "finish-run": cmd_finish_run,
             "run-worker": cmd_run_worker,

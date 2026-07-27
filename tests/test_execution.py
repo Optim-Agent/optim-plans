@@ -38,6 +38,31 @@ class ExecutionTests(unittest.TestCase):
             "result_schema": "optim-plans-worker-result-v1",
         }
 
+    def _host_validator(self) -> dict[str, object]:
+        from scripts.optim_plans_core import HOST_VALIDATOR_RESULT_SCHEMA, validator_prompt_hash
+
+        return {
+            "mode": "host-multi-agent",
+            "platform": "codex",
+            "agent_type": "optim-plans-validator",
+            "model": "gpt-test",
+            "reasoning_effort": "high",
+            "prompt_protocol": "optim-plans-host-validator-v1",
+            "prompt_hash": validator_prompt_hash(),
+            "allowed_tools": ["Read", "Bash"],
+            "sandbox": "read-only",
+            "result_schema": HOST_VALIDATOR_RESULT_SCHEMA,
+        }
+
+    def _validator_prompt(self) -> dict[str, object]:
+        from scripts.optim_plans_core import HOST_VALIDATOR_PROMPT_PROTOCOL, VALIDATOR_PROMPT_CONTRACT, validator_prompt_hash
+
+        return {
+            "protocol": HOST_VALIDATOR_PROMPT_PROTOCOL,
+            "hash": validator_prompt_hash(),
+            "contract": VALIDATOR_PROMPT_CONTRACT,
+        }
+
     def _worker(self, path: Path, body: str) -> Path:
         return make_executable(
             path,
@@ -82,6 +107,59 @@ class ExecutionTests(unittest.TestCase):
                 "verification_argv": verification_argv,
                 "verification_timeout_seconds": verification_timeout_seconds,
                 "items": [{"id": "TASK-001", "allowed_paths": allowed_paths or ["src/app.txt"]}],
+            }
+        )
+        question = state.request_execution_approval()
+        state.record_answer(question["nonce"], "approve")
+        state.start_execution(question["nonce"])
+        return state, run_worktree
+
+    def _start_current_adapter_execution(
+        self,
+        repo: Path,
+        *,
+        worker: Path,
+        validator: Path,
+        verification_argv: list[str],
+        allowed_paths: list[str] | None = None,
+        validator_retry_limit: int = 1,
+    ):
+        from scripts.optim_plans_core import EXECUTION_PROTOCOL, EXECUTION_SCHEMA_VERSION, OptimPlansState
+
+        state = OptimPlansState.initialize(repo, topic="Validator Execution", plan_hash="abc123")
+        run_worktree = state.root / "run-worktrees" / state.run_id
+        worker_argv = [str(worker), "exec", "-C", str(run_worktree)]
+        validator_argv = [str(validator), "exec", "-C", str(run_worktree)]
+        state.persist_execution_manifest(
+            {
+                "schema_version": EXECUTION_SCHEMA_VERSION,
+                "protocol_version": EXECUTION_PROTOCOL,
+                "plan_hash": "abc123",
+                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "run_worktree_path": str(run_worktree),
+                "worker": {
+                    "adapter": "codex",
+                    "argv": worker_argv,
+                    "smoke": {"argv": [*worker_argv, "--optim-plans-smoke"], "timeout_seconds": 5},
+                },
+                "validator_worker": {
+                    "adapter": "codex",
+                    "argv": validator_argv,
+                    "smoke": {"argv": [*validator_argv, "--optim-plans-smoke"], "timeout_seconds": 5},
+                    "timeout_seconds": 5,
+                },
+                "validator_prompt": self._validator_prompt(),
+                "validator_retry_limit": validator_retry_limit,
+                "verification_argv": verification_argv,
+                "verification_timeout_seconds": 5,
+                "items": [
+                    {
+                        "id": "TASK-001",
+                        "allowed_paths": allowed_paths or ["src/app.txt"],
+                        "validator": {"check_ids": ["VC-TASK-001"]},
+                    }
+                ],
             }
         )
         question = state.request_execution_approval()
@@ -341,6 +419,104 @@ class ExecutionTests(unittest.TestCase):
             self.assertIn("checkpoint_created", event_types)
             self.assertIn("run_finished", event_types)
 
+    def test_host_validator_launch_and_result_are_bound_to_nonce_handle_and_delta(self) -> None:
+        from scripts.optim_plans_core import EXECUTION_PROTOCOL, EXECUTION_SCHEMA_VERSION, OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            self._add_passing_full_proof_files(repo)
+            state = OptimPlansState.initialize(repo, topic="Host Validator", plan_hash="abc123")
+            run_worktree = state.root / "run-worktrees" / state.run_id
+            state.persist_execution_manifest(
+                {
+                    "schema_version": EXECUTION_SCHEMA_VERSION,
+                    "protocol_version": EXECUTION_PROTOCOL,
+                    "plan_hash": "abc123",
+                    "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                    "integration_destination": "main",
+                    "run_worktree_path": str(run_worktree),
+                    "worker": self._host_worker(),
+                    "validator_worker": self._host_validator(),
+                    "validator_prompt": self._validator_prompt(),
+                    "validator_retry_limit": 0,
+                    "verification_argv": [
+                        sys.executable,
+                        "-c",
+                        "from pathlib import Path; assert Path('src/host-validator.txt').read_text() == 'ok\\n'",
+                    ],
+                    "verification_timeout_seconds": 5,
+                    "items": [
+                        {
+                            "id": "TASK-001",
+                            "allowed_paths": ["src/host-validator.txt"],
+                            "validator": {"check_ids": ["VC-TASK-001"]},
+                        }
+                    ],
+                }
+            )
+            question = state.request_execution_approval()
+            state.record_answer(question["nonce"], "approve")
+            state.start_execution(question["nonce"])
+
+            assignment = state.assign_item("TASK-001")
+            executor_auth = state.authorize_spawn("TASK-001", assignment["assignment_nonce"], assignment["launch_block"])
+            state.register_agent(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                launch_nonce=executor_auth["launch_nonce"],
+                agent_handle="executor-agent",
+                launch_block=assignment["launch_block"],
+            )
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/host-validator.txt").write_text("ok\n", encoding="utf-8")
+            state.complete_host_item(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                agent_handle="executor-agent",
+                evidence="executor done",
+            )
+            validator_assignment = state.advance_item("TASK-001")
+            self.assertEqual(validator_assignment["phase"], "validator_assigned")
+            validator_auth = state.authorize_validator_spawn(
+                "TASK-001",
+                validator_assignment["validator_nonce"],
+                validator_assignment["validator_launch_block"],
+            )
+            state.register_validator_agent(
+                "TASK-001",
+                validator_nonce=validator_assignment["validator_nonce"],
+                launch_nonce=validator_auth["launch_nonce"],
+                agent_handle="validator-agent",
+                launch_block=validator_assignment["validator_launch_block"],
+            )
+            result = {
+                "run_id": state.run_id,
+                "item_id": "TASK-001",
+                "attempt": validator_assignment["attempt"],
+                "nonce": validator_assignment["validator_nonce"],
+                "validator_config_hash": validator_assignment["validator_config_hash"],
+                "validator_prompt_hash": validator_assignment["validator_prompt_hash"],
+                "delta_fingerprint": validator_assignment["delta_fingerprint"],
+                "status": "pass",
+                "evidence": "host validator passed",
+                "feedback_for_executor": "",
+                "checked_items": ["VC-TASK-001"],
+            }
+            recorded = state.record_validator_result(
+                "TASK-001",
+                validator_nonce=validator_assignment["validator_nonce"],
+                agent_handle="validator-agent",
+                result=result,
+            )
+            checkpoint = state.advance_item("TASK-001")
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                checkpoint = state.advance_item("TASK-001")
+
+            self.assertEqual(recorded["agent_handle"], "validator-agent")
+            self.assertEqual(recorded["launch_nonce"], validator_auth["launch_nonce"])
+            self.assertIn("commit", checkpoint)
+
     def test_host_advance_reports_resume_phases_and_failure_enters_retry(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
@@ -452,6 +628,246 @@ class ExecutionTests(unittest.TestCase):
                 ],
             )
             self.assertFalse(any(event.get("payload", {}).get("stage") == "finish_run" for event in state.replay().events))
+
+    def test_current_manifest_runs_validator_before_verification_and_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            self._add_passing_full_proof_files(repo)
+            worker_dir = raw_path / "worker"
+            validator_dir = raw_path / "validator"
+            worker_dir.mkdir()
+            validator_dir.mkdir()
+            worker = self._worker(
+                worker_dir / "codex",
+                "import json, os\n"
+                "from pathlib import Path\n"
+                "Path('src').mkdir(exist_ok=True)\n"
+                "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
+                "print(json.dumps({\n"
+                "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
+                "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
+                "    'status': 'completed',\n"
+                "    'evidence': 'worker done',\n"
+                "}))\n",
+            )
+            validator = self._worker(
+                validator_dir / "codex",
+                "import json, os\n"
+                "print(json.dumps({\n"
+                "    'run_id': os.environ['OPTIM_PLANS_RUN_ID'],\n"
+                "    'item_id': os.environ['OPTIM_PLANS_ITEM_ID'],\n"
+                "    'attempt': int(os.environ['OPTIM_PLANS_ATTEMPT']),\n"
+                "    'nonce': os.environ['OPTIM_PLANS_VALIDATOR_NONCE'],\n"
+                "    'validator_config_hash': os.environ['OPTIM_PLANS_VALIDATOR_CONFIG_HASH'],\n"
+                "    'validator_prompt_hash': os.environ['OPTIM_PLANS_VALIDATOR_PROMPT_HASH'],\n"
+                "    'delta_fingerprint': os.environ['OPTIM_PLANS_DELTA_FINGERPRINT'],\n"
+                "    'status': 'pass',\n"
+                "    'evidence': 'validator passed',\n"
+                "    'feedback_for_executor': '',\n"
+                "    'checked_items': json.loads(os.environ['OPTIM_PLANS_CHECK_IDS']),\n"
+                "}))\n",
+            )
+            state, run_worktree = self._start_current_adapter_execution(
+                repo,
+                worker=worker,
+                validator=validator,
+                verification_argv=[
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; assert Path('src/app.txt').read_text() == 'ok\\n'",
+                ],
+            )
+
+            checkpoint = state.run_item("TASK-001")
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                checkpoint = state.run_item("TASK-001")
+
+            event_types = [event["type"] for event in state.replay().events]
+            self.assertLess(event_types.index("worker_completed"), event_types.index("validator_result_recorded"))
+            self.assertLess(event_types.index("validator_result_recorded"), event_types.index("item_verified"))
+            validator_event = next(event["payload"] for event in state.replay().events if event["type"] == "validator_result_recorded")
+            self.assertEqual(validator_event["status"], "pass")
+            self.assertEqual(validator_event["checked_items"], ["VC-TASK-001"])
+            self.assertEqual(git(run_worktree, "rev-parse", "--verify", "HEAD"), checkpoint["commit"])
+
+    def test_validator_fail_auto_retries_with_feedback_in_cli_executor_env_and_state(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            self._add_passing_full_proof_files(repo)
+            worker_dir = raw_path / "worker"
+            validator_dir = raw_path / "validator"
+            worker_dir.mkdir()
+            validator_dir.mkdir()
+            attempts = raw_path / "attempts.txt"
+            feedback_seen = raw_path / "feedback.txt"
+            worker = self._worker(
+                worker_dir / "codex",
+                "import json, os\n"
+                "from pathlib import Path\n"
+                f"attempts = Path({str(attempts)!r})\n"
+                "count = int(attempts.read_text() or '0') + 1 if attempts.exists() else 1\n"
+                "attempts.write_text(str(count), encoding='utf-8')\n"
+                "state = json.loads(Path(os.environ['OPTIM_PLANS_STATE_PATH']).read_text(encoding='utf-8'))\n"
+                "feedback = os.environ.get('OPTIM_PLANS_VALIDATOR_FEEDBACK', '') or state.get('validator_feedback', {}).get('feedback_for_executor', '')\n"
+                f"Path({str(feedback_seen)!r}).write_text(feedback, encoding='utf-8')\n"
+                "Path('src').mkdir(exist_ok=True)\n"
+                "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
+                "print(json.dumps({\n"
+                "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
+                "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
+                "    'status': 'completed',\n"
+                "    'evidence': f'worker attempt {count}',\n"
+                "}))\n",
+            )
+            validator_count = raw_path / "validator-count.txt"
+            validator = self._worker(
+                validator_dir / "codex",
+                "import json, os\n"
+                "from pathlib import Path\n"
+                f"count_path = Path({str(validator_count)!r})\n"
+                "count = int(count_path.read_text() or '0') + 1 if count_path.exists() else 1\n"
+                "count_path.write_text(str(count), encoding='utf-8')\n"
+                "print(json.dumps({\n"
+                "    'run_id': os.environ['OPTIM_PLANS_RUN_ID'],\n"
+                "    'item_id': os.environ['OPTIM_PLANS_ITEM_ID'],\n"
+                "    'attempt': int(os.environ['OPTIM_PLANS_ATTEMPT']),\n"
+                "    'nonce': os.environ['OPTIM_PLANS_VALIDATOR_NONCE'],\n"
+                "    'validator_config_hash': os.environ['OPTIM_PLANS_VALIDATOR_CONFIG_HASH'],\n"
+                "    'validator_prompt_hash': os.environ['OPTIM_PLANS_VALIDATOR_PROMPT_HASH'],\n"
+                "    'delta_fingerprint': os.environ['OPTIM_PLANS_DELTA_FINGERPRINT'],\n"
+                "    'status': 'fail' if count == 1 else 'pass',\n"
+                "    'evidence': 'needs another pass' if count == 1 else 'validator passed',\n"
+                "    'feedback_for_executor': 'fix validator finding' if count == 1 else '',\n"
+                "    'checked_items': json.loads(os.environ['OPTIM_PLANS_CHECK_IDS']),\n"
+                "}))\n",
+            )
+            state, _run_worktree = self._start_current_adapter_execution(
+                repo,
+                worker=worker,
+                validator=validator,
+                verification_argv=[sys.executable, "-c", "from pathlib import Path; assert Path('src/app.txt').exists()"],
+                validator_retry_limit=1,
+            )
+
+            result = state.run_item("TASK-001")
+            if result.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                result = state.run_item("TASK-001")
+
+            self.assertIn("commit", result)
+            self.assertEqual(attempts.read_text(encoding="utf-8"), "2")
+            self.assertEqual(feedback_seen.read_text(encoding="utf-8"), "fix validator finding")
+            events = state.replay().events
+            self.assertEqual(
+                [event["payload"]["status"] for event in events if event["type"] == "validator_result_recorded"],
+                ["fail", "pass"],
+            )
+            retry = next(event["payload"] for event in events if event["type"] == "retry_restored")
+            self.assertTrue(retry["auto_validator_retry"])
+
+    def test_validator_protocol_rejection_does_not_auto_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            worker_dir = raw_path / "worker"
+            validator_dir = raw_path / "validator"
+            worker_dir.mkdir()
+            validator_dir.mkdir()
+            worker = self._worker(
+                worker_dir / "codex",
+                "import json, os\n"
+                "from pathlib import Path\n"
+                "Path('src').mkdir(exist_ok=True)\n"
+                "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
+                "print(json.dumps({'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'], 'item_id': os.environ['OPTIM_PLANS_IDS'], 'status': 'completed', 'evidence': 'done'}))\n",
+            )
+            validator = self._worker(
+                validator_dir / "codex",
+                "import json, os\n"
+                "print(json.dumps({\n"
+                "    'run_id': os.environ['OPTIM_PLANS_RUN_ID'],\n"
+                "    'item_id': os.environ['OPTIM_PLANS_ITEM_ID'],\n"
+                "    'attempt': int(os.environ['OPTIM_PLANS_ATTEMPT']),\n"
+                "    'nonce': os.environ['OPTIM_PLANS_VALIDATOR_NONCE'],\n"
+                "    'validator_config_hash': os.environ['OPTIM_PLANS_VALIDATOR_CONFIG_HASH'],\n"
+                "    'validator_prompt_hash': os.environ['OPTIM_PLANS_VALIDATOR_PROMPT_HASH'],\n"
+                "    'delta_fingerprint': os.environ['OPTIM_PLANS_DELTA_FINGERPRINT'],\n"
+                "    'status': 'pass',\n"
+                "    'evidence': 'wrong check list',\n"
+                "    'feedback_for_executor': '',\n"
+                "    'checked_items': ['wrong-check'],\n"
+                "}))\n",
+            )
+            state, _run_worktree = self._start_current_adapter_execution(
+                repo,
+                worker=worker,
+                validator=validator,
+                verification_argv=[sys.executable, "-c", "pass"],
+            )
+
+            with self.assertRaisesRegex(Exception, "checked_items"):
+                state.run_item("TASK-001")
+
+            event_types = [event["type"] for event in state.replay().events]
+            self.assertIn("validator_protocol_rejected", event_types)
+            self.assertIn("awaiting_retry_decision", event_types)
+            self.assertNotIn("retry_restored", event_types)
+            self.assertNotIn("checkpoint_created", event_types)
+
+    def test_verifier_delta_drift_after_validator_pass_blocks_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            worker_dir = raw_path / "worker"
+            validator_dir = raw_path / "validator"
+            worker_dir.mkdir()
+            validator_dir.mkdir()
+            worker = self._worker(
+                worker_dir / "codex",
+                "import json, os\n"
+                "from pathlib import Path\n"
+                "Path('src').mkdir(exist_ok=True)\n"
+                "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
+                "print(json.dumps({'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'], 'item_id': os.environ['OPTIM_PLANS_IDS'], 'status': 'completed', 'evidence': 'done'}))\n",
+            )
+            validator = self._worker(
+                validator_dir / "codex",
+                "import json, os\n"
+                "print(json.dumps({\n"
+                "    'run_id': os.environ['OPTIM_PLANS_RUN_ID'],\n"
+                "    'item_id': os.environ['OPTIM_PLANS_ITEM_ID'],\n"
+                "    'attempt': int(os.environ['OPTIM_PLANS_ATTEMPT']),\n"
+                "    'nonce': os.environ['OPTIM_PLANS_VALIDATOR_NONCE'],\n"
+                "    'validator_config_hash': os.environ['OPTIM_PLANS_VALIDATOR_CONFIG_HASH'],\n"
+                "    'validator_prompt_hash': os.environ['OPTIM_PLANS_VALIDATOR_PROMPT_HASH'],\n"
+                "    'delta_fingerprint': os.environ['OPTIM_PLANS_DELTA_FINGERPRINT'],\n"
+                "    'status': 'pass',\n"
+                "    'evidence': 'validator passed',\n"
+                "    'feedback_for_executor': '',\n"
+                "    'checked_items': json.loads(os.environ['OPTIM_PLANS_CHECK_IDS']),\n"
+                "}))\n",
+            )
+            state, _run_worktree = self._start_current_adapter_execution(
+                repo,
+                worker=worker,
+                validator=validator,
+                verification_argv=[
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; Path('src/app.txt').write_text('mutated\\n', encoding='utf-8')",
+                ],
+            )
+
+            with self.assertRaisesRegex(Exception, "after verification"):
+                state.run_item("TASK-001")
+
+            event_types = [event["type"] for event in state.replay().events]
+            self.assertIn("validator_result_recorded", event_types)
+            self.assertIn("audit_failed", event_types)
+            self.assertNotIn("checkpoint_created", event_types)
 
     def test_execution_summary_question_blocks_before_checkpoint(self) -> None:
         from scripts.optim_plans_core import ContractError
@@ -1431,9 +1847,15 @@ class ExecutionTests(unittest.TestCase):
     def test_execution_manifest_is_hash_bound_write_once_and_rehashed(self) -> None:
         from scripts.optim_plans_core import (
             ContractError,
+            EXECUTION_PROTOCOL,
+            EXECUTION_SCHEMA_VERSION,
+            HOST_VALIDATOR_PROMPT_PROTOCOL,
+            HOST_VALIDATOR_RESULT_SCHEMA,
             OptimPlansState,
             execution_manifest_hash,
+            host_agent,
             json_text,
+            validator_prompt_hash,
         )
 
         with tempfile.TemporaryDirectory() as raw:
@@ -1447,6 +1869,7 @@ class ExecutionTests(unittest.TestCase):
             }
             record = state.persist_execution_manifest(manifest)
             self.assertEqual(record["manifest_hash"], execution_manifest_hash(record["manifest"]))
+            self.assertNotIn("validator_worker", record["manifest"])
 
             changed = dict(record["manifest"])
             changed["integration_destination"] = "release"
@@ -1463,6 +1886,64 @@ class ExecutionTests(unittest.TestCase):
             state.events_file.write_text("\n".join(tampered) + "\n", encoding="utf-8")
             with self.assertRaises(ContractError):
                 state.request_execution_approval()
+
+            current_root = Path(raw) / "current"
+            current_root.mkdir()
+            current_repo = make_repo(current_root)
+            current_state = OptimPlansState.initialize(current_repo, topic="Current Manifest", plan_hash="abc123")
+            current = {
+                "schema_version": EXECUTION_SCHEMA_VERSION,
+                "protocol_version": EXECUTION_PROTOCOL,
+                "plan_hash": "abc123",
+                "source_base": git(current_repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "worker": self._host_worker(),
+                "validator_worker": self._host_validator(),
+                "validator_prompt": self._validator_prompt(),
+                "validator_retry_limit": 1,
+                "verification_argv": [sys.executable, "-c", "pass"],
+                "items": [{"id": "TASK-001", "validator": {"check_ids": ["VC-TASK-001"]}}],
+            }
+            current_record = current_state.persist_execution_manifest(current)
+            self.assertEqual(current_record["manifest"]["schema_version"], EXECUTION_SCHEMA_VERSION)
+            self.assertEqual(current_record["manifest"]["validator_worker"]["agent_type"], "optim-plans-validator")
+            self.assertEqual(current_record["manifest"]["items"][0]["validator"]["check_ids"], ["VC-TASK-001"])
+
+            foreground_root = Path(raw) / "foreground-current"
+            foreground_root.mkdir()
+            foreground_repo = make_repo(foreground_root)
+            foreground_state = OptimPlansState.initialize(foreground_repo, topic="Foreground Manifest", plan_hash="abc123")
+            foreground = dict(current)
+            foreground["source_base"] = git(foreground_repo, "rev-parse", "--verify", "HEAD")
+            foreground["validator_worker"] = {
+                "mode": "foreground",
+                "platform": host_agent(),
+                "prompt_protocol": HOST_VALIDATOR_PROMPT_PROTOCOL,
+                "prompt_hash": validator_prompt_hash(),
+                "result_schema": HOST_VALIDATOR_RESULT_SCHEMA,
+            }
+            foreground_record = foreground_state.persist_execution_manifest(foreground)
+            self.assertEqual(foreground_record["manifest"]["validator_worker"]["mode"], "foreground")
+
+            bad_host_root = Path(raw) / "bad-host-current"
+            bad_host_root.mkdir()
+            bad_host_repo = make_repo(bad_host_root)
+            bad_host_state = OptimPlansState.initialize(bad_host_repo, topic="Bad Host Validator", plan_hash="abc123")
+            bad_host = dict(current)
+            bad_host["source_base"] = git(bad_host_repo, "rev-parse", "--verify", "HEAD")
+            bad_host["validator_worker"] = {**self._host_validator(), "allowed_tools": ["Read", "Write"]}
+            with self.assertRaisesRegex(ContractError, "read-only"):
+                bad_host_state.persist_execution_manifest(bad_host)
+
+            bad_root = Path(raw) / "bad-current"
+            bad_root.mkdir()
+            bad_repo = make_repo(bad_root)
+            bad_state = OptimPlansState.initialize(bad_repo, topic="Bad Current Manifest", plan_hash="abc123")
+            bad = dict(current)
+            bad["source_base"] = git(bad_repo, "rev-parse", "--verify", "HEAD")
+            del bad["validator_prompt"]
+            with self.assertRaisesRegex(ContractError, "validator_prompt"):
+                bad_state.persist_execution_manifest(bad)
 
     def test_prepare_execution_smokes_worker_before_manifest_is_write_once(self) -> None:
         from scripts.optim_plans_core import ContractError, OptimPlansState

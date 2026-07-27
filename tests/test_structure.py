@@ -30,7 +30,7 @@ class StructureTests(unittest.TestCase):
             )
             self.assertNotEqual(ignored.returncode, 0, f"{relative} must not be ignored")
 
-        expected_version = "0.1.1"
+        expected_version = "0.1.2"
         codex_manifest = json.loads((ROOT / ".codex-plugin/plugin.json").read_text())
         self.assertEqual(codex_manifest["name"], "optim-plans")
         self.assertEqual(codex_manifest["version"], expected_version)
@@ -48,7 +48,7 @@ class StructureTests(unittest.TestCase):
         claude_entries = [entry for entry in claude_marketplace["plugins"] if entry["name"] == "optim-plans"]
         self.assertEqual(len(claude_entries), 1)
         self.assertEqual(claude_entries[0]["version"], expected_version)
-        self.assertIn("## 0.1.1 - 2026-07-26", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
+        self.assertIn("## 0.1.2 - 2026-07-27", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
 
         marketplace = json.loads((ROOT / ".agents/plugins/marketplace.json").read_text())
         entries = [entry for entry in marketplace["plugins"] if entry["name"] == "optim-plans"]
@@ -80,7 +80,7 @@ class StructureTests(unittest.TestCase):
             "claude plugin details optim-plans@optim-plans-dev",
             "Restart is required for updated plugin code to apply.",
             "`.git/optim-plans/config.json` is not an install artifact",
-            "`refinement_worker.choice` and `executor_worker.choice`",
+            "`refinement_worker.choice`, `executor_worker.choice`, and `validator_worker.choice`",
         ):
             self.assertIn(expected, claude_start)
 
@@ -93,6 +93,7 @@ class StructureTests(unittest.TestCase):
             "one controller-owned run worktree and run branch",
             "serial item execution with checkpoint commits",
             "adapter-only argv launch with `shell=False`",
+            "validator worker loop before controller verification",
             "controller verification and Git audits",
             "explicit retry approval for later retries",
             "automatic checked-out fast-forward `run_finished` / `integrated`",

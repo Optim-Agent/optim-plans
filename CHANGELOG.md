@@ -8,6 +8,30 @@ first, ISO dates, and grouped change types.
 
 ## Unreleased
 
+## 0.1.2 - 2026-07-27
+
+### Added
+
+- Added a distinct read-only validator worker role and executor -> validator
+  retry loop before controller verification, Git audits, and checkpoints.
+- Added `0.1.2` execution manifest fields for protocol/schema version,
+  validator config and prompt binding, item check IDs, validator retry limits,
+  and validator result events.
+- Added validator recovery CLI commands, including `fail-validator --reason
+  interrupted`.
+
+### Changed
+
+- `prepare-execution` now requires executor and validator worker preferences
+  before immutable manifest recording.
+- Bumped Claude and Codex plugin metadata to `0.1.2`.
+
+### Fixed
+
+- Validator failures now preserve unsafe worktrees, while valid validator
+  rejections can restore safely with bounded feedback for the next executor
+  attempt.
+
 ### Changed
 
 - First failed execution retry now restores automatically; approval is only

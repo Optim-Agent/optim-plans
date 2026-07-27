@@ -55,6 +55,7 @@ def write_executor_worker_config(repo: Path) -> None:
     config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"schema": 1}
     config["schema"] = 1
     config["executor_worker"] = {"platform": host_agent(os.environ), "mode": "default"}
+    config["validator_worker"] = {"platform": host_agent(os.environ), "mode": "default"}
     path.write_text(json.dumps(config), encoding="utf-8")
 
 
@@ -239,14 +240,18 @@ class E2ETests(unittest.TestCase):
             answer_choice(repo, q1["nonce"], "foreground")
             same_role = ask_agent_choice(repo, "Choose refinement again")
             executor = ask_agent_choice(repo, "Choose executor", role="executor")
-            answer_choice(repo, executor["nonce"], "background")
+            validator_question = answer_choice(repo, executor["nonce"], "background")
+            answer_choice(repo, validator_question["nonce"], "background")
+            validator = ask_agent_choice(repo, "Choose validator again", role="validator")
 
             config = json.loads(config_path(repo).read_text(encoding="utf-8"))
             self.assertEqual(same_role["choice"], "foreground")
             self.assertNotIn("options", same_role)
             self.assertIn("options", executor)
+            self.assertEqual(validator["choice"], "background")
             self.assertEqual(config["refinement_worker"]["choice"], "foreground")
             self.assertEqual(config["executor_worker"]["choice"], "background")
+            self.assertEqual(config["validator_worker"]["choice"], "background")
 
     def test_cli_ask_agent_choice_defaults_from_first_background_or_foreground_answer(self) -> None:
         for choice in ("background", "foreground"):
@@ -515,6 +520,53 @@ class E2ETests(unittest.TestCase):
             self.assertEqual(reused["mode"], "host-multi-agent")
             self.assertEqual(reused["model"], "model-test")
 
+    def test_worker_config_validator_uses_validator_worker_and_read_only_config(self) -> None:
+        from scripts.optim_plans_core import host_agent
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            init_controller(repo, "Validator Worker")
+            platform = host_agent(os.environ)
+            env = fake_agent_env(raw_path, platform)
+            question = controller_json(
+                "worker-config", "--repo", str(repo), "--role", "validator", "--cwd", str(repo), env=env
+            )
+            self.assertEqual(question["config_key"], "validator_worker")
+            answer_choice(repo, question["nonce"], f"{platform}-manual", "--model", "model-test", "--effort", "high")
+
+            resolved = controller_json(
+                "worker-config", "--repo", str(repo), "--role", "validator", "--cwd", str(repo), env=env
+            )
+
+            if platform == "codex":
+                self.assertEqual(resolved["mode"], "host-multi-agent")
+                self.assertEqual(resolved["agent_type"], "optim-plans-validator")
+                self.assertEqual(resolved["sandbox"], "read-only")
+                self.assertNotIn("Write", resolved["allowed_tools"])
+            else:
+                self.assertEqual(resolved["adapter"], platform)
+                self.assertIn("plan", resolved["argv"])
+            config = json.loads(config_path(repo).read_text(encoding="utf-8"))
+            self.assertEqual(config["validator_worker"]["model"], "model-test")
+            self.assertNotIn("executor_worker", config)
+
+    def test_worker_config_validator_foreground_has_no_adapter(self) -> None:
+        from scripts.optim_plans_core import HOST_VALIDATOR_RESULT_SCHEMA, host_agent
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Foreground Validator")
+            question = ask_agent_choice(repo, "Choose validator", role="validator")
+            answer_choice(repo, question["nonce"], "foreground")
+
+            resolved = controller_json("worker-config", "--repo", str(repo), "--role", "validator", "--cwd", str(repo))
+
+            self.assertEqual(resolved["mode"], "foreground")
+            self.assertEqual(resolved["platform"], host_agent())
+            self.assertEqual(resolved["result_schema"], HOST_VALIDATOR_RESULT_SCHEMA)
+            self.assertNotIn("argv", resolved)
+
     def test_prepare_execution_executor_worker_required_before_manifest_recording(self) -> None:
         from scripts.optim_plans_core import host_agent
 
@@ -567,6 +619,93 @@ class E2ETests(unittest.TestCase):
                 ).splitlines()
             ]
             self.assertNotIn("execution_manifest_created", [event["type"] for event in events])
+
+    def test_prepare_execution_validator_worker_required_before_manifest_recording(self) -> None:
+        from scripts.optim_plans_core import EXECUTION_PROTOCOL, EXECUTION_SCHEMA_VERSION, host_agent
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            init = controller_json("init", "--repo", str(repo), "--topic", "Validator Required")
+            platform = host_agent(os.environ)
+            config_path(repo).write_text(
+                json.dumps({"schema": 1, "executor_worker": {"platform": platform, "mode": "default"}}),
+                encoding="utf-8",
+            )
+            manifest_path = raw_path / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": EXECUTION_SCHEMA_VERSION,
+                        "protocol_version": EXECUTION_PROTOCOL,
+                        "plan_hash": "abc123",
+                        "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                        "integration_destination": "main",
+                        "items": [{"id": "TASK-001", "allowed_paths": ["src/cli.txt"]}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            question = controller_json("prepare-execution", "--repo", str(repo), "--manifest", str(manifest_path))
+
+            self.assertEqual(question["stage"], "background-model")
+            self.assertEqual(question["config_key"], "validator_worker")
+            events = [
+                json.loads(line)
+                for line in (config_path(repo).parent / "runs" / init["run_id"] / "events.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertNotIn("execution_manifest_created", [event["type"] for event in events])
+
+    def test_prepare_execution_legacy_manifest_does_not_require_validator_worker(self) -> None:
+        from scripts.optim_plans_core import host_agent
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            init_controller(repo, "Legacy Validator Not Required")
+            platform = host_agent(os.environ)
+            config_path(repo).write_text(
+                json.dumps({"schema": 1, "executor_worker": {"platform": platform, "mode": "default"}}),
+                encoding="utf-8",
+            )
+            worker = make_executable(
+                raw_path / platform,
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                "if '--optim-plans-smoke' in sys.argv:\n"
+                "    print(json.dumps({'status': 'valid'}))\n",
+            )
+            argv = [str(worker), "exec", "-C", str(repo)]
+            if platform == "claude":
+                argv = [str(worker), "-p", "prompt", "--json-schema", str(raw_path / "schema.json")]
+            manifest_path = raw_path / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "plan_hash": "abc123",
+                        "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                        "integration_destination": "main",
+                        "worker": {
+                            "adapter": platform,
+                            "argv": argv,
+                            "smoke": {"argv": [*argv, "--optim-plans-smoke"]},
+                        },
+                        "verification_argv": [sys.executable, "-c", "pass"],
+                        "items": [{"id": "TASK-001", "allowed_paths": ["src/cli.txt"]}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            approval = controller_json("prepare-execution", "--repo", str(repo), "--manifest", str(manifest_path))
+
+            self.assertEqual(approval["stage"], "execution_launch")
+            self.assertNotEqual(approval.get("config_key"), "validator_worker")
+            manifest = approval["manifest"]
+            self.assertNotIn("validator_worker", manifest)
 
     def test_worker_config_executor_cli_fallback_uses_stored_manual_values(self) -> None:
         from scripts.optim_plans_core import host_agent
@@ -1245,8 +1384,17 @@ class E2ETests(unittest.TestCase):
             )
             self.assertIn("retry-item", help_result.stdout)
             self.assertIn("finish-run", help_result.stdout)
+            self.assertIn("fail-validator", help_result.stdout)
             self.assertNotIn("restore-retry", help_result.stdout)
             self.assertNotIn("final-audit", help_result.stdout)
+            fail_validator_help = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "fail-validator", "--help"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            self.assertIn("--reason", fail_validator_help.stdout)
 
     def test_status_reports_legacy_active_run_without_deleting_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

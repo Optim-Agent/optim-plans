@@ -53,7 +53,7 @@ Planning-refining ring
 Execution ring
 
   prepare manifest -> approve -> start run worktree
-        -> serial item checkpoint -> final audit -> auto-integrated run
+        -> executor -> validator -> serial item checkpoint -> final audit -> auto-integrated run
 ```
 
 The first ring fights the wrong-plan problem. It turns vague intent into a plan, then refines that plan with review or criticism. Each decision can open its own smaller question-answering ring, so uncertainty gets resolved before code changes.
@@ -198,7 +198,7 @@ claude plugin list
 claude plugin details optim-plans@optim-plans-dev
 ```
 
-Restart is required for updated plugin code to apply. `.git/optim-plans/config.json` is not an install artifact; it is created per target repo when worker/model choices or execution prep need persisted config. Delegated worker choices persist under `refinement_worker.choice` and `executor_worker.choice`.
+Restart is required for updated plugin code to apply. `.git/optim-plans/config.json` is not an install artifact; it is created per target repo when worker/model choices or execution prep need persisted config. Delegated worker choices persist under `refinement_worker.choice`, `executor_worker.choice`, and `validator_worker.choice`.
 
 To permanently skip execution summaries for one repo, edit `.git/optim-plans/config.json`:
 
@@ -213,11 +213,14 @@ To permanently skip execution summaries for one repo, edit `.git/optim-plans/con
   },
   "executor_worker": {
     "choice": "background"
+  },
+  "validator_worker": {
+    "choice": "background"
   }
 }
 ```
 
-Valid `execution_summary.mode` values are `always-skip` or omitted. Worker choice blocks are optional; when present, `choice` is `background` or `foreground`, and manual worker blocks may also include `platform`, `mode`, `model`, `effort`, and Codex `execution_mode`.
+Valid `execution_summary.mode` values are `always-skip` or omitted. Worker choice blocks are optional; when present, `choice` is `background` or `foreground`, and manual worker blocks may also include `platform`, `mode`, `model`, `effort`, and Codex executor `execution_mode`.
 
 For one-off development without installing, load this checkout for a single Claude session:
 
@@ -246,10 +249,10 @@ $optim-plans Turn this idea into a reviewed plan before implementation.
 
 For cost-effective workflows, use:
 
-| Host | Controller/main session | Reviewer/criticizer | Executor |
-|---|---|---|---|
-| Codex | `gpt-5.6-terra`, `high` | `gpt-5.6-sol`, `medium` | `gpt-5.6-terra`, `xhigh` |
-| Claude | `sonnet-5`, `high` | `fable-5`, `medium` | `opus-5`, `high` |
+| Host | Controller/main session | Reviewer/criticizer | Executor | Validator |
+|---|---|---|---|---|
+| Codex | `gpt-5.6-terra`, `high` | `gpt-5.6-sol`, `medium` | `gpt-5.6-terra`, `xhigh` | `gpt-5.6-sol`, `medium` |
+| Claude | `sonnet-5`, `high` | `fable-5`, `medium` | `opus-5`, `high` | `fable-5`, `medium` |
 
 You can edit this template by hand:
 
@@ -270,11 +273,18 @@ You can edit this template by hand:
     "model": "gpt-5.6-terra",
     "effort": "xhigh",
     "execution_mode": "host-multi-agent"
+  },
+  "validator_worker": {
+    "choice": "background",
+    "platform": "codex",
+    "mode": "manual",
+    "model": "gpt-5.6-sol",
+    "effort": "medium"
   }
 }
 ```
 
-- `refinement_worker.choice` is `background` or `foreground`. Set `executor_worker.choice` to `background`: foreground executor execution is unsupported.
+- `refinement_worker.choice`, `executor_worker.choice`, and `validator_worker.choice` are `background` or `foreground`. Set `executor_worker.choice` to `background`: foreground executor execution is unsupported.
 - `platform` is `codex` or `claude`, and must match the current host platform; otherwise the stored preference is ignored.
 - `mode` is `default` or `manual`. `manual` requires non-empty `model` and `effort` values.
 - `execution_mode` applies only to a Codex executor: use `host-multi-agent` by default or `cli-adapter` as a fallback. Claude executors use the CLI adapter path.
@@ -385,10 +395,11 @@ python3 scripts/optim_plans.py answer --repo <repo> --nonce <nonce> --choice <op
 python3 scripts/optim_plans.py answer --repo <repo> --nonce <nonce> --choice codex-manual --model <model> --effort <effort>
 python3 scripts/optim_plans.py worker-config --repo <repo> --role reviewer --cwd <worktree>
 python3 scripts/optim_plans.py worker-config --repo <repo> --role executor --cwd <run-worktree>
+python3 scripts/optim_plans.py worker-config --repo <repo> --role validator --cwd <run-worktree>
 
 # after PLAN_vN is final, write a manifest JSON that binds the plan hash,
-# source base, host launch block or adapter argv/config plus smoke, item DAG, allowed paths, verification argv,
-# run worktree/branch, integration destination, verification timeout, retry limits, and policy.
+# source base, executor config, validator config/prompt/check IDs, item DAG, allowed paths, verification argv,
+# run worktree/branch, integration destination, validator retry limit, verification timeout, retry limits, and policy.
 python3 scripts/optim_plans.py prepare-execution --repo <repo> --manifest <manifest.json>
 python3 scripts/optim_plans.py answer --repo <repo> --nonce <approval-nonce> --choice approve
 python3 scripts/optim_plans.py start-execution --repo <repo> --approval-nonce <approval-nonce>
@@ -401,6 +412,11 @@ python3 scripts/optim_plans.py register-agent --repo <repo> --item-id TASK-001 -
 # call host wait_agent, then:
 python3 scripts/optim_plans.py complete-item --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --agent-handle <handle> --evidence "<summary>"
 python3 scripts/optim_plans.py advance-item --repo <repo> --item-id TASK-001
+# if advance-item returns a host validator launch block:
+python3 scripts/optim_plans.py authorize-validator-spawn --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --launch-block '<json>'
+python3 scripts/optim_plans.py register-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
+python3 scripts/optim_plans.py complete-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --agent-handle <handle> --result '<json>'
+python3 scripts/optim_plans.py fail-validator --repo <repo> --item-id TASK-001 --reason interrupted --validator-nonce <nonce> --evidence "<summary>"
 
 # CLI adapter fallback:
 python3 scripts/optim_plans.py run-item --repo <repo> --item-id TASK-001
@@ -439,6 +455,8 @@ The implemented guardrails include:
 - fail-closed Auto-complete allowlist;
 - one controller-owned run worktree and run branch for the cumulative run;
 - serial item execution with checkpoint commits in stable DAG order;
+- validator worker loop before controller verification, with bounded feedback
+  injection for validator-driven retries;
 - host `spawn_agent` / `wait_agent` orchestration for Codex executor delegation, or adapter-only argv launch with `shell=False` after adapter CLI smoke;
 - controller verification and Git audits for path allowlists and protected Git metadata;
 - `awaiting_retry_decision` with bounded evidence, automatic first retry restore, and explicit retry approval for later retries;
@@ -507,6 +525,7 @@ Implemented:
 - agent discovery and role-based command builders;
 - one controller-owned run worktree and run branch;
 - serial item execution with checkpoint commits;
+- validator worker loop before controller verification;
 - adapter-only argv launch with `shell=False`, using worker stdout for the result JSON envelope;
 - controller verification and Git audits for path allowlists and protected Git metadata;
 - automatic first retry restore and explicit retry approval for later retries;

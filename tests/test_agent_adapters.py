@@ -5,7 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import make_executable, prepend_path
+try:
+    from helpers import make_executable, prepend_path
+except ModuleNotFoundError:
+    from tests.helpers import make_executable, prepend_path
 
 
 class AgentAdapterTests(unittest.TestCase):
@@ -39,10 +42,12 @@ class AgentAdapterTests(unittest.TestCase):
             config_home = Path(raw) / "codex-home"
             info = AgentInfo("codex", True, "0.144.4", None, "gpt-test", "max")
             review = build_codex_command(info, role="reviewer", cwd=Path("/tmp/repo"))
+            validate = build_codex_command(info, role="validator", cwd=Path("/tmp/repo"))
             self.assertEqual(
                 review.argv[:8],
                 ["codex", "exec", "-s", "read-only", "--ephemeral", "--ignore-rules", "-C", "/tmp/repo"],
             )
+            self.assertEqual(validate.argv[validate.argv.index("-s") + 1], "read-only")
             self.assertIn("--ignore-rules", review.argv)
             with self.assertRaises(ValueError):
                 build_codex_command(info, role="executor", cwd=Path("/tmp/repo"))
@@ -109,7 +114,10 @@ class AgentAdapterTests(unittest.TestCase):
             tmp = Path(raw)
             info = AgentInfo("claude", True, "2.1.211", "/bin/claude", "opus-test", "high")
             review = build_claude_command(info, role="reviewer", cwd=Path("/tmp/repo"))
+            validate = build_claude_command(info, role="validator", cwd=Path("/tmp/repo"))
             self.assertIn("--json-schema", review.argv)
+            self.assertIn("--permission-mode", validate.argv)
+            self.assertEqual(validate.argv[validate.argv.index("--permission-mode") + 1], "plan")
             self.assertEqual(review.argv[review.argv.index("--model") + 1], "opus-test")
             self.assertEqual(review.argv[review.argv.index("--effort") + 1], "high")
             execute = build_claude_command(

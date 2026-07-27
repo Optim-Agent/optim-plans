@@ -109,7 +109,7 @@ def build_codex_command(
     if env is not None:
         command_env.update(env)
     executable = info.path or "codex"
-    sandbox = "read-only" if role in {"reviewer", "criticizer", "verifier"} else "workspace-write"
+    sandbox = "read-only" if role in {"reviewer", "criticizer", "validator", "verifier"} else "workspace-write"
     ignore_config = config_home is not None and not _same_path(config_home, _codex_home(command_env))
     argv = [
         executable,
@@ -142,7 +142,7 @@ def build_claude_command(
 ) -> AgentCommand:
     if not info.available or not info.path:
         raise ValueError("claude is unavailable")
-    if role in {"reviewer", "criticizer", "verifier"}:
+    if role in {"reviewer", "criticizer", "validator", "verifier"}:
         argv = [
             info.path,
             "-p",

@@ -100,6 +100,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("same worker role", refinement)
         self.assertIn("`refinement_worker.choice`", refinement)
         self.assertIn("`executor_worker.choice`", refinement)
+        self.assertIn("`validator_worker.choice`", text)
 
     def test_criticizer_questions_gate_plan_revision(self) -> None:
         text = (ROOT / "skills/optim-plans/references/refinement.md").read_text(encoding="utf-8")

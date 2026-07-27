@@ -22,6 +22,8 @@ from typing import Any
 
 
 SCHEMA_VERSION = 1
+EXECUTION_SCHEMA_VERSION = "0.1.2"
+EXECUTION_PROTOCOL = "optim-plans-execution-v0.1.2"
 MAX_EVIDENCE_CHARS = 4096
 TIMEOUT_KILL_GRACE_SECONDS = 1.0
 FULL_INTEGRATION_VERIFICATION_TIMEOUT_SECONDS = 300.0
@@ -33,6 +35,8 @@ EXECUTION_SUMMARY_CONFIG_KEY = "execution_summary"
 EXECUTION_SUMMARY_FILE = "EXECUTION_SUMMARY.md"
 HOST_EXECUTOR_PROMPT_PROTOCOL = "optim-plans-host-executor-v1"
 HOST_EXECUTOR_RESULT_SCHEMA = "optim-plans-worker-result-v1"
+HOST_VALIDATOR_PROMPT_PROTOCOL = "optim-plans-host-validator-v1"
+HOST_VALIDATOR_RESULT_SCHEMA = "optim-plans-validator-result-v1"
 HOST_EXECUTOR_PROMPT_CONTRACT = {
     "instructions": [
         "Modify only the assigned run worktree.",
@@ -40,6 +44,16 @@ HOST_EXECUTOR_PROMPT_CONTRACT = {
         "The controller, not the worker, performs verification, audit, checkpoint, retry, and finalization.",
     ],
     "required_result_fields": ["status", "evidence"],
+}
+VALIDATOR_PROMPT_CONTRACT = {
+    "instructions": [
+        "Validate the executor delta before controller verification.",
+        "Aim for the best complete implementation.",
+        "Consider the problem from multiple angles.",
+        "Avoid accepting an MVP-only task completion.",
+        "Return only the required validator result JSON.",
+    ],
+    "required_result_fields": ["status", "evidence", "feedback_for_executor", "checked_items"],
 }
 LEGACY_ACTIVE_EVENT_TYPES = {"item_completed", "execution_completed", "run_completed", "worker_result_recorded"}
 LIFECYCLE_EVENT_TYPES = {
@@ -50,6 +64,12 @@ LIFECYCLE_EVENT_TYPES = {
     "host_agent_registered",
     "worker_completed",
     "worker_failed",
+    "validator_assigned",
+    "validator_spawn_authorized",
+    "validator_agent_registered",
+    "validator_result_recorded",
+    "validator_protocol_rejected",
+    "validator_failed",
     "verification_failed",
     "audit_failed",
     "awaiting_retry_decision",
@@ -409,6 +429,10 @@ def stable_json_hash(value: Any) -> str:
 
 def host_executor_prompt_hash() -> str:
     return stable_json_hash(HOST_EXECUTOR_PROMPT_CONTRACT)
+
+
+def validator_prompt_hash() -> str:
+    return stable_json_hash(VALIDATOR_PROMPT_CONTRACT)
 
 
 def _hash_file(path: Path) -> str:
@@ -777,10 +801,12 @@ def lifecycle_status(events: list[dict[str, Any]]) -> str:
             status = "awaiting_integration"
         elif event_type == "awaiting_retry_decision":
             status = "awaiting_retry_decision"
-        elif event_type in {"worker_failed", "verification_failed", "audit_failed"}:
+        elif event_type in {"worker_failed", "validator_protocol_rejected", "validator_failed", "verification_failed", "audit_failed"}:
             status = "awaiting_retry_decision"
+        elif event_type == "validator_result_recorded":
+            status = "verifying" if payload.get("status") == "pass" else "awaiting_retry_decision"
         elif event_type == "worker_completed":
-            status = "verifying"
+            status = "validating"
         elif event_type == "pending_question" and payload.get("stage") == "execution_launch":
             status = "awaiting_approval"
         elif event_type == "execution_manifest_created":
@@ -790,6 +816,9 @@ def lifecycle_status(events: list[dict[str, Any]]) -> str:
             "item_started",
             "host_spawn_authorized",
             "host_agent_registered",
+            "validator_assigned",
+            "validator_spawn_authorized",
+            "validator_agent_registered",
             "retry_restored",
             "item_verified",
             "checkpoint_prepared",
@@ -952,7 +981,88 @@ class OptimPlansState:
         for item in canonical.get("items", []):
             if isinstance(item, dict) and isinstance(item.get("worker"), dict):
                 item["worker"] = self._worker_config(canonical, item)
+        if self._is_current_execution_manifest(canonical):
+            self._require_current_execution_manifest(canonical)
+            canonical["validator_worker"] = self._validator_config(canonical)
+            canonical["validator_prompt"] = self._validator_prompt_config(canonical)
+            for item in canonical["items"]:
+                item["validator"] = {"check_ids": self._validator_check_ids(item)}
         return canonical
+
+    def _is_current_execution_manifest(self, manifest: dict[str, Any]) -> bool:
+        return "schema_version" in manifest or "protocol_version" in manifest or "validator_worker" in manifest
+
+    def _require_current_execution_manifest(self, manifest: dict[str, Any]) -> None:
+        if manifest.get("schema_version") != EXECUTION_SCHEMA_VERSION:
+            raise ContractError(f"execution manifest schema_version must be {EXECUTION_SCHEMA_VERSION}")
+        if manifest.get("protocol_version") != EXECUTION_PROTOCOL:
+            raise ContractError(f"execution manifest protocol_version must be {EXECUTION_PROTOCOL}")
+        retry_limit = manifest.get("validator_retry_limit")
+        if not isinstance(retry_limit, int) or retry_limit < 0:
+            raise ContractError("execution manifest validator_retry_limit must be a non-negative integer")
+
+    def _validator_config(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        raw = manifest.get("validator_worker")
+        if not isinstance(raw, dict):
+            raise ContractError("execution manifest validator_worker config is required")
+        if raw.get("mode") == "foreground":
+            return self._foreground_validator_config(raw)
+        config = self._worker_config({**manifest, "worker": raw}, {"id": "__manifest_validator__", "allowed_paths": []})
+        if config.get("mode") == "host-multi-agent":
+            if config.get("sandbox") != "read-only":
+                raise ContractError("host validator sandbox must be read-only")
+            if any(tool in {"Write", "Edit", "MultiEdit"} for tool in config.get("allowed_tools", [])):
+                raise ContractError("host validator allowed_tools must be read-only")
+        else:
+            timeout = raw.get("timeout_seconds", manifest.get("validator_timeout_seconds", 300))
+            if not isinstance(timeout, (int, float)) or timeout <= 0:
+                raise ContractError("validator timeout_seconds must be positive")
+            config["timeout_seconds"] = float(timeout)
+        return config
+
+    def _foreground_validator_config(self, raw: dict[str, Any]) -> dict[str, Any]:
+        platform = raw.get("platform", host_agent())
+        if platform not in ADAPTER_NAMES:
+            raise ContractError("foreground validator platform must be claude or codex")
+        if raw.get("prompt_protocol") != HOST_VALIDATOR_PROMPT_PROTOCOL:
+            raise ContractError(f"foreground validator prompt_protocol must be {HOST_VALIDATOR_PROMPT_PROTOCOL}")
+        if raw.get("prompt_hash") != validator_prompt_hash():
+            raise ContractError("foreground validator prompt_hash does not match the controller validator contract")
+        if raw.get("result_schema") != HOST_VALIDATOR_RESULT_SCHEMA:
+            raise ContractError(f"foreground validator result_schema must be {HOST_VALIDATOR_RESULT_SCHEMA}")
+        return {
+            "mode": "foreground",
+            "platform": platform,
+            "prompt_protocol": HOST_VALIDATOR_PROMPT_PROTOCOL,
+            "prompt_hash": validator_prompt_hash(),
+            "result_schema": HOST_VALIDATOR_RESULT_SCHEMA,
+        }
+
+    def _validator_prompt_config(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        raw = manifest.get("validator_prompt")
+        if not isinstance(raw, dict):
+            raise ContractError("execution manifest validator_prompt is required")
+        protocol = raw.get("protocol")
+        prompt_hash = raw.get("hash")
+        contract = raw.get("contract")
+        if protocol != HOST_VALIDATOR_PROMPT_PROTOCOL:
+            raise ContractError(f"validator_prompt.protocol must be {HOST_VALIDATOR_PROMPT_PROTOCOL}")
+        if contract != VALIDATOR_PROMPT_CONTRACT:
+            raise ContractError("validator_prompt.contract must match the controller validator contract")
+        if prompt_hash != validator_prompt_hash():
+            raise ContractError("validator_prompt.hash does not match the controller validator contract")
+        return {"protocol": protocol, "hash": prompt_hash, "contract": contract}
+
+    def _validator_check_ids(self, item: dict[str, Any]) -> list[str]:
+        raw = item.get("validator")
+        check_ids = raw.get("check_ids") if isinstance(raw, dict) else item.get("validator_check_ids")
+        if not isinstance(check_ids, list) or not check_ids:
+            raise ContractError(f"validator.check_ids for {item['id']} must be a non-empty list")
+        if not all(isinstance(check_id, str) and check_id.strip() for check_id in check_ids):
+            raise ContractError(f"validator.check_ids for {item['id']} must contain non-empty strings")
+        if len(set(check_ids)) != len(check_ids):
+            raise ContractError(f"validator.check_ids for {item['id']} must not contain duplicates")
+        return list(check_ids)
 
     def persist_execution_manifest(self, manifest: dict[str, Any]) -> dict[str, Any]:
         canonical = self._canonicalize_execution_manifest(canonical_execution_manifest(manifest))
@@ -978,6 +1088,8 @@ class OptimPlansState:
         manifest = parse_json_strict(raw, source=str(manifest_path))
         if not isinstance(manifest, dict):
             raise ContractError("execution manifest must be a JSON object")
+        if self._is_current_execution_manifest(manifest):
+            self._require_current_execution_manifest(manifest)
         self.persist_execution_manifest(manifest)
         return self.request_execution_approval()
 
@@ -1618,12 +1730,16 @@ class OptimPlansState:
 
     def _smoke_execution_manifest(self, manifest: dict[str, Any]) -> None:
         seen: set[str] = set()
+        configs: list[dict[str, Any]] = []
         for item in manifest["items"]:
             raw = item.get("worker", manifest.get("worker", manifest.get("adapter")))
             if not isinstance(raw, dict):
                 continue
-            config = self._worker_config(manifest, item)
-            if config.get("mode") == "host-multi-agent":
+            configs.append(self._worker_config(manifest, item))
+        if self._is_current_execution_manifest(manifest):
+            configs.append(self._validator_config(manifest))
+        for config in configs:
+            if config.get("mode") in {"host-multi-agent", "foreground"}:
                 key = json_text(config)
                 if key in seen:
                     continue
@@ -1703,7 +1819,7 @@ class OptimPlansState:
             record = self._execution_manifest_record(replayed.events)
             self._manifest_item(record["manifest"], item_id)
             statuses = self._item_statuses(replayed.events, record["manifest"])
-            if statuses[item_id] not in {"in_progress", "completed"}:
+            if statuses[item_id] not in {"in_progress", "completed", "validated"}:
                 raise ContractError(f"{item_id} has no active attempt to fail")
             start = self._latest_item_start(replayed.events, item_id)
             return self._record_attempt_failure_locked(event_type, item_id, evidence=evidence, start=start)
@@ -1744,7 +1860,211 @@ class OptimPlansState:
             "allowed_paths": list(start["allowed_paths"]),
             "worker": worker_config,
         }
+        feedback = self._latest_validator_feedback(self.replay().events, item_id)
+        if feedback is not None:
+            block["validator_feedback"] = feedback
         return block
+
+    def _manifest_uses_validator(self, manifest: dict[str, Any]) -> bool:
+        return manifest.get("schema_version") == EXECUTION_SCHEMA_VERSION and manifest.get("protocol_version") == EXECUTION_PROTOCOL
+
+    def _item_validator_check_ids(self, item: dict[str, Any]) -> list[str]:
+        raw = item.get("validator", {})
+        check_ids = raw.get("check_ids") if isinstance(raw, dict) else None
+        if not isinstance(check_ids, list):
+            raise ContractError(f"validator.check_ids for {item['id']} must be recorded")
+        return list(check_ids)
+
+    def _latest_validator_feedback(self, events: list[dict[str, Any]], item_id: str) -> dict[str, Any] | None:
+        saw_validator_retry = False
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if payload.get("item_id") != item_id:
+                continue
+            if event["type"] == "retry_restored":
+                if not payload.get("auto_validator_retry"):
+                    return None
+                saw_validator_retry = True
+                continue
+            if saw_validator_retry and event["type"] == "validator_result_recorded" and payload.get("status") == "fail":
+                return {
+                    "attempt": payload.get("attempt"),
+                    "evidence": payload.get("evidence", ""),
+                    "feedback_for_executor": payload.get("feedback_for_executor", ""),
+                    "checked_items": list(payload.get("checked_items", [])),
+                }
+            if event["type"] == "checkpoint_created":
+                return None
+        return None
+
+    def _latest_validator_assignment(self, events: list[dict[str, Any]], item_id: str) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if payload.get("item_id") != item_id:
+                continue
+            if event["type"] == "validator_assigned":
+                return payload
+            if event["type"] in {"validator_result_recorded", "validator_protocol_rejected", "validator_failed", "retry_restored", "checkpoint_created"}:
+                return None
+        return None
+
+    def _latest_validator_host_registration(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        validator_nonce: str,
+        agent_handle: str | None = None,
+    ) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if event["type"] != "validator_agent_registered" or payload.get("validator_nonce") != validator_nonce:
+                continue
+            if agent_handle is None or payload.get("agent_handle") == agent_handle:
+                return payload
+        return None
+
+    def _latest_validator_host_authorization(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        validator_nonce: str,
+        launch_nonce: str | None = None,
+    ) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if event["type"] != "validator_spawn_authorized" or payload.get("validator_nonce") != validator_nonce:
+                continue
+            if launch_nonce is None or payload.get("launch_nonce") == launch_nonce:
+                return payload
+        return None
+
+    def _item_delta_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        started: dict[str, Any],
+        item: dict[str, Any],
+        start: dict[str, Any],
+    ) -> dict[str, Any]:
+        run_worktree = self._require_run_worktree(started, expected_head=start["base_commit"], clean=False)
+        allowed_paths = self._item_allowed_paths(item)
+        audit = audit_git_delta(
+            run_worktree,
+            allowed_paths=allowed_paths,
+            base_commit=start["base_commit"],
+            head_commit=start["base_commit"],
+        )
+        return {
+            "run_worktree": str(run_worktree),
+            "allowed_paths": allowed_paths,
+            "changed_files": audit["changed_files"],
+            "delta_fingerprint": checkpoint_delta_fingerprint(run_worktree, audit["changed_files"]),
+        }
+
+    def _validator_launch_block(
+        self,
+        *,
+        assignment: dict[str, Any],
+        validator_config: dict[str, Any],
+        validator_prompt: dict[str, Any],
+        check_ids: list[str],
+    ) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "item_id": assignment["item_id"],
+            "attempt": assignment["attempt"],
+            "validator_nonce": assignment["validator_nonce"],
+            "base_commit": assignment["base_commit"],
+            "cwd": assignment["run_worktree"],
+            "allowed_paths": list(assignment["allowed_paths"]),
+            "changed_files": list(assignment["changed_files"]),
+            "check_ids": list(check_ids),
+            "delta_fingerprint": assignment["delta_fingerprint"],
+            "validator_config_hash": assignment["validator_config_hash"],
+            "validator_prompt_hash": assignment["validator_prompt_hash"],
+            "validator": validator_config,
+            "validator_prompt": validator_prompt,
+        }
+
+    def _validator_assignment_response_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        item: dict[str, Any],
+        assignment: dict[str, Any],
+        validator_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        check_ids = self._item_validator_check_ids(item)
+        validator_prompt = manifest["validator_prompt"]
+        launch_block = self._validator_launch_block(
+            assignment=assignment,
+            validator_config=validator_config,
+            validator_prompt=validator_prompt,
+            check_ids=check_ids,
+        )
+        phase = "validator_assigned"
+        if self._latest_validator_host_registration(events, validator_nonce=assignment["validator_nonce"]) is not None:
+            phase = "validator_agent_registered"
+        elif self._latest_validator_host_authorization(events, validator_nonce=assignment["validator_nonce"]) is not None:
+            phase = "validator_spawn_authorized"
+        return {
+            **assignment,
+            "phase": phase,
+            "validator": validator_config,
+            "validator_launch_block": launch_block,
+            "validator_launch_block_hash": stable_json_hash(launch_block),
+        }
+
+    def _assign_validator_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        item: dict[str, Any],
+        start: dict[str, Any],
+    ) -> dict[str, Any]:
+        existing = self._latest_validator_assignment(events, item["id"])
+        validator_config = self._validator_config(manifest)
+        if existing is not None:
+            current = self._item_delta_locked(events, manifest, self._execution_started_record(events), item, start)
+            if current["delta_fingerprint"] != existing.get("delta_fingerprint"):
+                self._record_attempt_failure_locked(
+                    "audit_failed",
+                    item["id"],
+                    evidence="audit failed: delta fingerprint changed before validator assignment",
+                    start=start,
+                )
+                raise ContractError("delta fingerprint changed before validator assignment")
+            return self._validator_assignment_response_locked(events, manifest, item, existing, validator_config)
+
+        started = self._execution_started_record(events)
+        try:
+            self._require_protected_metadata_clean(started)
+            delta = self._item_delta_locked(events, manifest, started, item, start)
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            self._record_attempt_failure_locked("audit_failed", item["id"], evidence=f"audit failed: {exc}", start=start)
+            raise
+        prompt_hash = manifest["validator_prompt"]["hash"]
+        assignment = {
+            "item_id": item["id"],
+            "attempt": start["attempt"],
+            "base_commit": start["base_commit"],
+            "run_worktree": delta["run_worktree"],
+            "run_branch": started["run_branch"],
+            "allowed_paths": delta["allowed_paths"],
+            "changed_files": delta["changed_files"],
+            "validator_nonce": uuid.uuid4().hex,
+            "validator_config_hash": stable_json_hash(validator_config),
+            "validator_prompt_hash": prompt_hash,
+            "delta_fingerprint": delta["delta_fingerprint"],
+        }
+        payload = self._append_event_locked("validator_assigned", assignment)["payload"]
+        return self._validator_assignment_response_locked(
+            [*events, {"type": "validator_assigned", "payload": payload}],
+            manifest,
+            item,
+            payload,
+            validator_config,
+        )
 
     def _latest_host_registration(
         self,
@@ -1836,7 +2156,7 @@ class OptimPlansState:
             blocked = [
                 current_id
                 for current_id, status in statuses.items()
-                if status in {"in_progress", "completed", "failed"}
+                if status in {"in_progress", "completed", "validating", "validated", "prepared", "failed"}
             ]
             if blocked:
                 raise ContractError(f"another item attempt must be resolved first: {blocked[0]}")
@@ -1877,6 +2197,467 @@ class OptimPlansState:
                 payload,
                 worker_config,
             )
+
+    def _require_validator_assignment_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        item: dict[str, Any],
+        validator_nonce: str,
+    ) -> dict[str, Any]:
+        if not isinstance(validator_nonce, str) or not validator_nonce.strip():
+            raise ContractError("validator nonce is required")
+        statuses = self._item_statuses(events, manifest)
+        if statuses[item["id"]] != "validating":
+            raise ContractError(f"{item['id']} does not have an active validator assignment")
+        assignment = self._latest_validator_assignment(events, item["id"])
+        if assignment is None or assignment.get("validator_nonce") != validator_nonce:
+            raise ContractError("validator nonce does not match active validator assignment")
+        validator_config = self._validator_config(manifest)
+        if assignment.get("validator_config_hash") != stable_json_hash(validator_config):
+            raise ContractError("active validator assignment is not bound to the approved validator config")
+        if assignment.get("validator_prompt_hash") != manifest["validator_prompt"]["hash"]:
+            raise ContractError("active validator assignment is not bound to the approved validator prompt")
+        return assignment
+
+    def authorize_validator_spawn(self, item_id: str, validator_nonce: str, launch_block: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(launch_block, dict):
+            raise ContractError("validator launch block must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing", "validating"}, "authorize-validator-spawn")
+            record = self._execution_manifest_record(replayed.events)
+            item = self._manifest_item(record["manifest"], item_id)
+            validator_config = self._validator_config(record["manifest"])
+            if validator_config.get("mode") != "host-multi-agent":
+                raise ContractError("validator is not configured for host-multi-agent execution")
+            assignment = self._require_validator_assignment_locked(replayed.events, record["manifest"], item, validator_nonce)
+            expected = self._validator_launch_block(
+                assignment=assignment,
+                validator_config=validator_config,
+                validator_prompt=record["manifest"]["validator_prompt"],
+                check_ids=self._item_validator_check_ids(item),
+            )
+            if launch_block != expected:
+                raise ContractError("validator launch block does not match the approved validator assignment")
+            if self._latest_validator_host_registration(replayed.events, validator_nonce=validator_nonce) is not None:
+                raise ContractError("validator agent is already registered for this assignment")
+            launch_block_hash = stable_json_hash(launch_block)
+            existing = self._latest_validator_host_authorization(replayed.events, validator_nonce=validator_nonce)
+            if existing is not None:
+                if existing.get("launch_block_hash") != launch_block_hash:
+                    raise ContractError("active validator spawn authorization is bound to a different launch block")
+                return existing
+            payload = {
+                "item_id": item_id,
+                "attempt": assignment["attempt"],
+                "validator_nonce": validator_nonce,
+                "launch_nonce": uuid.uuid4().hex,
+                "validator_config_hash": assignment["validator_config_hash"],
+                "validator_prompt_hash": assignment["validator_prompt_hash"],
+                "delta_fingerprint": assignment["delta_fingerprint"],
+                "launch_block_hash": launch_block_hash,
+                "launch_block": launch_block,
+            }
+            return self._append_event_locked("validator_spawn_authorized", payload)["payload"]
+
+    def register_validator_agent(
+        self,
+        item_id: str,
+        *,
+        validator_nonce: str,
+        launch_nonce: str,
+        agent_handle: str,
+        launch_block: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(agent_handle, str) or not agent_handle.strip():
+            raise ContractError("validator agent handle is required")
+        if not isinstance(launch_nonce, str) or not launch_nonce.strip():
+            raise ContractError("validator launch nonce is required")
+        if not isinstance(launch_block, dict):
+            raise ContractError("validator launch block must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing", "validating"}, "register-validator")
+            record = self._execution_manifest_record(replayed.events)
+            item = self._manifest_item(record["manifest"], item_id)
+            validator_config = self._validator_config(record["manifest"])
+            assignment = self._require_validator_assignment_locked(replayed.events, record["manifest"], item, validator_nonce)
+            expected = self._validator_launch_block(
+                assignment=assignment,
+                validator_config=validator_config,
+                validator_prompt=record["manifest"]["validator_prompt"],
+                check_ids=self._item_validator_check_ids(item),
+            )
+            if launch_block != expected:
+                raise ContractError("validator launch block does not match the approved validator assignment")
+            authorization = self._latest_validator_host_authorization(
+                replayed.events,
+                validator_nonce=validator_nonce,
+                launch_nonce=launch_nonce,
+            )
+            if authorization is None:
+                raise ContractError("unknown or stale validator launch nonce")
+            if authorization.get("launch_block_hash") != stable_json_hash(launch_block):
+                raise ContractError("validator launch nonce is not bound to this launch block")
+            if any(
+                event["type"] == "validator_agent_registered"
+                and event.get("payload", {}).get("launch_nonce") == launch_nonce
+                for event in replayed.events
+            ):
+                raise ContractError("validator launch nonce is stale or already used")
+            payload = {
+                "item_id": item_id,
+                "attempt": assignment["attempt"],
+                "validator_nonce": validator_nonce,
+                "launch_nonce": launch_nonce,
+                "agent_handle": agent_handle,
+                "validator_config_hash": assignment["validator_config_hash"],
+                "validator_prompt_hash": assignment["validator_prompt_hash"],
+                "delta_fingerprint": assignment["delta_fingerprint"],
+                "launch_block_hash": stable_json_hash(launch_block),
+            }
+            return self._append_event_locked("validator_agent_registered", payload)["payload"]
+
+    def _reject_validator_result_locked(
+        self,
+        item_id: str,
+        *,
+        evidence: str,
+        assignment: dict[str, Any],
+        start: dict[str, Any],
+    ) -> None:
+        self._record_attempt_failure_locked(
+            "validator_protocol_rejected",
+            item_id,
+            evidence=evidence,
+            start=start,
+            extra={
+                "attempt": assignment["attempt"],
+                "validator_nonce": assignment["validator_nonce"],
+                "validator_config_hash": assignment["validator_config_hash"],
+                "validator_prompt_hash": assignment["validator_prompt_hash"],
+                "delta_fingerprint": assignment["delta_fingerprint"],
+            },
+        )
+
+    def _validator_result_payload(
+        self,
+        result: dict[str, Any],
+        *,
+        assignment: dict[str, Any],
+        item: dict[str, Any],
+    ) -> dict[str, Any]:
+        for key in (
+            "run_id",
+            "item_id",
+            "attempt",
+            "nonce",
+            "validator_config_hash",
+            "validator_prompt_hash",
+            "delta_fingerprint",
+            "status",
+            "evidence",
+            "feedback_for_executor",
+            "checked_items",
+        ):
+            if key not in result:
+                raise ContractError(f"validator result is missing {key!r}")
+        expected = {
+            "run_id": self.run_id,
+            "item_id": assignment["item_id"],
+            "attempt": assignment["attempt"],
+            "nonce": assignment["validator_nonce"],
+            "validator_config_hash": assignment["validator_config_hash"],
+            "validator_prompt_hash": assignment["validator_prompt_hash"],
+            "delta_fingerprint": assignment["delta_fingerprint"],
+        }
+        for key, value in expected.items():
+            if result.get(key) != value:
+                raise ContractError(f"validator result {key} does not match assignment")
+        if result["status"] not in {"pass", "fail"}:
+            raise ContractError("validator result status must be pass or fail")
+        if not isinstance(result["evidence"], str) or not result["evidence"].strip():
+            raise ContractError("validator result evidence is required")
+        if not isinstance(result["feedback_for_executor"], str):
+            raise ContractError("validator result feedback_for_executor must be a string")
+        checked_items = result["checked_items"]
+        if checked_items != self._item_validator_check_ids(item):
+            raise ContractError("validator result checked_items does not match item check IDs")
+        return {
+            "item_id": assignment["item_id"],
+            "attempt": assignment["attempt"],
+            "validator_nonce": assignment["validator_nonce"],
+            "status": result["status"],
+            "evidence": bounded_evidence(result["evidence"]),
+            "feedback_for_executor": bounded_evidence(result["feedback_for_executor"]),
+            "checked_items": list(checked_items),
+            "base_commit": assignment["base_commit"],
+            "run_worktree": assignment["run_worktree"],
+            "changed_files": list(assignment["changed_files"]),
+            "validator_config_hash": assignment["validator_config_hash"],
+            "validator_prompt_hash": assignment["validator_prompt_hash"],
+            "delta_fingerprint": assignment["delta_fingerprint"],
+        }
+
+    def _auto_restore_validator_retry_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        item: dict[str, Any],
+        start: dict[str, Any],
+        result_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        retries = sum(
+            1
+            for event in events
+            if event["type"] == "validator_result_recorded"
+            and event.get("payload", {}).get("item_id") == item["id"]
+            and event.get("payload", {}).get("status") == "fail"
+        )
+        if retries > manifest["validator_retry_limit"]:
+            self._append_event_locked(
+                "awaiting_retry_decision",
+                {
+                    "item_id": item["id"],
+                    "failure_event": "validator_result_recorded",
+                    "base_commit": start["base_commit"],
+                    "run_worktree": start["run_worktree"],
+                },
+            )
+            return result_payload
+        started = self._execution_started_record(events)
+        try:
+            self._require_protected_metadata_clean(started)
+            delta = self._item_delta_locked(events, manifest, started, item, start)
+            if delta["delta_fingerprint"] != result_payload["delta_fingerprint"]:
+                raise ContractError("delta fingerprint changed before validator retry restore")
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            self._record_attempt_failure_locked("audit_failed", item["id"], evidence=f"audit failed: {exc}", start=start)
+            raise
+        run_worktree = Path(start["run_worktree"])
+        git(run_worktree, "reset", "--hard", start["base_commit"])
+        git(run_worktree, "clean", "-fdx")
+        payload = {
+            "item_id": item["id"],
+            "approval_nonce": None,
+            "auto_approved": True,
+            "auto_validator_retry": True,
+            "restored_to": start["base_commit"],
+            "run_worktree": str(run_worktree),
+            "validator_nonce": result_payload["validator_nonce"],
+            "feedback_for_executor": result_payload["feedback_for_executor"],
+            "evidence": result_payload["evidence"],
+        }
+        return self._append_event_locked("retry_restored", payload)["payload"]
+
+    def record_validator_result(
+        self,
+        item_id: str,
+        *,
+        validator_nonce: str,
+        result: dict[str, Any],
+        agent_handle: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise ContractError("validator result must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            item = self._manifest_item(record["manifest"], item_id)
+            assignment = self._require_validator_assignment_locked(replayed.events, record["manifest"], item, validator_nonce)
+            start = self._latest_item_start(replayed.events, item_id)
+            validator_config = self._validator_config(record["manifest"])
+            if validator_config.get("mode") == "host-multi-agent":
+                if agent_handle is None:
+                    raise ContractError("validator agent handle is required for host validator results")
+                registration = self._latest_validator_host_registration(
+                    replayed.events,
+                    validator_nonce=validator_nonce,
+                    agent_handle=agent_handle,
+                )
+                if registration is None:
+                    raise ContractError("registered validator agent handle does not match active assignment")
+            else:
+                registration = None
+            try:
+                current = self._item_delta_locked(
+                    replayed.events,
+                    record["manifest"],
+                    self._execution_started_record(replayed.events),
+                    item,
+                    start,
+                )
+                if current["delta_fingerprint"] != assignment["delta_fingerprint"]:
+                    raise ContractError("delta fingerprint changed before validator result receipt")
+                payload = self._validator_result_payload(result, assignment=assignment, item=item)
+            except ContractError as exc:
+                self._reject_validator_result_locked(item_id, evidence=f"validator result rejected: {exc}", assignment=assignment, start=start)
+                raise
+            if registration is not None:
+                payload.update({"agent_handle": agent_handle, "launch_nonce": registration["launch_nonce"]})
+            recorded = self._append_event_locked("validator_result_recorded", payload)["payload"]
+            if recorded["status"] == "fail":
+                return self._auto_restore_validator_retry_locked(
+                    [*replayed.events, {"type": "validator_result_recorded", "payload": recorded}],
+                    record["manifest"],
+                    item,
+                    start,
+                    recorded,
+                )
+            return recorded
+
+    def fail_validator(
+        self,
+        item_id: str,
+        *,
+        reason: str,
+        validator_nonce: str | None = None,
+        agent_handle: str | None = None,
+        launch_nonce: str | None = None,
+        evidence: str = "",
+    ) -> dict[str, Any]:
+        if reason not in {"process", "crash", "timeout", "interrupted", "unknown"}:
+            raise ContractError("validator failure reason must be process, crash, timeout, interrupted, or unknown")
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            item = self._manifest_item(record["manifest"], item_id)
+            assignment = self._latest_validator_assignment(replayed.events, item_id)
+            if assignment is None:
+                raise ContractError(f"{item_id} has no active validator assignment")
+            if validator_nonce is not None and assignment.get("validator_nonce") != validator_nonce:
+                raise ContractError("validator nonce does not match active validator assignment")
+            start = self._latest_item_start(replayed.events, item_id)
+            extra = {
+                "attempt": assignment["attempt"],
+                "validator_nonce": assignment["validator_nonce"],
+                "reason": reason,
+                "validator_config_hash": assignment["validator_config_hash"],
+                "validator_prompt_hash": assignment["validator_prompt_hash"],
+                "delta_fingerprint": assignment["delta_fingerprint"],
+            }
+            if agent_handle is not None:
+                registration = self._latest_validator_host_registration(
+                    replayed.events,
+                    validator_nonce=assignment["validator_nonce"],
+                    agent_handle=agent_handle,
+                )
+                if registration is None:
+                    raise ContractError("registered validator agent handle does not match active assignment")
+                extra.update({"agent_handle": agent_handle, "launch_nonce": registration["launch_nonce"]})
+            elif launch_nonce is not None:
+                authorization = self._latest_validator_host_authorization(
+                    replayed.events,
+                    validator_nonce=assignment["validator_nonce"],
+                    launch_nonce=launch_nonce,
+                )
+                if authorization is None:
+                    raise ContractError("unknown or stale validator launch nonce")
+                extra.update({"launch_nonce": launch_nonce, "agent_handle_lost": True})
+            return self._record_attempt_failure_locked(
+                "validator_failed",
+                item_id,
+                evidence=evidence or f"validator {reason}",
+                start=start,
+                extra=extra,
+            )
+
+    def assign_validator(self, item_id: str) -> dict[str, Any]:
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            if not self._manifest_uses_validator(record["manifest"]):
+                raise ContractError("execution manifest does not use validator workers")
+            item = self._manifest_item(record["manifest"], item_id)
+            statuses = self._item_statuses(replayed.events, record["manifest"])
+            if statuses[item_id] == "validating":
+                assignment = self._latest_validator_assignment(replayed.events, item_id)
+                if assignment is None:
+                    raise ContractError(f"{item_id} validator assignment is missing")
+                return self._validator_assignment_response_locked(
+                    replayed.events,
+                    record["manifest"],
+                    item,
+                    assignment,
+                    self._validator_config(record["manifest"]),
+                )
+            if statuses[item_id] != "completed":
+                raise ContractError(f"{item_id} is not ready for validator assignment; current status is {statuses[item_id]}")
+            start = self._latest_item_start(replayed.events, item_id)
+            return self._assign_validator_locked(replayed.events, record["manifest"], item, start)
+
+    def reject_validator_protocol(self, item_id: str, *, validator_nonce: str, evidence: str) -> dict[str, Any]:
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            item = self._manifest_item(record["manifest"], item_id)
+            assignment = self._require_validator_assignment_locked(replayed.events, record["manifest"], item, validator_nonce)
+            start = self._latest_item_start(replayed.events, item_id)
+            self._reject_validator_result_locked(item_id, evidence=evidence, assignment=assignment, start=start)
+            return {"item_id": item_id, "validator_nonce": validator_nonce, "status": "rejected"}
+
+    def run_validator(self, item_id: str) -> dict[str, Any]:
+        assignment = self.assign_validator(item_id)
+        validator_config = assignment["validator"]
+        if validator_config.get("mode") in {"host-multi-agent", "foreground"}:
+            return assignment
+        self._ensure_adapter_launch_files(validator_config, write=False)
+        run_worktree = Path(assignment["run_worktree"])
+        state_path = self.run_dir / "validator-states" / f"{item_id}-{assignment['attempt']}.json"
+        validator_state = {
+            "run_id": self.run_id,
+            "item_id": item_id,
+            "attempt": assignment["attempt"],
+            "validator_nonce": assignment["validator_nonce"],
+            "validator_config_hash": assignment["validator_config_hash"],
+            "validator_prompt_hash": assignment["validator_prompt_hash"],
+            "delta_fingerprint": assignment["delta_fingerprint"],
+            "checked_items": self._item_validator_check_ids(self._manifest_item(self._execution_manifest_record(self.replay().events)["manifest"], item_id)),
+            "validator_prompt": self._execution_manifest_record(self.replay().events)["manifest"]["validator_prompt"],
+        }
+        write_json_atomic(state_path, validator_state)
+        env = os.environ.copy()
+        env.update(validator_config["env"])
+        env.update(
+            {
+                "OPTIM_PLANS_RUN_ID": self.run_id,
+                "OPTIM_PLANS_ITEM_ID": item_id,
+                "OPTIM_PLANS_ATTEMPT": str(assignment["attempt"]),
+                "OPTIM_PLANS_VALIDATOR_NONCE": assignment["validator_nonce"],
+                "OPTIM_PLANS_VALIDATOR_CONFIG_HASH": assignment["validator_config_hash"],
+                "OPTIM_PLANS_VALIDATOR_PROMPT_HASH": assignment["validator_prompt_hash"],
+                "OPTIM_PLANS_DELTA_FINGERPRINT": assignment["delta_fingerprint"],
+                "OPTIM_PLANS_VALIDATOR_STATE_PATH": str(state_path),
+                "OPTIM_PLANS_CHECK_IDS": json_text(validator_state["checked_items"]),
+            }
+        )
+        validator = run_process_group(
+            validator_config["argv"],
+            cwd=run_worktree,
+            env=env,
+            timeout_seconds=validator_config["timeout_seconds"],
+        )
+        if not validator.ok():
+            reason = "timeout" if validator.timed_out else "process"
+            evidence = validator.evidence("validator", timeout_seconds=validator_config["timeout_seconds"])
+            self.fail_validator(item_id, reason=reason, validator_nonce=assignment["validator_nonce"], evidence=evidence)
+            raise ContractError(evidence)
+        if not validator.stdout.strip():
+            evidence = "validator result rejected: validator stdout result is missing"
+            self.reject_validator_protocol(item_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
+            raise ContractError(evidence)
+        try:
+            result = parse_json_strict(validator.stdout.strip(), source="validator stdout")
+        except ContractError as exc:
+            evidence = f"validator result rejected: {exc}"
+            self.reject_validator_protocol(item_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
+            raise
+        if not isinstance(result, dict):
+            evidence = "validator result rejected: validator result must be a JSON object"
+            self.reject_validator_protocol(item_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
+            raise ContractError(evidence)
+        return self.record_validator_result(item_id, validator_nonce=assignment["validator_nonce"], result=result)
 
     def _require_host_assignment_locked(
         self,
@@ -2100,6 +2881,7 @@ class OptimPlansState:
             verification_config = self._verification_config(record["manifest"], item)
             statuses = self._item_statuses(replayed.events, record["manifest"])
             status = statuses[item_id]
+            uses_validator = self._manifest_uses_validator(record["manifest"])
             if status == "pending":
                 return {"item_id": item_id, "phase": "pending"}
             if status == "in_progress":
@@ -2110,6 +2892,17 @@ class OptimPlansState:
                     item,
                     start,
                     worker_config,
+                )
+            if status == "validating":
+                assignment = self._latest_validator_assignment(replayed.events, item_id)
+                if assignment is None:
+                    raise ContractError(f"{item_id} validator assignment is missing")
+                return self._validator_assignment_response_locked(
+                    replayed.events,
+                    record["manifest"],
+                    item,
+                    assignment,
+                    self._validator_config(record["manifest"]),
                 )
             if status == "failed":
                 return {"item_id": item_id, "phase": "failed"}
@@ -2124,12 +2917,21 @@ class OptimPlansState:
                     return {"item_id": item_id, "phase": "checkpointed", **checkpoint}
             elif status == "prepared":
                 pass
-            elif status != "completed":
+            elif status == "completed" and uses_validator:
+                pass
+            elif status not in {"completed", "validated"}:
                 raise ContractError(f"{item_id} cannot be advanced from status {status}")
 
-        if status == "completed":
+        if status == "completed" and uses_validator:
+            validated = self.run_validator(item_id)
+            if validated.get("status") == "pass":
+                return self.advance_item(item_id)
+            return validated
+        if status in {"completed", "validated"}:
             self._assert_protected_metadata_before_verification(item_id)
             start = self._latest_item_start(self.replay().events, item_id)
+            if uses_validator:
+                self._assert_delta_fingerprint_before_verification(item_id)
             verifier_env = os.environ.copy()
             verifier_env.update(verification_config["env"])
             verifier = run_process_group(
@@ -2145,6 +2947,8 @@ class OptimPlansState:
             if not verifier.ok():
                 self.record_attempt_failure("verification_failed", item_id, evidence=verifier_evidence)
                 raise ContractError(verifier_evidence)
+            if uses_validator:
+                self._assert_delta_fingerprint_after_verification(item_id)
             checkpoint = self.checkpoint_item(item_id, evidence=verifier_evidence)
         elif status == "prepared":
             checkpoint = self.checkpoint_item(item_id, evidence="prepared checkpoint")
@@ -2174,12 +2978,57 @@ class OptimPlansState:
             self.record_attempt_failure("audit_failed", item_id, evidence=f"audit failed: {exc}")
             raise
 
+    def _latest_validator_pass(self, events: list[dict[str, Any]], item_id: str) -> dict[str, Any]:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if payload.get("item_id") != item_id:
+                continue
+            if event["type"] == "validator_result_recorded" and payload.get("status") == "pass":
+                return payload
+            if event["type"] in {"retry_restored", "checkpoint_created", "item_started"}:
+                break
+        raise ContractError(f"{item_id} does not have a passing validator result")
+
+    def _assert_delta_fingerprint_before_verification(self, item_id: str) -> None:
+        try:
+            with self.controller_lock():
+                replayed = self.replay()
+                record = self._execution_manifest_record(replayed.events)
+                item = self._manifest_item(record["manifest"], item_id)
+                started = self._execution_started_record(replayed.events)
+                start = self._latest_item_start(replayed.events, item_id)
+                validator = self._latest_validator_pass(replayed.events, item_id)
+                delta = self._item_delta_locked(replayed.events, record["manifest"], started, item, start)
+                if delta["delta_fingerprint"] != validator["delta_fingerprint"]:
+                    raise ContractError("delta fingerprint changed before verification")
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            self.record_attempt_failure("audit_failed", item_id, evidence=f"audit failed: {exc}")
+            raise
+
+    def _assert_delta_fingerprint_after_verification(self, item_id: str) -> None:
+        try:
+            with self.controller_lock():
+                replayed = self.replay()
+                record = self._execution_manifest_record(replayed.events)
+                item = self._manifest_item(record["manifest"], item_id)
+                started = self._execution_started_record(replayed.events)
+                start = self._latest_item_start(replayed.events, item_id)
+                validator = self._latest_validator_pass(replayed.events, item_id)
+                delta = self._item_delta_locked(replayed.events, record["manifest"], started, item, start)
+                if delta["delta_fingerprint"] != validator["delta_fingerprint"]:
+                    raise ContractError("delta fingerprint changed after verification")
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            self.record_attempt_failure("audit_failed", item_id, evidence=f"audit failed: {exc}")
+            raise
+
     def run_item(self, item_id: str) -> dict[str, Any]:
         replayed = self.replay()
-        self._require_lifecycle_locked(replayed.events, {"executing"}, "run-item")
+        self._require_lifecycle_locked(replayed.events, {"executing", "validating", "verifying"}, "run-item")
         record = self._execution_manifest_record(replayed.events)
         item = self._manifest_item(record["manifest"], item_id)
-        if self._item_statuses(replayed.events, record["manifest"])[item_id] == "prepared":
+        statuses = self._item_statuses(replayed.events, record["manifest"])
+        uses_validator = self._manifest_uses_validator(record["manifest"])
+        if statuses[item_id] == "prepared":
             checkpoint = self.checkpoint_item(item_id, evidence="prepared checkpoint")
             if checkpoint.get("phase") == "awaiting_execution_summary":
                 return checkpoint
@@ -2189,6 +3038,14 @@ class OptimPlansState:
                 if lifecycle_status(self.replay().events) == "awaiting_retry_decision":
                     raise
             return checkpoint
+        if statuses[item_id] in {"completed", "validating"} and uses_validator:
+            validated = self.run_validator(item_id)
+            if validated.get("status") == "pass":
+                statuses = self._item_statuses(self.replay().events, record["manifest"])
+            elif validated.get("auto_validator_retry"):
+                return self.run_item(item_id)
+            else:
+                return validated
         worker_config = self._worker_config(record["manifest"], item)
         if worker_config.get("mode") == "host-multi-agent":
             raise ContractError(
@@ -2198,41 +3055,61 @@ class OptimPlansState:
         verification_config = self._verification_config(record["manifest"], item)
         self._ensure_adapter_launch_files(worker_config, write=False)
 
-        started = self.begin_item(item_id)
-        self._ensure_adapter_launch_files(worker_config)
-        run_worktree = Path(started["run_worktree"])
-        worker_nonce = uuid.uuid4().hex
-        state_path = self.run_dir / "worker-states" / f"{item_id}-{started['attempt']}.json"
-        write_json_atomic(state_path, {"run_id": self.run_id, "worker_nonce": worker_nonce})
-        env = os.environ.copy()
-        env.update(worker_config["env"])
-        env.update(
-            {
-                "OPTIM_PLANS_RUN_ID": self.run_id,
-                "OPTIM_PLANS_WORKER_NONCE": worker_nonce,
-                "OPTIM_PLANS_STATE_PATH": str(state_path),
-                "OPTIM_PLANS_IDS": item_id,
-                "OPTIM_PLANS_SCOPES": os.pathsep.join(started["allowed_paths"]),
-            }
-        )
-        worker = run_process_group(
-            worker_config["argv"],
-            cwd=run_worktree,
-            env=env,
-            timeout_seconds=worker_config["timeout_seconds"],
-        )
-        if not worker.ok():
-            evidence = worker.evidence("worker", timeout_seconds=worker_config["timeout_seconds"])
-            self.record_worker_failure(item_id, evidence=evidence)
-            raise ContractError(evidence)
-        try:
-            worker_evidence = self._worker_result_evidence(item_id, stdout=worker.stdout, worker_nonce=worker_nonce)
-        except ContractError as exc:
-            self.record_worker_failure(item_id, evidence=f"worker result rejected: {exc}")
-            raise
-        self.record_worker_completion(item_id, evidence=worker_evidence)
+        if statuses[item_id] != "validated":
+            started = self.begin_item(item_id)
+            self._ensure_adapter_launch_files(worker_config)
+            run_worktree = Path(started["run_worktree"])
+            worker_nonce = uuid.uuid4().hex
+            state_path = self.run_dir / "worker-states" / f"{item_id}-{started['attempt']}.json"
+            worker_state: dict[str, Any] = {"run_id": self.run_id, "worker_nonce": worker_nonce}
+            feedback = self._latest_validator_feedback(self.replay().events, item_id)
+            if feedback is not None:
+                worker_state["validator_feedback"] = feedback
+            write_json_atomic(state_path, worker_state)
+            env = os.environ.copy()
+            env.update(worker_config["env"])
+            env.update(
+                {
+                    "OPTIM_PLANS_RUN_ID": self.run_id,
+                    "OPTIM_PLANS_WORKER_NONCE": worker_nonce,
+                    "OPTIM_PLANS_STATE_PATH": str(state_path),
+                    "OPTIM_PLANS_IDS": item_id,
+                    "OPTIM_PLANS_SCOPES": os.pathsep.join(started["allowed_paths"]),
+                }
+            )
+            if feedback is not None:
+                env["OPTIM_PLANS_VALIDATOR_FEEDBACK"] = feedback["feedback_for_executor"]
+                env["OPTIM_PLANS_VALIDATOR_EVIDENCE"] = feedback["evidence"]
+            worker = run_process_group(
+                worker_config["argv"],
+                cwd=run_worktree,
+                env=env,
+                timeout_seconds=worker_config["timeout_seconds"],
+            )
+            if not worker.ok():
+                evidence = worker.evidence("worker", timeout_seconds=worker_config["timeout_seconds"])
+                self.record_worker_failure(item_id, evidence=evidence)
+                raise ContractError(evidence)
+            try:
+                worker_evidence = self._worker_result_evidence(item_id, stdout=worker.stdout, worker_nonce=worker_nonce)
+            except ContractError as exc:
+                self.record_worker_failure(item_id, evidence=f"worker result rejected: {exc}")
+                raise
+            self.record_worker_completion(item_id, evidence=worker_evidence)
+            if uses_validator:
+                validated = self.run_validator(item_id)
+                if validated.get("status") == "pass":
+                    pass
+                elif validated.get("auto_validator_retry"):
+                    return self.run_item(item_id)
+                else:
+                    return validated
+        start = self._latest_item_start(self.replay().events, item_id)
+        run_worktree = Path(start["run_worktree"])
 
         self._assert_protected_metadata_before_verification(item_id)
+        if uses_validator:
+            self._assert_delta_fingerprint_before_verification(item_id)
         verifier_env = os.environ.copy()
         verifier_env.update(verification_config["env"])
         verifier = run_process_group(
@@ -2245,6 +3122,8 @@ class OptimPlansState:
         if not verifier.ok():
             self.record_attempt_failure("verification_failed", item_id, evidence=verifier_evidence)
             raise ContractError(verifier_evidence)
+        if uses_validator:
+            self._assert_delta_fingerprint_after_verification(item_id)
         checkpoint = self.checkpoint_item(item_id, evidence=verifier_evidence)
         if checkpoint.get("phase") == "awaiting_execution_summary":
             return checkpoint
@@ -2266,7 +3145,11 @@ class OptimPlansState:
                 statuses[item_id] = "in_progress"
             elif event["type"] == "worker_completed":
                 statuses[item_id] = "completed"
-            elif event["type"] in {"worker_failed", "verification_failed", "audit_failed"}:
+            elif event["type"] in {"validator_assigned", "validator_spawn_authorized", "validator_agent_registered"}:
+                statuses[item_id] = "validating"
+            elif event["type"] == "validator_result_recorded":
+                statuses[item_id] = "validated" if payload.get("status") == "pass" else "failed"
+            elif event["type"] in {"worker_failed", "validator_protocol_rejected", "validator_failed", "verification_failed", "audit_failed"}:
                 statuses[item_id] = "failed"
             elif event["type"] == "retry_restored":
                 statuses[item_id] = "pending"
@@ -2292,8 +3175,16 @@ class OptimPlansState:
             payload = event.get("payload", {})
             if payload.get("item_id") != item_id:
                 continue
-            if event["type"] in {"worker_failed", "verification_failed", "audit_failed"}:
-                return payload
+            if event["type"] in {
+                "worker_failed",
+                "validator_result_recorded",
+                "validator_protocol_rejected",
+                "validator_failed",
+                "verification_failed",
+                "audit_failed",
+            }:
+                if event["type"] != "validator_result_recorded" or payload.get("status") == "fail":
+                    return payload
             if event["type"] in {"checkpoint_created", "retry_restored", "item_started"}:
                 break
         raise ContractError(f"{item_id} has no failed attempt to retry")
@@ -2363,7 +3254,7 @@ class OptimPlansState:
             blocked = [
                 current_id
                 for current_id, status in statuses.items()
-                if status in {"in_progress", "completed", "failed"}
+                if status in {"in_progress", "completed", "validating", "validated", "prepared", "failed"}
             ]
             if blocked:
                 raise ContractError(f"another item attempt must be resolved first: {blocked[0]}")
@@ -2458,7 +3349,9 @@ class OptimPlansState:
         started = self._execution_started_record(events)
         item = self._manifest_item(record["manifest"], item_id)
         statuses = self._item_statuses(events, record["manifest"])
-        if statuses[item_id] != "completed":
+        if self._manifest_uses_validator(record["manifest"]) and statuses[item_id] != "validated":
+            raise ContractError(f"{item_id} is not validated and ready for checkpoint")
+        if statuses[item_id] not in {"completed", "validated"}:
             raise ContractError(f"{item_id} is not completed and ready for checkpoint")
         start = self._latest_item_start(events, item_id)
         try:
@@ -2903,8 +3796,17 @@ class OptimPlansState:
 
     def _latest_failure_event_payload(self, events: list[dict[str, Any]]) -> dict[str, Any] | None:
         for event in reversed(events):
-            if event["type"] in {"worker_failed", "verification_failed", "audit_failed"}:
+            if event["type"] in {
+                "worker_failed",
+                "validator_result_recorded",
+                "validator_protocol_rejected",
+                "validator_failed",
+                "verification_failed",
+                "audit_failed",
+            }:
                 payload = event.get("payload", {})
+                if event["type"] == "validator_result_recorded" and payload.get("status") != "fail":
+                    continue
                 return {
                     "failure_event_type": event["type"],
                     "failure_event_seq": event["seq"],
@@ -3107,7 +4009,12 @@ class OptimPlansState:
             elif event_type == "worker_completed":
                 result["status"] = "worker_completed"
                 result["explanation"] = payload.get("evidence", "")
-            elif event_type in {"worker_failed", "verification_failed", "audit_failed"}:
+            elif event_type == "validator_result_recorded":
+                result["status"] = "validator_passed" if payload.get("status") == "pass" else "validator_failed"
+                result["evidence"] = payload.get("evidence", "")
+                if payload.get("feedback_for_executor"):
+                    result["limitations"] = payload["feedback_for_executor"]
+            elif event_type in {"worker_failed", "validator_protocol_rejected", "validator_failed", "verification_failed", "audit_failed"}:
                 result["status"] = "failed"
                 result["limitations"] = payload.get("evidence", "")
             elif event_type == "awaiting_retry_decision":

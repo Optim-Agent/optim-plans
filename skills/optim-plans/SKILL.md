@@ -36,7 +36,7 @@ For `plan`, `big-plan`, and `huge-plan`, only high-priority comments or criticis
 
 If no level is named, auto-select the smallest level that fits the user's prompt and repo evidence before the first planning question. Do not ask the user to choose the level as that question.
 
-After each plan version, ask one refinement mode question: recommend `Reviewer` first, then `Criticizer`, `Jump to executor` (`skip-refinement-execute`), and `Auto-complete`. For `Reviewer` or `Criticizer`, ask the first `agent-choice` follow-up for the detected agent and effort; later `agent-choice` asks default only from the same worker role: `refinement_worker.choice` or `executor_worker.choice`. Delegated workers are same-platform only: Codex must not call Claude, and Claude must not call Codex.
+After each plan version, ask one refinement mode question: recommend `Reviewer` first, then `Criticizer`, `Jump to executor` (`skip-refinement-execute`), and `Auto-complete`. For `Reviewer` or `Criticizer`, ask the first `agent-choice` follow-up for the detected agent and effort; later `agent-choice` asks default only from the same worker role: `refinement_worker.choice`, `executor_worker.choice`, or `validator_worker.choice`. Delegated workers are same-platform only: Codex must not call Claude, and Claude must not call Codex.
 
 ## Anti-Pattern: "Too Small To Plan"
 
@@ -123,8 +123,8 @@ When native cards are available, render the controller's pending question as car
 - `run.json` is immutable; `events.jsonl` is authoritative.
 - Reviewer and criticizer sessions are read-only and fresh.
 - Execution requires a clean committed Git base and explicit manifest-bound human launch approval.
-- Executor manifests use same-platform delegation. Codex delegated executors prefer host-multi-agent mode with `assign-item` / `authorize-spawn` / host `spawn_agent` / `register-agent` / host `wait_agent` / `complete-item` or `fail-item` / `advance-item`; CLI adapter fallback still requires same-agent smoke argv before immutable recording and runs through adapter argv with `shell=False` in one controller-owned run worktree and branch.
-- Controller verification, path audits, and protected Git metadata audits are authoritative; worker prose is evidence only.
+- Executor manifests use same-platform delegation. Codex delegated executors prefer host-multi-agent mode with `assign-item` / `authorize-spawn` / host `spawn_agent` / `register-agent` / host `wait_agent` / `complete-item` or `fail-item` / `advance-item`; CLI adapter fallback still requires same-agent smoke argv before immutable recording and runs through adapter argv with `shell=False` in one controller-owned run worktree and branch. `0.1.2` execution manifests also bind a read-only validator worker, validator prompt hash, item check IDs, and validator retry limit before controller verification.
+- Validator output is an input to the controller, not the checkpoint authority. Controller verification, path audits, and protected Git metadata audits remain authoritative; worker prose is evidence only.
 - Verified items become checkpoint commits in serial DAG order. The first retry restores automatically; later failed attempts require explicit retry approval before restoration.
 - All verified items plus final audits automatically record a non-destructive `kept` terminal outcome; `finish-run` remains a manual recovery command, and `integrated` finish runs the full local proof before terminal success.
 - The trust boundary is repository-integrity detection and integration gating, not host confinement.
