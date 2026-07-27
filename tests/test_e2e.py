@@ -504,6 +504,59 @@ class E2ETests(unittest.TestCase):
             self.assertEqual(reused["mode"], "host-multi-agent")
             self.assertEqual(reused["model"], "model-test")
 
+    def test_prepare_execution_executor_worker_required_before_manifest_recording(self) -> None:
+        from scripts.optim_plans_core import host_agent
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            init = controller_json("init", "--repo", str(repo), "--topic", "Executor Required")
+            platform = host_agent(os.environ)
+            config_path(repo).write_text(
+                json.dumps({"schema": 1, "refinement_worker": {"platform": platform, "mode": "default"}}),
+                encoding="utf-8",
+            )
+            sentinel = raw_path / "smoked"
+            worker = make_executable(
+                raw_path / platform,
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                "from pathlib import Path\n"
+                "if '--optim-plans-smoke' in sys.argv:\n"
+                f"    Path({str(sentinel)!r}).write_text('smoked', encoding='utf-8')\n"
+                "    print(json.dumps({'status': 'valid'}))\n",
+            )
+            argv = [str(worker), "exec", "-C", str(repo)]
+            if platform == "claude":
+                argv = [str(worker), "-p", "prompt", "--json-schema", str(raw_path / "schema.json")]
+            manifest = {
+                "plan_hash": "abc123",
+                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "worker": {
+                    "adapter": platform,
+                    "argv": argv,
+                    "smoke": {"argv": [*argv, "--optim-plans-smoke"]},
+                    "timeout_seconds": 5,
+                },
+                "items": [{"id": "TASK-001", "allowed_paths": ["src/cli.txt"]}],
+            }
+            manifest_path = raw_path / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            question = controller_json("prepare-execution", "--repo", str(repo), "--manifest", str(manifest_path))
+
+            self.assertEqual(question["stage"], "background-model")
+            self.assertEqual(question["config_key"], "executor_worker")
+            self.assertFalse(sentinel.exists())
+            events = [
+                json.loads(line)
+                for line in (config_path(repo).parent / "runs" / init["run_id"] / "events.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertNotIn("execution_manifest_created", [event["type"] for event in events])
+
     def test_worker_config_executor_cli_fallback_uses_stored_manual_values(self) -> None:
         from scripts.optim_plans_core import host_agent
 

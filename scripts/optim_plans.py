@@ -483,6 +483,14 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 def cmd_prepare_execution(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
+    if _worker_preference(state.repo, "executor_worker") is None:
+        _worker_question(
+            state,
+            prompt="Choose executor model and effort",
+            level=plan_level("plan"),
+            key="executor_worker",
+        )
+        return
     print_json(state.prepare_execution(Path(args.manifest)))
 
 
