@@ -113,6 +113,19 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("at most three sentences", text)
         self.assertIn("highlight the most important point", text)
 
+    def test_plan_revision_copies_previous_plan_then_edits_new_version(self) -> None:
+        text = (ROOT / "skills/optim-plans/references/refinement.md").read_text(encoding="utf-8")
+        self.assertRegex(
+            text,
+            re.compile(
+                r"`cp PLAN_vN\.md PLAN_v\(N\+1\)\.md`[^\n]+"
+                r"edit only `PLAN_v\(N\+1\)\.md`[^\n]+"
+                r"reviewer/criticizer comments"
+            ),
+        )
+        self.assertIn("`PLAN_vN_reviewer_comments.md`", text)
+        self.assertIn("`PLAN_vN_criticizer_comments.md`", text)
+
     def test_plan_versions_require_verifier_checklist(self) -> None:
         planning = (ROOT / "skills/optim-plans/references/planning.md").read_text(encoding="utf-8")
         refinement = (ROOT / "skills/optim-plans/references/refinement.md").read_text(encoding="utf-8")
