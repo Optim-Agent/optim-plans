@@ -48,6 +48,16 @@ def config_path(repo: Path) -> Path:
     return git_common_dir(repo) / "optim-plans" / "config.json"
 
 
+def write_executor_worker_config(repo: Path) -> None:
+    from scripts.optim_plans_core import host_agent
+
+    path = config_path(repo)
+    config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"schema": 1}
+    config["schema"] = 1
+    config["executor_worker"] = {"platform": host_agent(os.environ), "mode": "default"}
+    path.write_text(json.dumps(config), encoding="utf-8")
+
+
 def fake_agent_env(raw_path: Path, platform: str) -> dict[str, str]:
     bin_dir = raw_path / "bin"
     bin_dir.mkdir()
@@ -132,6 +142,7 @@ class E2ETests(unittest.TestCase):
             init_controller(repo, "Jump To Executor")
             q = controller_json("ask", "--repo", str(repo), "--prompt", "Choose refinement")
             answer_choice(repo, q["nonce"], "skip-refinement-execute")
+            write_executor_worker_config(repo)
             manifest = {
                 "plan_hash": "abc123",
                 "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
@@ -775,6 +786,7 @@ class E2ETests(unittest.TestCase):
             }
             manifest_path = raw_path / "manifest.json"
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            write_executor_worker_config(repo)
             prepared = subprocess.run(
                 [
                     sys.executable,
@@ -886,6 +898,7 @@ class E2ETests(unittest.TestCase):
             }
             manifest_path = raw_path / "host-manifest.json"
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            write_executor_worker_config(repo)
             prepared = controller_json("prepare-execution", "--repo", str(repo), "--manifest", str(manifest_path))
             answer_choice(repo, prepared["nonce"], "approve")
             controller_json("start-execution", "--repo", str(repo), "--approval-nonce", prepared["nonce"])
@@ -967,6 +980,7 @@ class E2ETests(unittest.TestCase):
             }
             manifest_path = Path(raw) / "manifest.json"
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            write_executor_worker_config(repo)
             prepared = subprocess.run(
                 [
                     sys.executable,
@@ -1086,6 +1100,7 @@ class E2ETests(unittest.TestCase):
             }
             manifest_path = raw_path / "manifest.json"
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            write_executor_worker_config(repo)
             prepared = subprocess.run(
                 [
                     sys.executable,
