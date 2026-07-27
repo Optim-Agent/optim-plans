@@ -53,7 +53,12 @@ digraph optim_plans {
     "Unresolved findings?" [shape=diamond];
     "PLAN_v(N+1).md" [shape=box];
     "Human approves execution?" [shape=diamond];
-    "Manifest-gated execution + controller verification" [shape=box];
+    "Executor item work" [shape=box];
+    "Read-only validator" [shape=box];
+    "Bounded amelioration retry" [shape=box];
+    "Controller verification + checkpoint" [shape=box];
+    "Recovery" [shape=box];
+    "Final audit + auto-integrated run" [shape=box];
     "Awaiting integration" [shape=box];
     "Finish wrap" [shape=doublecircle];
 
@@ -64,8 +69,17 @@ digraph optim_plans {
     "Unresolved findings?" -> "PLAN_v(N+1).md" [label="yes"];
     "PLAN_v(N+1).md" -> "Reviewer / Criticizer pass";
     "Unresolved findings?" -> "Human approves execution?" [label="no"];
-    "Human approves execution?" -> "Manifest-gated execution + controller verification" [label="yes"];
-    "Manifest-gated execution + controller verification" -> "Awaiting integration";
+    "Human approves execution?" -> "Executor item work" [label="yes"];
+    "Executor item work" -> "Read-only validator";
+    "Read-only validator" -> "Bounded amelioration retry" [label="valid fail + safe audit"];
+    "Bounded amelioration retry" -> "Executor item work";
+    "Read-only validator" -> "Controller verification + checkpoint" [label="pass"];
+    "Read-only validator" -> "Recovery" [label="protocol / drift / unsafe / exhausted"];
+    "Controller verification + checkpoint" -> "Executor item work" [label="next serial item"];
+    "Controller verification + checkpoint" -> "Final audit + auto-integrated run" [label="all items verified"];
+    "Final audit + auto-integrated run" -> "Awaiting integration" [label="unsafe or proof failed"];
+    "Final audit + auto-integrated run" -> "Finish wrap" [label="integrated"];
+    "Recovery" -> "Finish wrap";
     "Awaiting integration" -> "Finish wrap";
 }
 ```
@@ -85,7 +99,7 @@ Create a task for each item and complete them in order:
 3. Grill the user: ask unresolved questions one at a time until none remain.
 4. Write `PLAN_v1.md` under `docs/optim-plans/YYYY-MM-DD-topic/`, including the repo evidence and resolved decisions.
 5. Run reviewer or criticizer refinement; produce `PLAN_v(N+1).md` until converged.
-6. Obtain explicit human approval for the immutable execution manifest, execute serial items through the controller, then let clean final audits auto-record the kept terminal outcome.
+6. Obtain explicit human approval for the immutable execution manifest, execute serial items through the controller, then let clean final audits auto-record `integrated`; unsafe auto-integration enters `awaiting_integration`.
 
 ## Grilling the User
 
@@ -126,7 +140,7 @@ When native cards are available, render the controller's pending question as car
 - Executor manifests use same-platform delegation. Codex delegated executors prefer host-multi-agent mode with `assign-item` / `authorize-spawn` / host `spawn_agent` / `register-agent` / host `wait_agent` / `complete-item` or `fail-item` / `advance-item`; CLI adapter fallback still requires same-agent smoke argv before immutable recording and runs through adapter argv with `shell=False` in one controller-owned run worktree and branch. `0.1.2` execution manifests also bind a read-only validator worker, validator prompt hash, item check IDs, and validator retry limit before controller verification.
 - Validator output is an input to the controller, not the checkpoint authority. Controller verification, path audits, and protected Git metadata audits remain authoritative; worker prose is evidence only.
 - Verified items become checkpoint commits in serial DAG order. The first retry restores automatically; later failed attempts require explicit retry approval before restoration.
-- All verified items plus final audits automatically record a non-destructive `kept` terminal outcome; `finish-run` remains a manual recovery command, and `integrated` finish runs the full local proof before terminal success.
+- All verified items plus clean final audits automatically fast-forward the checked-out destination and record `integrated`; unsafe or failed proof enters `awaiting_integration`. `finish-run` remains a manual recovery command, with `kept` available only as an explicit preservation outcome.
 - The trust boundary is repository-integrity detection and integration gating, not host confinement.
 - Hooks only inject context and deny unsafe tool calls; they are defense in depth and the controller owns continuation.
 

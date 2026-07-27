@@ -8,7 +8,7 @@
 <h1 align="center">optim-plans</h1>
 
 <p align="center">
-  Your planning loop and execution loop for agentic coding.
+  Your planning-refining ring and executing-validating ring for agentic coding.
 </p>
 
 <p align="center">
@@ -25,16 +25,16 @@
 <summary><strong>It may be your best planner ever.</strong></summary>
 
 ```text
-all you need is a planning loop and an execution loop
+all you need is a planning-refining ring and an executing-validating ring
 both are elegantly featured in optim-plans
 plans stay reviewable
-execution stays gated
+execution stays gated, validated, and ameliorated when safe
 agents stay pointed at the work that matters
 ```
 
 </details>
 
-`optim-plans` turns "build me something" into a reviewed Markdown plan, records the decisions that shaped it, and keeps execution behind explicit approval. It gives Claude and Codex the two loops agentic coding actually needs: a planning-refining loop that keeps asking until the plan is real, and an execution loop that builds, verifies, and records what happened.
+`optim-plans` turns "build me something" into a reviewed Markdown plan, records the decisions that shaped it, and keeps execution behind explicit approval. It gives Claude and Codex the two rings agentic coding actually needs: a planning-refining ring that keeps asking until the plan is real, and an executing-validating (ameliorating) ring that builds, validates, improves when safe, verifies, and records what happened.
 
 ## The Two Rings
 
@@ -50,15 +50,22 @@ Planning-refining ring
        ^                                  |
        |__________________________________|
 
-Execution ring
+Executing-validating (ameliorating) ring
 
   prepare manifest -> approve -> start run worktree
-        -> executor -> validator -> serial item checkpoint -> final audit -> auto-integrated run
+        -> executor -> read-only validator
+             ^             |
+             |             v
+        bounded safe-audit validator feedback retry
+
+        validator pass -> controller verification -> serial item checkpoint
+             -> final audit -> auto-integrated run
+        protocol / drift / unsafe / exhausted retry failures -> recovery
 ```
 
 The first ring fights the wrong-plan problem. It turns vague intent into a plan, then refines that plan with review or criticism. Each decision can open its own smaller question-answering ring, so uncertainty gets resolved before code changes.
 
-The second ring fights the wrong-execution problem. It starts only from an immutable manifest-bound human approval, runs serial checkpointed work in one controller-owned worktree and branch, verifies with controller-run commands and Git audits, then automatically fast-forwards the clean checked-out destination and records `integrated` after the full local proof passes.
+The second ring fights the wrong-execution problem. It starts only from an immutable manifest-bound human approval, runs serial checkpointed work in one controller-owned worktree and branch, inserts a read-only validator before controller verification, and only sends bounded safe-audit validator feedback back to the executor when that retry path is valid. Validator pass, controller-run verification, and Git audits are all required before checkpointing; protocol failures, drift, unsafe audits, or exhausted retries route to recovery. Clean final audits automatically fast-forward the checked-out destination and record `integrated` after the full local proof passes.
 
 ## See it in action
 
@@ -455,8 +462,7 @@ The implemented guardrails include:
 - fail-closed Auto-complete allowlist;
 - one controller-owned run worktree and run branch for the cumulative run;
 - serial item execution with checkpoint commits in stable DAG order;
-- validator worker loop before controller verification, with bounded feedback
-  injection for validator-driven retries;
+- executing-validating (ameliorating) ring before controller verification, with bounded safe-audit validator feedback injection for validator-driven retries;
 - host `spawn_agent` / `wait_agent` orchestration for Codex executor delegation, or adapter-only argv launch with `shell=False` after adapter CLI smoke;
 - controller verification and Git audits for path allowlists and protected Git metadata;
 - `awaiting_retry_decision` with bounded evidence, automatic first retry restore, and explicit retry approval for later retries;
@@ -570,7 +576,7 @@ The repository intentionally has no Python dependency installation step.
 
 ## Acknowledgements
 
-Thanks to [chaseai-yt/grill-me-codex](https://github.com/chaseai-yt/grill-me-codex) for motivating this project, [mattpocock/skills](https://github.com/mattpocock/skills) for initiating this idea, and [leo-lilinxiao/codex-autoresearch](https://github.com/leo-lilinxiao/codex-autoresearch) as a reference for the execution loop.
+Thanks to [chaseai-yt/grill-me-codex](https://github.com/chaseai-yt/grill-me-codex) for motivating this project, [mattpocock/skills](https://github.com/mattpocock/skills) for initiating this idea, and [leo-lilinxiao/codex-autoresearch](https://github.com/leo-lilinxiao/codex-autoresearch) as a reference for the executing-validating loop.
 
 ## License
 
