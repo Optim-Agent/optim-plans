@@ -29,6 +29,8 @@ ADAPTER_NAMES = {"claude", "codex"}
 FINISH_OUTCOMES = {"integrated", "pr-opened", "kept", "discarded", "failed", "aborted"}
 SMOKE_TESTED_WORKERS_CONFIG_KEY = "smoke_tested_workers"
 WORKER_LAUNCH_FILES_CONFIG_KEY = "worker_launch_files"
+EXECUTION_SUMMARY_CONFIG_KEY = "execution_summary"
+EXECUTION_SUMMARY_FILE = "EXECUTION_SUMMARY.md"
 HOST_EXECUTOR_PROMPT_PROTOCOL = "optim-plans-host-executor-v1"
 HOST_EXECUTOR_RESULT_SCHEMA = "optim-plans-worker-result-v1"
 HOST_EXECUTOR_PROMPT_CONTRACT = {
@@ -53,6 +55,7 @@ LIFECYCLE_EVENT_TYPES = {
     "awaiting_retry_decision",
     "retry_restored",
     "item_verified",
+    "checkpoint_prepared",
     "checkpoint_created",
     "final_audit_passed",
     "awaiting_integration",
@@ -644,6 +647,21 @@ def audit_git_delta(
     return {"status": "passed", "changed_files": sorted(paths)}
 
 
+def checkpoint_delta_fingerprint(repo: Path, changed_files: list[str]) -> str:
+    status = sorted(
+        (status_code, path)
+        for status_code, path in _status_entries(repo)
+        if status_code != "!!" or not _is_allowed_ignored_audit_noise(path)
+    )
+    return stable_json_hash(
+        {
+            "head": git(repo, "rev-parse", "--verify", "HEAD"),
+            "status": status,
+            "paths": {path: _path_signature(repo / path) for path in sorted(changed_files)},
+        }
+    )
+
+
 @dataclass(frozen=True)
 class ProcessResult:
     argv: list[str]
@@ -774,6 +792,7 @@ def lifecycle_status(events: list[dict[str, Any]]) -> str:
             "host_agent_registered",
             "retry_restored",
             "item_verified",
+            "checkpoint_prepared",
             "checkpoint_created",
             "final_audit_passed",
         }:
@@ -888,7 +907,16 @@ class OptimPlansState:
             "payload": payload,
         }
         append_json_line(self.events_file, event)
-        write_json_atomic(self.runtime_file, {"status": lifecycle_status([*replayed.events, event]), "last_seq": event["seq"]})
+        events = [*replayed.events, event]
+        write_json_atomic(self.runtime_file, {"status": lifecycle_status(events), "last_seq": event["seq"]})
+        if event_type in {
+            "checkpoint_created",
+            "final_audit_passed",
+            "awaiting_integration",
+            "integration_verification_failed",
+            "run_finished",
+        }:
+            self._maybe_render_execution_summary_locked(events)
         return event
 
     def record_answer(self, nonce: str, choice: str, *, expected_seq: int | None = None) -> dict[str, Any]:
@@ -911,6 +939,8 @@ class OptimPlansState:
             choices = {option["id"] for option in found["options"]}
             if choice not in choices:
                 raise ContractError(f"invalid answer choice {choice!r}")
+            if found.get("stage") == "execution_summary" and choice == "always-skip-summary":
+                save_optim_plans_config_value(self.repo, EXECUTION_SUMMARY_CONFIG_KEY, {"mode": "always-skip"})
             event = self._append_event_locked("answer_recorded", {"nonce": nonce, "choice": choice})
             return event["payload"]
 
@@ -1098,6 +1128,65 @@ class OptimPlansState:
             if event["type"] == "answer_recorded" and payload.get("nonce") == nonce:
                 return payload.get("choice")
         return None
+
+    def _execution_summary_decision(self, events: list[dict[str, Any]]) -> str | None:
+        config = read_optim_plans_config(self.repo).get(EXECUTION_SUMMARY_CONFIG_KEY)
+        if isinstance(config, dict) and config.get("mode") == "always-skip":
+            return "always-skip-summary"
+        questions = {
+            event.get("payload", {}).get("nonce")
+            for event in events
+            if event["type"] == "pending_question" and event.get("payload", {}).get("stage") == "execution_summary"
+        }
+        for event in events:
+            payload = event.get("payload", {})
+            if event["type"] == "answer_recorded" and payload.get("nonce") in questions:
+                choice = payload.get("choice")
+                if choice in {"generate-summary", "skip-summary", "always-skip-summary"}:
+                    return choice
+        return None
+
+    def _execution_summary_question_payload_locked(self, events: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if self._execution_summary_decision(events) is not None:
+            return None
+        answered = {
+            event.get("payload", {}).get("nonce")
+            for event in events
+            if event["type"] == "answer_recorded"
+        }
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if (
+                event["type"] == "pending_question"
+                and payload.get("stage") == "execution_summary"
+                and payload.get("nonce") not in answered
+            ):
+                return payload
+        payload = {
+            "nonce": uuid.uuid4().hex,
+            "prompt": "Generate execution summary artifact?",
+            "options": [
+                {
+                    "id": "generate-summary",
+                    "label": "Generate summary",
+                    "reason": "write EXECUTION_SUMMARY.md from controller events",
+                },
+                {
+                    "id": "skip-summary",
+                    "label": "Skip summary",
+                    "reason": "do not write a public execution summary for this run",
+                },
+                {
+                    "id": "always-skip-summary",
+                    "label": "Always skip summary",
+                    "reason": "skip this artifact for this and future runs in this repo",
+                },
+            ],
+            "recommended_option_id": "generate-summary",
+            "expected_seq": len(events) + 1,
+            "stage": "execution_summary",
+        }
+        return self._append_event_locked("pending_question", payload)["payload"]
 
     def request_finish_approval(self) -> dict[str, Any]:
         with self.controller_lock():
@@ -2033,6 +2122,8 @@ class OptimPlansState:
                 )
                 if not all_verified:
                     return {"item_id": item_id, "phase": "checkpointed", **checkpoint}
+            elif status == "prepared":
+                pass
             elif status != "completed":
                 raise ContractError(f"{item_id} cannot be advanced from status {status}")
 
@@ -2055,8 +2146,12 @@ class OptimPlansState:
                 self.record_attempt_failure("verification_failed", item_id, evidence=verifier_evidence)
                 raise ContractError(verifier_evidence)
             checkpoint = self.checkpoint_item(item_id, evidence=verifier_evidence)
+        elif status == "prepared":
+            checkpoint = self.checkpoint_item(item_id, evidence="prepared checkpoint")
         else:
             checkpoint = None
+        if checkpoint is not None and checkpoint.get("phase") == "awaiting_execution_summary":
+            return checkpoint
 
         try:
             final = self.final_audit()
@@ -2084,6 +2179,16 @@ class OptimPlansState:
         self._require_lifecycle_locked(replayed.events, {"executing"}, "run-item")
         record = self._execution_manifest_record(replayed.events)
         item = self._manifest_item(record["manifest"], item_id)
+        if self._item_statuses(replayed.events, record["manifest"])[item_id] == "prepared":
+            checkpoint = self.checkpoint_item(item_id, evidence="prepared checkpoint")
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                return checkpoint
+            try:
+                self.final_audit()
+            except ContractError:
+                if lifecycle_status(self.replay().events) == "awaiting_retry_decision":
+                    raise
+            return checkpoint
         worker_config = self._worker_config(record["manifest"], item)
         if worker_config.get("mode") == "host-multi-agent":
             raise ContractError(
@@ -2141,6 +2246,8 @@ class OptimPlansState:
             self.record_attempt_failure("verification_failed", item_id, evidence=verifier_evidence)
             raise ContractError(verifier_evidence)
         checkpoint = self.checkpoint_item(item_id, evidence=verifier_evidence)
+        if checkpoint.get("phase") == "awaiting_execution_summary":
+            return checkpoint
         try:
             self.final_audit()
         except ContractError:
@@ -2163,6 +2270,8 @@ class OptimPlansState:
                 statuses[item_id] = "failed"
             elif event["type"] == "retry_restored":
                 statuses[item_id] = "pending"
+            elif event["type"] == "checkpoint_prepared":
+                statuses[item_id] = "prepared"
             elif event["type"] == "checkpoint_created":
                 statuses[item_id] = "verified"
         return statuses
@@ -2313,79 +2422,164 @@ class OptimPlansState:
             start = self._latest_item_start(replayed.events, item_id)
             return self._record_attempt_failure_locked("worker_failed", item_id, evidence=evidence, start=start)
 
+    def _latest_checkpoint_created(self, events: list[dict[str, Any]], item_id: str) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if payload.get("item_id") != item_id:
+                continue
+            if event["type"] == "checkpoint_created":
+                return payload
+            if event["type"] == "retry_restored":
+                return None
+        return None
+
+    def _latest_checkpoint_prepared(self, events: list[dict[str, Any]], item_id: str) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if payload.get("item_id") != item_id:
+                continue
+            if event["type"] == "checkpoint_prepared":
+                return payload
+            if event["type"] in {"checkpoint_created", "retry_restored"}:
+                return None
+        return None
+
+    def _prepare_checkpoint_locked(
+        self,
+        events: list[dict[str, Any]],
+        item_id: str,
+        *,
+        evidence: str,
+    ) -> dict[str, Any]:
+        existing = self._latest_checkpoint_prepared(events, item_id)
+        if existing is not None:
+            return existing
+        record = self._execution_manifest_record(events)
+        started = self._execution_started_record(events)
+        item = self._manifest_item(record["manifest"], item_id)
+        statuses = self._item_statuses(events, record["manifest"])
+        if statuses[item_id] != "completed":
+            raise ContractError(f"{item_id} is not completed and ready for checkpoint")
+        start = self._latest_item_start(events, item_id)
+        try:
+            self._require_protected_metadata_clean(started)
+            run_worktree = self._require_run_worktree(
+                started,
+                expected_head=start["base_commit"],
+                clean=False,
+            )
+            allowed_paths = self._item_allowed_paths(item)
+            audit = audit_git_delta(
+                run_worktree,
+                allowed_paths=allowed_paths,
+                base_commit=start["base_commit"],
+                head_commit=start["base_commit"],
+            )
+            fingerprint = checkpoint_delta_fingerprint(run_worktree, audit["changed_files"])
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            self._record_attempt_failure_locked("audit_failed", item_id, evidence=f"audit failed: {exc}", start=start)
+            raise
+        verified = {
+            "item_id": item_id,
+            "evidence": bounded_evidence(evidence),
+            "worker_evidence": next(
+                event.get("payload", {}).get("evidence")
+                for event in reversed(events)
+                if event["type"] == "worker_completed" and event.get("payload", {}).get("item_id") == item_id
+            ),
+            "changed_files": audit["changed_files"],
+        }
+        self._append_event_locked("item_verified", verified)
+        payload = {
+            **verified,
+            "base_commit": start["base_commit"],
+            "run_worktree": str(run_worktree),
+            "run_branch": started["run_branch"],
+            "allowed_paths": allowed_paths,
+            "attempt": start["attempt"],
+            "head_commit": git(run_worktree, "rev-parse", "--verify", "HEAD"),
+            "delta_fingerprint": fingerprint,
+        }
+        return self._append_event_locked("checkpoint_prepared", payload)["payload"]
+
+    def _commit_prepared_checkpoint_locked(
+        self,
+        events: list[dict[str, Any]],
+        prepared: dict[str, Any],
+    ) -> dict[str, Any]:
+        item_id = prepared["item_id"]
+        record = self._execution_manifest_record(events)
+        started = self._execution_started_record(events)
+        item = self._manifest_item(record["manifest"], item_id)
+        start = self._latest_item_start(events, item_id)
+        try:
+            self._require_protected_metadata_clean(started)
+            run_worktree = self._require_run_worktree(
+                started,
+                expected_head=prepared["head_commit"],
+                clean=False,
+            )
+            if Path(prepared["run_worktree"]).resolve() != run_worktree.resolve():
+                raise ContractError("prepared checkpoint is bound to a different run worktree")
+            if prepared["base_commit"] != start["base_commit"]:
+                raise ContractError("prepared checkpoint base no longer matches the active attempt")
+            allowed_paths = list(prepared["allowed_paths"])
+            audit = audit_git_delta(
+                run_worktree,
+                allowed_paths=allowed_paths,
+                base_commit=prepared["base_commit"],
+                head_commit=prepared["head_commit"],
+            )
+            if audit["changed_files"] != prepared["changed_files"]:
+                raise ContractError("run worktree changed since checkpoint preparation")
+            if checkpoint_delta_fingerprint(run_worktree, audit["changed_files"]) != prepared["delta_fingerprint"]:
+                raise ContractError("run worktree changed since checkpoint preparation")
+            for path in audit["changed_files"]:
+                git(run_worktree, "add", "-A", "--", path)
+            subject = _checkpoint_commit_subject(item, audit["changed_files"])
+            body = f"optim-plans run: {self.run_id}\nitem: {item_id}\nattempt: {prepared['attempt']}"
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    subject,
+                    "-m",
+                    body,
+                ],
+                cwd=run_worktree,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            commit = git(run_worktree, "rev-parse", "--verify", "HEAD")
+            clean_audit = audit_git_delta(run_worktree, allowed_paths=allowed_paths)
+            if clean_audit["changed_files"]:
+                raise ContractError("run worktree is not clean after checkpoint")
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            self._record_attempt_failure_locked("audit_failed", item_id, evidence=f"checkpoint failed: {exc}", start=start)
+            raise
+        payload = {"item_id": item_id, "commit": commit, "changed_files": audit["changed_files"]}
+        return self._append_event_locked("checkpoint_created", payload)["payload"]
+
     def checkpoint_item(self, item_id: str, *, evidence: str) -> dict[str, Any]:
         if not evidence.strip():
             raise ContractError("verification evidence is required")
         with self.controller_lock():
             replayed = self.replay()
-            record = self._execution_manifest_record(replayed.events)
-            started = self._execution_started_record(replayed.events)
-            item = self._manifest_item(record["manifest"], item_id)
-            statuses = self._item_statuses(replayed.events, record["manifest"])
-            if statuses[item_id] != "completed":
-                raise ContractError(f"{item_id} is not completed and ready for checkpoint")
-            start = self._latest_item_start(replayed.events, item_id)
-            try:
-                self._require_protected_metadata_clean(started)
-                run_worktree = self._require_run_worktree(
-                    started,
-                    expected_head=start["base_commit"],
-                    clean=False,
-                )
-                audit = audit_git_delta(
-                    run_worktree,
-                    allowed_paths=self._item_allowed_paths(item),
-                    base_commit=start["base_commit"],
-                    head_commit=start["base_commit"],
-                )
-            except (ContractError, subprocess.CalledProcessError, OSError) as exc:
-                self._record_attempt_failure_locked("audit_failed", item_id, evidence=f"audit failed: {exc}", start=start)
-                raise
-            try:
-                for path in audit["changed_files"]:
-                    git(run_worktree, "add", "-A", "--", path)
-                subject = _checkpoint_commit_subject(item, audit["changed_files"])
-                body = f"optim-plans run: {self.run_id}\nitem: {item_id}\nattempt: {start['attempt']}"
-                subprocess.run(
-                    [
-                        "git",
-                        "-c",
-                        "core.hooksPath=/dev/null",
-                        "commit",
-                        "--allow-empty",
-                        "-m",
-                        subject,
-                        "-m",
-                        body,
-                    ],
-                    cwd=run_worktree,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=True,
-                )
-                commit = git(run_worktree, "rev-parse", "--verify", "HEAD")
-                clean_audit = audit_git_delta(run_worktree, allowed_paths=self._item_allowed_paths(item))
-                if clean_audit["changed_files"]:
-                    raise ContractError("run worktree is not clean after checkpoint")
-            except (ContractError, subprocess.CalledProcessError, OSError) as exc:
-                self._record_attempt_failure_locked(
-                    "audit_failed", item_id, evidence=f"checkpoint failed: {exc}", start=start
-                )
-                raise
-            verified = {
-                "item_id": item_id,
-                "evidence": evidence,
-                "worker_evidence": next(
-                    event.get("payload", {}).get("evidence")
-                    for event in reversed(replayed.events)
-                    if event["type"] == "worker_completed" and event.get("payload", {}).get("item_id") == item_id
-                ),
-                "changed_files": audit["changed_files"],
-            }
-            self._append_event_locked("item_verified", verified)
-            payload = {"item_id": item_id, "commit": commit, "changed_files": audit["changed_files"]}
-            return self._append_event_locked("checkpoint_created", payload)["payload"]
+            existing = self._latest_checkpoint_created(replayed.events, item_id)
+            if existing is not None:
+                return existing
+            prepared = self._prepare_checkpoint_locked(replayed.events, item_id, evidence=evidence)
+            replayed = self.replay()
+            question = self._execution_summary_question_payload_locked(replayed.events)
+            if question is not None:
+                return {"item_id": item_id, "phase": "awaiting_execution_summary", "question": question}
+            return self._commit_prepared_checkpoint_locked(self.replay().events, prepared)
 
     def request_retry(self, item_id: str) -> dict[str, Any]:
         with self.controller_lock():
@@ -2864,6 +3058,119 @@ class OptimPlansState:
             raise ContractError("active pointer no longer names this run")
         return active
 
+    def _summary_plan_items(self, manifest: dict[str, Any]) -> list["PlanItem"]:
+        items = []
+        for raw in manifest["items"]:
+            summary = str(raw.get("summary") or raw.get("description") or raw["id"])
+            verification = raw.get("verification")
+            if verification is None:
+                verification = manifest.get("verification_argv", "controller verification")
+            if isinstance(verification, list):
+                verification = " ".join(str(part) for part in verification)
+            items.append(
+                PlanItem(
+                    raw["id"],
+                    summary,
+                    str(verification),
+                    str(raw.get("evidence") or raw.get("acceptance") or "controller events"),
+                    depends_on=list(raw.get("depends_on", [])),
+                    acceptance=str(raw.get("acceptance") or ""),
+                    allowed_paths=self._item_allowed_paths(raw),
+                )
+            )
+        return items
+
+    def _execution_summary_results(self, events: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        results = {
+            item["id"]: {
+                "status": "pending",
+                "evidence": "",
+                "attempts": 0,
+                "changed_files": [],
+                "commits": [],
+                "retry_decisions": [],
+                "limitations": "",
+                "explanation": "",
+            }
+            for item in manifest["items"]
+        }
+        for event in events:
+            payload = event.get("payload", {})
+            item_id = payload.get("item_id")
+            result = results.get(item_id)
+            if result is None:
+                continue
+            event_type = event["type"]
+            if event_type == "item_started":
+                result["status"] = "in_progress"
+                result["attempts"] += 1
+            elif event_type == "worker_completed":
+                result["status"] = "worker_completed"
+                result["explanation"] = payload.get("evidence", "")
+            elif event_type in {"worker_failed", "verification_failed", "audit_failed"}:
+                result["status"] = "failed"
+                result["limitations"] = payload.get("evidence", "")
+            elif event_type == "awaiting_retry_decision":
+                result["retry_decisions"].append(f"awaiting retry after {payload.get('failure_event', 'failure')}")
+            elif event_type == "retry_restored":
+                result["status"] = "pending"
+                result["retry_decisions"].append(f"restored to {payload.get('restored_to', 'unknown')}")
+            elif event_type == "item_verified":
+                result["status"] = "verified"
+                result["evidence"] = payload.get("evidence", "")
+                result["changed_files"] = list(payload.get("changed_files", []))
+                if payload.get("worker_evidence"):
+                    result["explanation"] = payload["worker_evidence"]
+            elif event_type == "checkpoint_prepared":
+                result["status"] = "prepared"
+                result["changed_files"] = list(payload.get("changed_files", []))
+            elif event_type == "checkpoint_created":
+                result["status"] = "checkpointed"
+                result["changed_files"] = list(payload.get("changed_files", []))
+                result["commits"].append(payload.get("commit", ""))
+        return results
+
+    def _execution_summary_final_audit(self, events: list[dict[str, Any]]) -> str:
+        final_audit = "unknown"
+        for event in events:
+            payload = event.get("payload", {})
+            if event["type"] == "final_audit_passed":
+                final_audit = f"passed: {payload.get('final_commit', 'unknown')}"
+            elif event["type"] == "awaiting_integration":
+                final_audit = f"awaiting integration: {payload.get('evidence', payload.get('stage', 'unknown'))}"
+            elif event["type"] == "integration_verification_failed":
+                final_audit = f"integration verification failed: {payload.get('evidence', payload.get('stage', 'unknown'))}"
+            elif event["type"] == "run_finished":
+                final_audit = f"run_finished/{payload.get('outcome', 'unknown')}"
+                verification = payload.get("integration_verification")
+                if isinstance(verification, dict) and verification.get("evidence"):
+                    final_audit = f"{final_audit}: {verification['evidence']}"
+        return final_audit
+
+    def _maybe_render_execution_summary_locked(self, events: list[dict[str, Any]] | None = None) -> Path | None:
+        events = events or self.replay().events
+        if self._execution_summary_decision(events) != "generate-summary":
+            return None
+        record = self._execution_manifest_record(events)
+        started = self._execution_started_record(events)
+        final_commit = self._latest_checkpoint(events, started)
+        worker = record["manifest"].get("worker", {})
+        if isinstance(worker, dict):
+            agent_config = str(worker.get("mode") or worker.get("adapter") or worker.get("platform") or "unknown")
+        else:
+            agent_config = "unknown"
+        text = render_execution_summary(
+            self._summary_plan_items(record["manifest"]),
+            self._execution_summary_results(events, record["manifest"]),
+            base_commit=started["source_base"],
+            final_commit=final_commit,
+            agent_config=agent_config,
+            final_audit=self._execution_summary_final_audit(events),
+        )
+        path = self.artifact_dir / EXECUTION_SUMMARY_FILE
+        path.write_text(text, encoding="utf-8")
+        return path
+
     def _release_active_locked(self, active: dict[str, Any], payload: dict[str, Any]) -> None:
         archive_dir = self.run_dir / "archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
@@ -3047,7 +3354,7 @@ def render_comments(mode: str, version: int, findings: list[dict[str, str]]) -> 
     return "\n".join(lines) + "\n"
 
 
-def render_execution_results(
+def render_execution_summary(
     items: list[PlanItem],
     results: dict[str, dict[str, Any]],
     *,
@@ -3057,7 +3364,7 @@ def render_execution_results(
     final_audit: str = "unknown",
 ) -> str:
     lines = [
-        "# EXECUTION_RESULTS",
+        "# EXECUTION_SUMMARY",
         "",
         f"Base commit: {base_commit}",
         f"Final commit: {final_commit}",
@@ -3066,22 +3373,27 @@ def render_execution_results(
         "",
         "Changed files and commits are recorded per item below.",
         "",
-        "| ID | Status | Evidence | Attempts | Changed files | Commits | Limitations | Explanation |",
-        "|---|---|---|---|---|---|---|---|",
+        "| ID | Status | Evidence | Attempts | Changed files | Commits | Retry decisions | Limitations | Explanation |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for item in items:
         result = results.get(item.id, {})
         status = result.get("status", "missing")
+        evidence = result.get("evidence") or item.evidence
         explanation = result.get("explanation", "No validated result recorded")
         attempts = result.get("attempts", 0)
         limitations = result.get("limitations", "")
         changed_files = ", ".join(result.get("changed_files", []))
         commits = ", ".join(result.get("commits", []))
+        retry_decisions = ", ".join(result.get("retry_decisions", []))
         lines.append(
-            f"| {item.id} | {status} | {item.evidence} | {attempts} | "
-            f"{changed_files} | {commits} | {limitations} | {explanation} |"
+            f"| {item.id} | {status} | {evidence} | {attempts} | "
+            f"{changed_files} | {commits} | {retry_decisions} | {limitations} | {explanation} |"
         )
     return "\n".join(lines) + "\n"
+
+
+render_execution_results = render_execution_summary
 
 
 @dataclass(frozen=True)

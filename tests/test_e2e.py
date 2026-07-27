@@ -785,7 +785,11 @@ class E2ETests(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 check=True,
             )
-            self.assertEqual(git(run_worktree, "rev-parse", "--verify", "HEAD"), json.loads(run_item.stdout)["commit"])
+            run_payload = json.loads(run_item.stdout)
+            if run_payload.get("phase") == "awaiting_execution_summary":
+                answer_choice(repo, run_payload["question"]["nonce"], "skip-summary")
+                run_payload = controller_json("run-item", "--repo", str(repo), "--item-id", "TASK-001")
+            self.assertEqual(git(run_worktree, "rev-parse", "--verify", "HEAD"), run_payload["commit"])
 
     def test_cli_host_workflow_assigns_registers_completes_and_advances(self) -> None:
         from scripts.optim_plans_core import host_executor_prompt_hash
@@ -877,6 +881,9 @@ class E2ETests(unittest.TestCase):
                 "wait_agent completed",
             )
             advanced = controller_json("advance-item", "--repo", str(repo), "--item-id", "TASK-001")
+            if advanced.get("phase") == "awaiting_execution_summary":
+                answer_choice(repo, advanced["question"]["nonce"], "skip-summary")
+                advanced = controller_json("advance-item", "--repo", str(repo), "--item-id", "TASK-001")
             self.assertIn("commit", advanced)
 
             events = [
@@ -1125,7 +1132,11 @@ class E2ETests(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 check=True,
             )
-            self.assertIn("commit", json.loads(completed.stdout))
+            completed_payload = json.loads(completed.stdout)
+            if completed_payload.get("phase") == "awaiting_execution_summary":
+                answer_choice(repo, completed_payload["question"]["nonce"], "skip-summary")
+                completed_payload = controller_json("run-item", "--repo", str(repo), "--item-id", "TASK-001")
+            self.assertIn("commit", completed_payload)
 
             from scripts.optim_plans_core import ContractError, OptimPlansState
 

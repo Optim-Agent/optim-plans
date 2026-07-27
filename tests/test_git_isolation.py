@@ -160,7 +160,10 @@ class GitIsolationTests(unittest.TestCase):
             (pytest_cache / "nodeids").write_text("[]\n", encoding="utf-8")
 
             state.record_worker_completion("TASK-001", evidence="worker finished")
-            state.checkpoint_item("TASK-001", evidence="unit ok")
+            checkpoint = state.checkpoint_item("TASK-001", evidence="unit ok")
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                state.record_answer(checkpoint["question"]["nonce"], "skip-summary")
+                state.checkpoint_item("TASK-001", evidence="unit ok")
             audit = state.final_audit()
 
             self.assertEqual(audit["status"], "passed")

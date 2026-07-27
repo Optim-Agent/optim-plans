@@ -139,7 +139,7 @@ docs/optim-plans/YYYY-MM-DD-topic/
   PLAN_v1.md
   PLAN_v1_reviewer_comments.md
   PLAN_v2.md
-  EXECUTION_RESULTS.md
+  EXECUTION_SUMMARY.md
 ```
 
 Machine state is separate and replayable:
@@ -179,6 +179,25 @@ claude plugin details optim-plans@optim-plans-dev
 ```
 
 Restart is required for updated plugin code to apply. `.git/optim-plans/config.json` is not an install artifact; it is created per target repo when worker/model choices or execution prep need persisted config. Delegated worker choices persist under `refinement_worker.choice` and `executor_worker.choice`.
+
+To permanently skip execution summaries for one repo, edit `.git/optim-plans/config.json`:
+
+```json
+{
+  "schema": 1,
+  "execution_summary": {
+    "mode": "always-skip"
+  },
+  "refinement_worker": {
+    "choice": "background"
+  },
+  "executor_worker": {
+    "choice": "background"
+  }
+}
+```
+
+Valid `execution_summary.mode` values are `always-skip` or omitted. Worker choice blocks are optional; when present, `choice` is `background` or `foreground`, and manual worker blocks may also include `platform`, `mode`, `model`, `effort`, and Codex `execution_mode`.
 
 For one-off development without installing, load this checkout for a single Claude session:
 

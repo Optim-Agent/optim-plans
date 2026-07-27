@@ -4,7 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import make_repo
+try:
+    from helpers import make_repo
+except ModuleNotFoundError:
+    from tests.helpers import make_repo
 
 
 class ArtifactTests(unittest.TestCase):
@@ -22,7 +25,7 @@ class ArtifactTests(unittest.TestCase):
         from scripts.optim_plans_core import (
             PlanItem,
             render_comments,
-            render_execution_results,
+            render_execution_summary,
             render_plan,
         )
 
@@ -72,7 +75,7 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn("- [ ] VC-002 | Covered: TASK-001 | Pass: Tests pass | Evidence: python -m unittest | Non-quantification: Binary unit-test result is sufficient", plan)
         comments = render_comments("reviewer", 1, [{"id": "F-001", "fix": "Add nonce check"}])
         self.assertIn("PLAN_v1_reviewer_comments", comments)
-        report = render_execution_results(
+        report = render_execution_summary(
             items,
             {"REQ-001": {"status": "verified", "attempts": 1, "limitations": "none"}},
             base_commit="base",
@@ -80,6 +83,7 @@ class ArtifactTests(unittest.TestCase):
             agent_config="codex/default",
             final_audit="passed",
         )
+        self.assertIn("# EXECUTION_SUMMARY", report)
         self.assertIn("TASK-001", report)
         self.assertIn("missing", report)
         self.assertIn("Base commit: base", report)

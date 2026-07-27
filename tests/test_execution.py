@@ -9,6 +9,7 @@ import sys
 import time
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 try:
@@ -140,13 +141,41 @@ class ExecutionTests(unittest.TestCase):
             return question["nonce"]
         self.fail(f"missing finish approval question for {outcome}")
 
+    def _answer_execution_summary(self, state, choice: str = "skip-summary") -> dict[str, object]:
+        for event in reversed(state.replay().events):
+            payload = event.get("payload", {})
+            if event["type"] != "pending_question" or payload.get("stage") != "execution_summary":
+                continue
+            answered = any(
+                current["type"] == "answer_recorded"
+                and current.get("payload", {}).get("nonce") == payload["nonce"]
+                for current in state.replay().events
+            )
+            if not answered:
+                return state.record_answer(payload["nonce"], choice)
+        self.fail("missing execution summary question")
+
+    def _checkpoint_after_summary_choice(
+        self,
+        state,
+        item_id: str = "TASK-001",
+        *,
+        evidence: str = "unit ok",
+        choice: str = "skip-summary",
+    ) -> dict[str, object]:
+        checkpoint = state.checkpoint_item(item_id, evidence=evidence)
+        if checkpoint.get("phase") == "awaiting_execution_summary":
+            self._answer_execution_summary(state, choice)
+            checkpoint = state.checkpoint_item(item_id, evidence=evidence)
+        return checkpoint
+
     def _checkpoint_one_item(self, state, run_worktree: Path, path: str = "src/done.txt") -> str:
         state.begin_item("TASK-001")
         target = run_worktree / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("done\n", encoding="utf-8")
         state.record_worker_completion("TASK-001", evidence="worker finished")
-        return state.checkpoint_item("TASK-001", evidence="unit ok")["commit"]
+        return self._checkpoint_after_summary_choice(state)["commit"]
 
     def _checkpoint_message_for_item(
         self,
@@ -163,7 +192,7 @@ class ExecutionTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(text, encoding="utf-8")
             state.record_worker_completion("TASK-001", evidence="worker finished")
-            checkpoint = state.checkpoint_item("TASK-001", evidence="unit ok")
+            checkpoint = self._checkpoint_after_summary_choice(state)
             message = git(run_worktree, "log", "-1", "--format=%B", checkpoint["commit"])
             return state.run_id, message, checkpoint["changed_files"]
 
@@ -301,6 +330,9 @@ class ExecutionTests(unittest.TestCase):
                 evidence="wait_agent completed",
             )
             checkpoint = state.advance_item("TASK-001")
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                checkpoint = state.advance_item("TASK-001")
 
             self.assertIn("commit", checkpoint)
             event_types = [event["type"] for event in state.replay().events]
@@ -396,6 +428,9 @@ class ExecutionTests(unittest.TestCase):
                 worker_env={"EXTRA_LITERAL": f"; touch {sentinel}"},
             )
             checkpoint = state.run_item("TASK-001")
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                checkpoint = state.run_item("TASK-001")
 
             self.assertEqual(git(run_worktree, "rev-parse", "--verify", "HEAD"), checkpoint["commit"])
             self.assertEqual(
@@ -405,17 +440,244 @@ class ExecutionTests(unittest.TestCase):
             self.assertFalse(sentinel.exists())
             self.assertFalse(any("schema" in arg for arg in json.loads(argv_log.read_text(encoding="utf-8"))))
             self.assertEqual(
-                [event["type"] for event in state.replay().events[-6:]],
+                [event["type"] for event in state.replay().events[-7:]],
                 [
-                    "item_started",
-                    "worker_completed",
                     "item_verified",
+                    "checkpoint_prepared",
+                    "pending_question",
+                    "answer_recorded",
                     "checkpoint_created",
                     "final_audit_passed",
                     "run_finished",
                 ],
             )
             self.assertFalse(any(event.get("payload", {}).get("stage") == "finish_run" for event in state.replay().events))
+
+    def test_execution_summary_question_blocks_before_checkpoint(self) -> None:
+        from scripts.optim_plans_core import ContractError
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            worker = self._worker(
+                raw_path / "codex",
+                "import json, os\n"
+                "from pathlib import Path\n"
+                "Path('src').mkdir(exist_ok=True)\n"
+                "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
+                "print(json.dumps({\n"
+                "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
+                "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
+                "    'status': 'completed',\n"
+                "    'evidence': 'worker done',\n"
+                "}))\n",
+            )
+            state, run_worktree = self._start_adapter_execution(
+                repo,
+                worker=worker,
+                verification_argv=[
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; assert Path('src/app.txt').read_text() == 'ok\\n'",
+                ],
+            )
+
+            result = state.run_item("TASK-001")
+            self.assertEqual(result["phase"], "awaiting_execution_summary")
+            question = result["question"]
+            self.assertEqual(question["stage"], "execution_summary")
+            self.assertEqual(
+                [option["id"] for option in question["options"]],
+                ["generate-summary", "skip-summary", "always-skip-summary"],
+            )
+            self.assertEqual(question["recommended_option_id"], "generate-summary")
+            self.assertNotIn("checkpoint_created", [event["type"] for event in state.replay().events])
+            self.assertEqual(
+                git(run_worktree, "rev-parse", "--verify", "HEAD"),
+                git(repo, "rev-parse", "--verify", "HEAD"),
+            )
+
+            (run_worktree / "src/app.txt").write_text("mutated\n", encoding="utf-8")
+            self._answer_execution_summary(state)
+            with self.assertRaisesRegex(ContractError, "changed since checkpoint preparation"):
+                state.run_item("TASK-001")
+            self.assertNotIn("checkpoint_created", [event["type"] for event in state.replay().events])
+
+    def test_execution_summary_resume_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            self._add_passing_full_proof_files(repo)
+            worker_count = raw_path / "worker-count.txt"
+            worker = self._worker(
+                raw_path / "codex",
+                "import json, os\n"
+                "from pathlib import Path\n"
+                f"count = Path({str(worker_count)!r})\n"
+                "count.write_text(str(int(count.read_text() or '0') + 1) if count.exists() else '1')\n"
+                "Path('src').mkdir(exist_ok=True)\n"
+                "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
+                "print(json.dumps({\n"
+                "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
+                "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
+                "    'status': 'completed',\n"
+                "    'evidence': 'worker done',\n"
+                "}))\n",
+            )
+            state, _run_worktree = self._start_adapter_execution(
+                repo,
+                worker=worker,
+                verification_argv=[sys.executable, "-c", "from pathlib import Path; assert Path('src/app.txt').exists()"],
+            )
+
+            self.assertEqual(state.run_item("TASK-001")["phase"], "awaiting_execution_summary")
+            self._answer_execution_summary(state)
+            checkpoint = state.run_item("TASK-001")
+            self.assertIn("commit", checkpoint)
+            self.assertEqual(worker_count.read_text(encoding="utf-8"), "1")
+            self.assertEqual(
+                1,
+                sum(event["type"] == "item_started" for event in state.replay().events),
+            )
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            self._add_passing_full_proof_files(repo)
+            state, run_worktree = self._start_host_execution(
+                repo,
+                verification_argv=[sys.executable, "-c", "from pathlib import Path; assert Path('src/host.txt').exists()"],
+            )
+            assignment = state.assign_item("TASK-001")
+            authorized = state.authorize_spawn("TASK-001", assignment["assignment_nonce"], assignment["launch_block"])
+            state.register_agent(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                launch_nonce=authorized["launch_nonce"],
+                agent_handle="agent-123",
+                launch_block=assignment["launch_block"],
+            )
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/host.txt").write_text("ok\n", encoding="utf-8")
+            state.complete_host_item(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                agent_handle="agent-123",
+                evidence="wait_agent completed",
+            )
+
+            self.assertEqual(state.advance_item("TASK-001")["phase"], "awaiting_execution_summary")
+            self._answer_execution_summary(state)
+            checkpoint = state.advance_item("TASK-001")
+            self.assertIn("commit", checkpoint)
+            self.assertEqual(
+                1,
+                sum(event["type"] == "item_started" for event in state.replay().events),
+            )
+            self.assertEqual(
+                1,
+                sum(event["type"] == "checkpoint_created" for event in state.replay().events),
+            )
+
+    def test_execution_summary_skip_and_always_skip_config(self) -> None:
+        from scripts.optim_plans_core import EXECUTION_SUMMARY_CONFIG_KEY
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_execution(
+                repo, [{"id": "TASK-001", "allowed_paths": ["src/skip.txt"]}]
+            )
+            state.begin_item("TASK-001")
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/skip.txt").write_text("skip\n", encoding="utf-8")
+            state.record_worker_completion("TASK-001", evidence="worker finished")
+            self.assertEqual(state.checkpoint_item("TASK-001", evidence="unit ok")["phase"], "awaiting_execution_summary")
+            self._answer_execution_summary(state, "skip-summary")
+            self.assertIn("commit", state.checkpoint_item("TASK-001", evidence="unit ok"))
+            self.assertFalse((state.artifact_dir / "EXECUTION_SUMMARY.md").exists())
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_execution(
+                repo,
+                [
+                    {"id": "TASK-001", "allowed_paths": ["src/one.txt"]},
+                    {"id": "TASK-002", "allowed_paths": ["src/two.txt"]},
+                ],
+            )
+            state.begin_item("TASK-001")
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/one.txt").write_text("one\n", encoding="utf-8")
+            state.record_worker_completion("TASK-001", evidence="worker finished")
+            pending = state.checkpoint_item("TASK-001", evidence="unit ok")
+            nonce = pending["question"]["nonce"]
+            with mock.patch("scripts.optim_plans_core.write_json_atomic", side_effect=OSError("boom")):
+                with self.assertRaises(OSError):
+                    state.record_answer(nonce, "always-skip-summary")
+            self.assertFalse(any(event["type"] == "answer_recorded" and event["payload"]["nonce"] == nonce for event in state.replay().events))
+
+            state.record_answer(nonce, "always-skip-summary")
+            config = json.loads((repo / ".git" / "optim-plans" / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config[EXECUTION_SUMMARY_CONFIG_KEY]["mode"], "always-skip")
+            self.assertIn("commit", state.checkpoint_item("TASK-001", evidence="unit ok"))
+            state.begin_item("TASK-002")
+            (run_worktree / "src/two.txt").write_text("two\n", encoding="utf-8")
+            state.record_worker_completion("TASK-002", evidence="worker finished")
+            self.assertIn("commit", state.checkpoint_item("TASK-002", evidence="unit ok"))
+            self.assertEqual(
+                1,
+                sum(
+                    event["type"] == "pending_question"
+                    and event.get("payload", {}).get("stage") == "execution_summary"
+                    for event in state.replay().events
+                ),
+            )
+            self.assertFalse((state.artifact_dir / "EXECUTION_SUMMARY.md").exists())
+
+    def test_execution_summary_two_item_and_terminal_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            self._add_passing_full_proof_files(repo)
+            state, run_worktree = self._start_execution(
+                repo,
+                [
+                    {"id": "TASK-001", "allowed_paths": ["src/one.txt"]},
+                    {"id": "TASK-002", "allowed_paths": ["src/two.txt"]},
+                ],
+            )
+            state.begin_item("TASK-001")
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/one.txt").write_text("one\n", encoding="utf-8")
+            state.record_worker_completion("TASK-001", evidence="worker one")
+            first = state.checkpoint_item("TASK-001", evidence="unit one")
+            self.assertEqual(first["phase"], "awaiting_execution_summary")
+            self.assertFalse((state.artifact_dir / "EXECUTION_SUMMARY.md").exists())
+            self._answer_execution_summary(state, "generate-summary")
+            first = state.checkpoint_item("TASK-001", evidence="unit one")
+            summary_path = state.artifact_dir / "EXECUTION_SUMMARY.md"
+            text = summary_path.read_text(encoding="utf-8")
+            self.assertIn("# EXECUTION_SUMMARY", text)
+            self.assertIn("TASK-001", text)
+            self.assertIn(first["commit"], text)
+
+            state.begin_item("TASK-002")
+            (run_worktree / "src/two.txt").write_text("two\n", encoding="utf-8")
+            state.record_worker_completion("TASK-002", evidence="worker two")
+            second = state.checkpoint_item("TASK-002", evidence="unit two")
+            self.assertIn("commit", second)
+            state.final_audit()
+
+            text = summary_path.read_text(encoding="utf-8")
+            self.assertIn("TASK-002", text)
+            self.assertIn(second["commit"], text)
+            self.assertIn("run_finished/integrated", text)
+            self.assertEqual(
+                1,
+                sum(
+                    event["type"] == "pending_question"
+                    and event.get("payload", {}).get("stage") == "execution_summary"
+                    for event in state.replay().events
+                ),
+            )
 
     def test_codex_host_rejects_claude_worker_before_launch(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -556,6 +818,9 @@ class ExecutionTests(unittest.TestCase):
             )
 
             checkpoint = state.run_item("TASK-001")
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                checkpoint = state.run_item("TASK-001")
 
             self.assertEqual(git(run_worktree, "rev-parse", "--verify", "HEAD"), checkpoint["commit"])
             event_types = [event["type"] for event in state.replay().events]
@@ -719,7 +984,7 @@ class ExecutionTests(unittest.TestCase):
             (run_worktree / "src").mkdir()
             (run_worktree / "src/ok.txt").write_text("ok\n", encoding="utf-8")
             state.record_worker_completion("TASK-001", evidence="worker finished")
-            state.checkpoint_item("TASK-001", evidence="unit ok")
+            self._checkpoint_after_summary_choice(state)
 
             (run_worktree / "README.md").write_text("manual drift\n", encoding="utf-8")
             git(run_worktree, "add", "README.md")
@@ -1457,7 +1722,7 @@ class ExecutionTests(unittest.TestCase):
             state.begin_item("TASK-001")
             (run_worktree / "src/app.py").write_text("v2\n", encoding="utf-8")
             state.record_worker_completion("TASK-001", evidence="worker finished")
-            checkpoint = state.checkpoint_item("TASK-001", evidence="unit ok")
+            checkpoint = self._checkpoint_after_summary_choice(state)
 
             self.assertEqual(git(repo, "rev-parse", "--verify", "HEAD"), source_head)
             self.assertEqual((repo / "src/app.py").read_text(encoding="utf-8"), "v1\n")
@@ -1475,8 +1740,14 @@ class ExecutionTests(unittest.TestCase):
             self.assertFalse(metadata[3].startswith("2000-01-01T00:00:00"))
             self.assertEqual(git(repo, "status", "--porcelain=v1"), "")
             self.assertEqual(
-                [event["type"] for event in state.replay().events[-4:]],
-                ["item_started", "worker_completed", "item_verified", "checkpoint_created"],
+                [event["type"] for event in state.replay().events[-5:]],
+                [
+                    "item_verified",
+                    "checkpoint_prepared",
+                    "pending_question",
+                    "answer_recorded",
+                    "checkpoint_created",
+                ],
             )
 
     def test_checkpoint_commit_subject_uses_manifest_precedence_and_normalization(self) -> None:
@@ -1577,7 +1848,7 @@ class ExecutionTests(unittest.TestCase):
             with self.assertRaises(ContractError):
                 state.begin_item("TASK-002")
 
-            state.checkpoint_item("TASK-001", evidence="unit ok")
+            self._checkpoint_after_summary_choice(state)
             assignment = state.begin_item("TASK-002")
             self.assertEqual(Path(assignment["run_worktree"]), run_worktree)
             self.assertEqual((run_worktree / "src/dep.txt").read_text(encoding="utf-8"), "from task 1\n")
@@ -1603,7 +1874,7 @@ class ExecutionTests(unittest.TestCase):
             state.record_worker_completion("TASK-001", evidence="worker finished")
             with self.assertRaises(ContractError):
                 state.begin_item("TASK-002")
-            state.checkpoint_item("TASK-001", evidence="unit ok")
+            self._checkpoint_after_summary_choice(state)
             self.assertEqual(state.begin_item("TASK-002")["item_id"], "TASK-002")
 
     def test_failed_attempt_blocks_dependents_until_single_use_retry_restore(self) -> None:
@@ -1652,7 +1923,7 @@ class ExecutionTests(unittest.TestCase):
             (run_worktree / "src").mkdir(exist_ok=True)
             dirty.write_text("good attempt\n", encoding="utf-8")
             state.record_worker_completion("TASK-001", evidence="worker finished")
-            state.checkpoint_item("TASK-001", evidence="unit ok")
+            self._checkpoint_after_summary_choice(state)
             self.assertEqual(state.begin_item("TASK-002")["item_id"], "TASK-002")
 
     def test_repeated_failure_at_same_checkpoint_gets_fresh_retry_nonce(self) -> None:
