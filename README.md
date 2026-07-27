@@ -157,6 +157,26 @@ Machine state is separate and replayable:
 
 </details>
 
+## Diagnose before planning
+
+```text
+You: $analyze-and-plan A new branch has a CI test failure in pytest;
+     inspect the evidence before writing a plan.
+
+AI:  Evidence inspected: CI log, failing traceback, recent diff,
+     and the fixture that prepares the checkout.
+
+     RCA summary: the root cause appears to be a temp-path assumption
+     that passes locally from the repo root but fails in the CI workspace.
+
+     What should happen next?
+
+     1. Create the scoped fix plan
+     2. Review the RCA only
+     3. Other
+     4. Auto-complete
+```
+
 ## Quick Start
 
 ### Install for local Claude Code development
