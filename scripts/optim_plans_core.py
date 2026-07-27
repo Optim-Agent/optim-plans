@@ -160,6 +160,41 @@ def git_maybe(repo: Path, *args: str) -> str | None:
         return None
 
 
+_UNSAFE_COMMIT_SUBJECT_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _collapse_commit_subject_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip())
+
+
+def _manifest_commit_subject_text(value: Any) -> str | None:
+    if not isinstance(value, str) or "\0" in value or _UNSAFE_COMMIT_SUBJECT_CONTROL.search(value):
+        return None
+    for line in value.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        return _collapse_commit_subject_text(stripped)
+    return None
+
+
+def _safe_commit_subject_path(path: str) -> str:
+    safe = _UNSAFE_COMMIT_SUBJECT_CONTROL.sub(" ", path)
+    return _collapse_commit_subject_text(safe) or "changed path"
+
+
+def _checkpoint_commit_subject(item: dict[str, Any], changed_files: list[str]) -> str:
+    for key in ("commit_message", "summary", "description"):
+        subject = _manifest_commit_subject_text(item.get(key))
+        if subject:
+            return subject
+    if len(changed_files) == 1:
+        return f"Update {_safe_commit_subject_path(changed_files[0])}"
+    if changed_files:
+        return f"Update {len(changed_files)} files"
+    return "Record empty checkpoint"
+
+
 def git_common_dir(repo: Path) -> Path:
     common = git(repo, "rev-parse", "--git-common-dir")
     path = Path(common)
@@ -2309,6 +2344,8 @@ class OptimPlansState:
             try:
                 for path in audit["changed_files"]:
                     git(run_worktree, "add", "-A", "--", path)
+                subject = _checkpoint_commit_subject(item, audit["changed_files"])
+                body = f"optim-plans run: {self.run_id}\nitem: {item_id}\nattempt: {start['attempt']}"
                 subprocess.run(
                     [
                         "git",
@@ -2317,7 +2354,9 @@ class OptimPlansState:
                         "commit",
                         "--allow-empty",
                         "-m",
-                        f"optim-plans checkpoint {self.run_id} {item_id} attempt {start['attempt']}",
+                        subject,
+                        "-m",
+                        body,
                     ],
                     cwd=run_worktree,
                     text=True,

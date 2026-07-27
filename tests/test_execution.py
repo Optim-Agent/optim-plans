@@ -148,6 +148,25 @@ class ExecutionTests(unittest.TestCase):
         state.record_worker_completion("TASK-001", evidence="worker finished")
         return state.checkpoint_item("TASK-001", evidence="unit ok")["commit"]
 
+    def _checkpoint_message_for_item(
+        self,
+        item: dict[str, object],
+        writes: dict[str, str] | None = None,
+    ) -> tuple[str, str, list[str]]:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            manifest_item = {"id": "TASK-001", "allowed_paths": ["src"], **item}
+            state, run_worktree = self._start_execution(repo, [manifest_item])
+            state.begin_item("TASK-001")
+            for path, text in ({"src/done.txt": "done\n"} if writes is None else writes).items():
+                target = run_worktree / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+            state.record_worker_completion("TASK-001", evidence="worker finished")
+            checkpoint = state.checkpoint_item("TASK-001", evidence="unit ok")
+            message = git(run_worktree, "log", "-1", "--format=%B", checkpoint["commit"])
+            return state.run_id, message, checkpoint["changed_files"]
+
     def _verify_one_item(self, state, run_worktree: Path, path: str = "src/done.txt") -> str:
         commit = self._checkpoint_one_item(state, run_worktree, path)
         state.final_audit()
@@ -381,7 +400,7 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(git(run_worktree, "rev-parse", "--verify", "HEAD"), checkpoint["commit"])
             self.assertEqual(
                 git(run_worktree, "log", "-1", "--format=%s"),
-                f"optim-plans checkpoint {state.run_id} TASK-001 attempt 1",
+                "Update src/app.txt",
             )
             self.assertFalse(sentinel.exists())
             self.assertFalse(any("schema" in arg for arg in json.loads(argv_log.read_text(encoding="utf-8"))))
@@ -1459,6 +1478,80 @@ class ExecutionTests(unittest.TestCase):
                 [event["type"] for event in state.replay().events[-4:]],
                 ["item_started", "worker_completed", "item_verified", "checkpoint_created"],
             )
+
+    def test_checkpoint_commit_subject_uses_manifest_precedence_and_normalization(self) -> None:
+        cases = [
+            (
+                "commit_message",
+                {
+                    "commit_message": "\n  Ship\t compact   subject  \nignored",
+                    "summary": "Use summary",
+                    "description": "Use description",
+                },
+                "Ship compact subject",
+            ),
+            (
+                "invalid_commit_message_uses_summary",
+                {
+                    "commit_message": "bad\0subject",
+                    "summary": "Use summary",
+                    "description": "Use description",
+                },
+                "Use summary",
+            ),
+            (
+                "invalid_summary_uses_description",
+                {
+                    "commit_message": " \n\t ",
+                    "summary": "bad\x01summary",
+                    "description": "Use description",
+                },
+                "Use description",
+            ),
+            ("non_string_uses_summary", {"commit_message": 123, "summary": "Use summary"}, "Use summary"),
+            ("control_character_uses_summary", {"commit_message": "bad\x7fsubject", "summary": "Use summary"}, "Use summary"),
+        ]
+        for label, item, expected in cases:
+            with self.subTest(label=label):
+                run_id, message, _changed_files = self._checkpoint_message_for_item(item)
+                self.assertEqual(message.splitlines()[0], expected)
+                self.assertIn(f"optim-plans run: {run_id}", message)
+                self.assertIn("item: TASK-001", message)
+                self.assertIn("attempt: 1", message)
+                self.assertNotIn("optim-plans checkpoint", message.splitlines()[0])
+
+    def test_checkpoint_commit_subject_falls_back_for_invalid_text_and_path_counts(self) -> None:
+        cases = [
+            ("one_path", {}, {"src/one.txt": "one\n"}, "Update src/one.txt", ["src/one.txt"]),
+            (
+                "multiple_paths",
+                {},
+                {"src/one.txt": "one\n", "src/two.txt": "two\n"},
+                "Update 2 files",
+                ["src/one.txt", "src/two.txt"],
+            ),
+            ("empty_checkpoint", {}, {}, "Record empty checkpoint", []),
+            (
+                "newline_path",
+                {},
+                {"src/new\nline.txt": "done\n"},
+                "Update src/new line.txt",
+                ["src/new\nline.txt"],
+            ),
+            (
+                "invalid_manifest_text",
+                {"commit_message": "\0", "summary": "\x02", "description": 123},
+                {"src/fallback.txt": "done\n"},
+                "Update src/fallback.txt",
+                ["src/fallback.txt"],
+            ),
+        ]
+        for label, item, writes, expected_subject, expected_changed in cases:
+            with self.subTest(label=label):
+                _run_id, message, changed_files = self._checkpoint_message_for_item(item, writes)
+                self.assertEqual(message.splitlines()[0], expected_subject)
+                self.assertEqual(changed_files, expected_changed)
+                self.assertNotRegex(message.splitlines()[0], r"[\r\n\x00-\x08\x0b-\x1f\x7f]")
 
     def test_dependent_item_waits_for_checkpoint_in_same_worktree(self) -> None:
         from scripts.optim_plans_core import ContractError
