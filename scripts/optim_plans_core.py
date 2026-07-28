@@ -559,7 +559,16 @@ def _status_entries(repo: Path) -> list[tuple[str, str]]:
 
 
 def _is_allowed_ignored_audit_noise(path: str) -> bool:
-    return path.endswith(".pyc") or path == ".pytest_cache" or path.startswith(".pytest_cache/")
+    return (
+        path == ".xsw"
+        or path.startswith(".xsw/")
+        or path == ".pytest_cache"
+        or path.startswith(".pytest_cache/")
+        or path == "__pycache__"
+        or path.endswith("/__pycache__")
+        or "/__pycache__/" in path
+        or path.endswith(".pyc")
+    )
 
 
 def _diff_paths(repo: Path, base_commit: str, head_commit: str) -> list[str]:

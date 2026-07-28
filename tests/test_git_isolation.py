@@ -129,9 +129,15 @@ class GitIsolationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
-            (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n.pytest_cache/\n*.log\n", encoding="utf-8")
+            (repo / ".gitignore").write_text(".xsw/\n__pycache__/\n*.pyc\n.pytest_cache/\n*.log\n", encoding="utf-8")
             git(repo, "add", ".gitignore")
             git(repo, "commit", "-m", "ignore fixture")
+            xsw = repo / ".xsw"
+            xsw.mkdir()
+            (xsw / "xsw.sqlite3").write_text("state\n", encoding="utf-8")
+            root_cache = repo / "__pycache__"
+            root_cache.mkdir()
+            (root_cache / "module.cpython-310.pyc").write_bytes(b"bytecode")
             cache = repo / "scripts" / "__pycache__"
             cache.mkdir(parents=True)
             (cache / "__init__.cpython-310.pyc").write_bytes(b"bytecode")
@@ -146,12 +152,15 @@ class GitIsolationTests(unittest.TestCase):
     def test_final_audit_allows_ignored_test_cache_noise_after_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
-            (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n.pytest_cache/\n", encoding="utf-8")
+            (repo / ".gitignore").write_text(".xsw/\n__pycache__/\n*.pyc\n.pytest_cache/\n", encoding="utf-8")
             git(repo, "add", ".gitignore")
             git(repo, "commit", "-m", "ignore fixture")
             state, run_worktree = self._start_state(repo, [{"id": "TASK-001", "allowed_paths": ["README.md"]}])
             state.begin_item("TASK-001")
             (run_worktree / "README.md").write_text("# changed\n", encoding="utf-8")
+            xsw = run_worktree / ".xsw"
+            xsw.mkdir()
+            (xsw / "xsw.sqlite3").write_text("state\n", encoding="utf-8")
             cache = run_worktree / "scripts" / "__pycache__"
             cache.mkdir(parents=True)
             (cache / "__init__.cpython-310.pyc").write_bytes(b"bytecode")
