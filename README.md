@@ -435,7 +435,7 @@ python3 scripts/optim_plans.py answer --repo <repo> --nonce <finish-nonce> --cho
 python3 scripts/optim_plans.py finish-run --repo <repo> --outcome kept --approval-nonce <finish-nonce>
 ```
 
-Use `$optim-plans:resume-previous-plan` for a read-only resume check. It reports the active run first, including `resume_command` when an approved execution launch can be retried; if there is no active pointer, it falls back to `previous-run` and suggests the latest preserved run from Git common state.
+Use `$optim-plans:resume-previous-plan` for a read-only resume check. It reports the active run first, including `resume_command`, `retry_approval_nonce`, or `finish_approval_nonce` when recovery is available; if there is no active pointer, it falls back to `previous-run` and suggests the latest preserved run from Git common state.
 
 ## Why optim-plans?
 

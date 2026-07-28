@@ -1292,6 +1292,56 @@ class E2ETests(unittest.TestCase):
             self.assertEqual(previous["candidate"]["terminal_time"], "2026-07-28T00:00:02Z")
             self.assertEqual(previous["candidate"]["artifact_dir"], "docs/optim-plans/latest")
 
+    def test_status_surfaces_retry_recovery_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            from scripts.optim_plans_core import OptimPlansState
+
+            state = OptimPlansState.initialize(repo, topic="Retry Resume", plan_hash="abc123")
+            run_worktree = raw_path / "run-worktree"
+            base = git(repo, "rev-parse", "--verify", "HEAD")
+            state.persist_execution_manifest(
+                {
+                    "plan_hash": "abc123",
+                    "source_base": base,
+                    "integration_destination": "main",
+                    "run_worktree_path": str(run_worktree),
+                    "items": [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}],
+                }
+            )
+            approval = state.request_execution_approval()
+            state.record_answer(approval["nonce"], "approve")
+            state.start_execution(approval["nonce"])
+            item_started = {
+                "item_id": "TASK-001",
+                "attempt": 1,
+                "base_commit": base,
+                "run_worktree": str(run_worktree),
+                "run_branch": f"optim-plans/run/{state.run_id}",
+                "allowed_paths": ["src/done.txt"],
+            }
+            state.append_event("item_started", item_started)
+            state.append_event("worker_failed", {"item_id": "TASK-001", "base_commit": base, "run_worktree": str(run_worktree), "evidence": "failed"})
+
+            first = controller_json("status", "--repo", str(repo))
+            self.assertEqual(first["status"], "awaiting_retry_decision")
+            self.assertEqual(first["retry_item_id"], "TASK-001")
+            self.assertIn("retry-item", first["resume_command"])
+            self.assertNotIn("retry_approval_nonce", first)
+            self.assertIn("finish_approval_nonce", first)
+
+            state.append_event("retry_restored", {"item_id": "TASK-001", "approval_nonce": None, "auto_approved": True, "restored_to": base, "run_worktree": str(run_worktree)})
+            state.append_event("item_started", {**item_started, "attempt": 2})
+            state.append_event("worker_failed", {"item_id": "TASK-001", "base_commit": base, "run_worktree": str(run_worktree), "evidence": "failed again"})
+
+            second = controller_json("status", "--repo", str(repo))
+            self.assertEqual(second["status"], "awaiting_retry_decision")
+            self.assertEqual(second["retry_item_id"], "TASK-001")
+            self.assertIn("retry_approval_nonce", second)
+            self.assertIn("--approval-nonce", second["retry_command"])
+            self.assertIn("finish_approval_nonce", second)
+
     def test_cli_lifecycle_rejects_invalid_states_before_mutation_and_finishes_integrated(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             raw_path = Path(raw)

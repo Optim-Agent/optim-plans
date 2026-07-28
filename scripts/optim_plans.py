@@ -612,16 +612,60 @@ def cmd_status(args: argparse.Namespace) -> None:
         else:
             payload["next_action"] = "approve the execution launch nonce before running start-execution"
     elif replayed.status == "awaiting_retry_decision":
-        for event in reversed(replayed.events):
-            event_payload = event.get("payload", {})
-            if event["type"] == "pending_question" and event_payload.get("stage") == "execution_retry":
-                payload["retry_approval_nonce"] = event_payload["nonce"]
-                break
-        for event in reversed(replayed.events):
-            event_payload = event.get("payload", {})
-            if event["type"] == "pending_question" and event_payload.get("stage") == "finish_run":
-                payload["finish_approval_nonce"] = event_payload["nonce"]
-                break
+        retry_item_id = next(
+            (
+                event.get("payload", {}).get("item_id")
+                for event in reversed(replayed.events)
+                if event["type"]
+                in {"worker_failed", "validator_protocol_rejected", "validator_failed", "verification_failed", "audit_failed"}
+                or (event["type"] == "validator_result_recorded" and event.get("payload", {}).get("status") == "fail")
+            ),
+            None,
+        )
+        if isinstance(retry_item_id, str):
+            payload["retry_item_id"] = retry_item_id
+            retry_seen = any(
+                event["type"] == "retry_restored" and event.get("payload", {}).get("item_id") == retry_item_id
+                for event in replayed.events
+            )
+            retry_argv = [
+                "python3",
+                "scripts/optim_plans.py",
+                "retry-item",
+                "--repo",
+                str(state.repo),
+                "--item-id",
+                retry_item_id,
+            ]
+            if retry_seen:
+                retry = state.request_retry(retry_item_id)
+                payload["retry_approval_nonce"] = retry["nonce"]
+                retry_argv.extend(["--approval-nonce", retry["nonce"]])
+                retry_answer = next(
+                    (
+                        event.get("payload", {})
+                        for event in reversed(state.replay().events)
+                        if event["type"] == "answer_recorded" and event.get("payload", {}).get("nonce") == retry["nonce"]
+                    ),
+                    {},
+                )
+                payload["retry_approved"] = retry_answer.get("choice") == "approve"
+                payload["retry_command"] = shlex.join(retry_argv)
+                if payload["retry_approved"]:
+                    payload["resume_command"] = payload["retry_command"]
+            else:
+                payload["resume_command"] = shlex.join(retry_argv)
+                payload["next_action"] = "run resume_command for the automatic first retry, or finish with finish_approval_nonce"
+        approval = state.request_finish_approval()
+        payload["events"] = len(state.replay().events)
+        payload["finish_approval_nonce"] = approval["nonce"]
+        payload["finish_choices"] = [option["id"] for option in approval["options"]]
+        if payload.get("retry_approved"):
+            payload["next_action"] = "run resume_command, or finish with finish_approval_nonce"
+        elif "retry_approval_nonce" in payload:
+            payload["next_action"] = "approve retry_approval_nonce then run retry_command, or finish with finish_approval_nonce"
+        else:
+            payload.setdefault("next_action", "finish with finish_approval_nonce")
     elif replayed.status == "awaiting_integration":
         approval = state.request_finish_approval()
         payload["events"] = len(state.replay().events)

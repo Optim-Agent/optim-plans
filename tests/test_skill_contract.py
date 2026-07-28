@@ -213,9 +213,13 @@ class SkillContractTests(unittest.TestCase):
             "previous-run --repo",
             "no active pointer",
             "Git-common fallback",
+            "awaiting_retry_decision",
             "resume_command",
+            "retry_command",
+            "retry_item_id",
             "finish_approval_nonce",
             "Do not approve execution",
+            "run `resume_command`",
             "restore an active pointer",
         ):
             self.assertIn(expected, text)
