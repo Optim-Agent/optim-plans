@@ -500,7 +500,7 @@ python3 scripts/optim_plans.py answer --repo <repo> --nonce <finish-nonce> --cho
 python3 scripts/optim_plans.py finish-run --repo <repo> --outcome kept --approval-nonce <finish-nonce>
 ```
 
-Use `$optim-plans:resume-previous-plan` for a read-only resume check. It reports the active run first, including `resume_command`, `retry_approval_nonce`, or `finish_approval_nonce` when recovery is available; if there is no active pointer, it falls back to `previous-run` and suggests the latest preserved run from Git common state.
+Use `$optim-plans:resume-previous-plan` to continue an interrupted active run. It checks the active run first, runs `resume_command` when available, and treats the direct resume request as approval for `retry_approval_nonce` before running `retry_command`; if only finish recovery is available, it reports `finish_choices` and stops. If there is no active pointer, it falls back to `previous-run` and suggests the latest preserved run from Git common state.
 
 Batch launch blocks include prior agent handles when a related executor or validator session can be reused, plus bounded `prior_context` as a session resume fallback when the host cannot resume directly.
 

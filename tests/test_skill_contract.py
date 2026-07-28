@@ -201,13 +201,13 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn(f"`{level}`", text)
             self.assertNotIn("depth preset", text)
 
-    def test_resume_previous_plan_skill_is_read_only_and_active_first(self) -> None:
+    def test_resume_previous_plan_skill_resumes_active_recovery_first(self) -> None:
         self.assertTrue(RESUME_SKILL.is_file())
         text = RESUME_SKILL.read_text(encoding="utf-8")
         description = skill_description(RESUME_SKILL).lower()
         self.assertIn("resume", description)
         self.assertIn("interrupted", description)
-        self.assertIn("read-only", description)
+        self.assertIn("automatically run", description)
         for expected in (
             "status --repo",
             "previous-run --repo",
@@ -218,9 +218,11 @@ class SkillContractTests(unittest.TestCase):
             "retry_command",
             "retry_item_id",
             "finish_approval_nonce",
-            "Do not approve execution",
+            "choice approve",
+            "Do not approve execution launch",
             "run `resume_command`",
             "restore an active pointer",
+            "there is no unambiguous resume outcome",
         ):
             self.assertIn(expected, text)
 
