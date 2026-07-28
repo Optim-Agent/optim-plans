@@ -540,7 +540,7 @@ The implemented guardrails include:
 - automatic checked-out fast-forward `run_finished` / `integrated` after every item, final audit, and full local proof pass;
 - `awaiting_integration` with bounded evidence when auto-integration is unsafe or post-fast-forward proof fails;
 - manual recovery `finish-run` outcomes, with `integrated` running the full local proof before terminal success;
-- path-scope rejection and delta audits for symlinks, gitlinks, nested repos, ignored files, untracked files, staged files, and tracked changes;
+- path-scope rejection and delta audits for symlinks, gitlinks, nested repos, ignored files, untracked files, staged files, and tracked changes, while preserving known ignored audit noise (`.xsw/`, `.pytest_cache/`, `__pycache__/`, `*.pyc`);
 - three distinct evidenced attempts before `not_achievable` can even request confirmation;
 - Codex/Claude command builders with conservative role-specific flags;
 - `SessionStart` and `PreToolUse` hooks with no Stop handler.
@@ -604,7 +604,7 @@ Implemented:
 - serial item execution with checkpoint commits;
 - validator worker loop before controller verification;
 - adapter-only argv launch with `shell=False`, using worker stdout for the result JSON envelope;
-- controller verification and Git audits for path allowlists and protected Git metadata;
+- controller verification and Git audits for path allowlists and protected Git metadata, while preserving known ignored audit noise (`.xsw/`, `.pytest_cache/`, `__pycache__/`, `*.pyc`);
 - automatic first retry restore and explicit retry approval for later retries;
 - automatic checked-out fast-forward `run_finished` / `integrated` after clean final audits and full local proof;
 - manual `awaiting_integration` recovery when checked-out fast-forward integration cannot safely finish;

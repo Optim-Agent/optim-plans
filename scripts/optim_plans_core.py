@@ -37,9 +37,11 @@ HOST_EXECUTOR_PROMPT_PROTOCOL = "optim-plans-host-executor-v1"
 HOST_EXECUTOR_RESULT_SCHEMA = "optim-plans-worker-result-v1"
 HOST_VALIDATOR_PROMPT_PROTOCOL = "optim-plans-host-validator-v1"
 HOST_VALIDATOR_RESULT_SCHEMA = "optim-plans-validator-result-v1"
+IGNORED_AUDIT_NOISE_PATTERNS = [".xsw/", ".pytest_cache/", "__pycache__/", "*.pyc"]
 HOST_EXECUTOR_PROMPT_CONTRACT = {
     "instructions": [
         "Modify only the assigned run worktree.",
+        "Leave ignored audit noise untouched; the controller ignores .xsw/, .pytest_cache/, __pycache__/, and *.pyc.",
         "Return concise completion evidence to the host.",
         "The controller, not the worker, performs verification, audit, checkpoint, retry, and finalization.",
     ],
@@ -585,6 +587,10 @@ def _is_allowed_ignored_audit_noise(path: str) -> bool:
         or "/__pycache__/" in path
         or path.endswith(".pyc")
     )
+
+
+def ignored_audit_noise_policy() -> dict[str, Any]:
+    return {"action": "leave_untouched", "patterns": list(IGNORED_AUDIT_NOISE_PATTERNS)}
 
 
 def _diff_paths(repo: Path, base_commit: str, head_commit: str) -> list[str]:
@@ -2057,6 +2063,7 @@ class OptimPlansState:
             "base_commit": start["base_commit"],
             "cwd": start["run_worktree"],
             "allowed_paths": list(start["allowed_paths"]),
+            "ignored_audit_noise": ignored_audit_noise_policy(),
             "worker": worker_config,
         }
         block.update(
@@ -2090,6 +2097,7 @@ class OptimPlansState:
             "base_commit": start["base_commit"],
             "cwd": start["run_worktree"],
             "allowed_paths": list(start["allowed_paths"]),
+            "ignored_audit_noise": ignored_audit_noise_policy(),
             "worker": worker_config,
         }
         block.update(

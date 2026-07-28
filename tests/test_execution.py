@@ -384,7 +384,7 @@ class ExecutionTests(unittest.TestCase):
                         )
 
     def test_host_assignment_authorization_registration_and_completion_are_bound(self) -> None:
-        from scripts.optim_plans_core import ContractError, OptimPlansState
+        from scripts.optim_plans_core import ContractError, OptimPlansState, ignored_audit_noise_policy
 
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
@@ -398,6 +398,7 @@ class ExecutionTests(unittest.TestCase):
                 ],
             )
             assignment = state.assign_item("TASK-001")
+            self.assertEqual(ignored_audit_noise_policy(), assignment["launch_block"]["ignored_audit_noise"])
             reloaded = OptimPlansState.load_active(repo).assign_item("TASK-001")
             self.assertEqual(reloaded["assignment_nonce"], assignment["assignment_nonce"])
             self.assertEqual(
@@ -620,7 +621,7 @@ class ExecutionTests(unittest.TestCase):
                     self.assertEqual(statuses["TASK-002"], expected)
 
     def test_batch_host_workflow_blocks_item_commands_and_reuses_context(self) -> None:
-        from scripts.optim_plans_core import ContractError
+        from scripts.optim_plans_core import ContractError, ignored_audit_noise_policy
 
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
@@ -635,6 +636,7 @@ class ExecutionTests(unittest.TestCase):
                 ],
             )
             assignment = state.assign_batch(["TASK-001", "TASK-002", "TASK-003"])
+            self.assertEqual(ignored_audit_noise_policy(), assignment["launch_block"]["ignored_audit_noise"])
             with self.assertRaisesRegex(ContractError, "active batch"):
                 state.assign_item("TASK-001")
             authorized = state.authorize_batch_spawn(assignment["batch_id"], assignment["assignment_nonce"], assignment["launch_block"])

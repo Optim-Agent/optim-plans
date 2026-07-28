@@ -141,6 +141,8 @@ class AgentAdapterTests(unittest.TestCase):
             self.assertNotIn("--background", execute.argv)
             agent = json.loads(execute.argv[execute.argv.index("--agents") + 1])["optim-plans-executor"]
             self.assertEqual(agent["tools"], ["Write", "Edit"])
+            self.assertIn("leave ignored audit noise", agent["prompt"])
+            self.assertIn(".xsw/", agent["prompt"])
             self.assertNotIn("background", agent)
             self.assertTrue((tmp / "settings.json").is_file())
             self.assertTrue((tmp / "plugin").is_dir())
