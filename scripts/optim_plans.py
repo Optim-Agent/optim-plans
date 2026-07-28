@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ try:
         host_agent,
         host_executor_prompt_hash,
         json_text,
+        latest_preserved_run,
         plan_level,
         read_optim_plans_config,
         save_optim_plans_config_value,
@@ -39,6 +41,7 @@ except ImportError:  # pragma: no cover - package import path
         host_agent,
         host_executor_prompt_hash,
         json_text,
+        latest_preserved_run,
         plan_level,
         read_optim_plans_config,
         save_optim_plans_config_value,
@@ -77,6 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status")
     status.add_argument("--repo", required=True)
+
+    previous = sub.add_parser("previous-run")
+    previous.add_argument("--repo", required=True)
 
     manifest = sub.add_parser("prepare-execution")
     manifest.add_argument("--repo", required=True)
@@ -569,6 +575,42 @@ def cmd_status(args: argparse.Namespace) -> None:
             "answer the finish approval nonce, then run finish-run "
             "--outcome kept|failed|aborted to release the active pointer without deleting evidence"
         )
+    elif replayed.status == "awaiting_approval":
+        approval = next(
+            (
+                event.get("payload", {})
+                for event in reversed(replayed.events)
+                if event["type"] == "pending_question" and event.get("payload", {}).get("stage") == "execution_launch"
+            ),
+            {},
+        )
+        nonce = approval.get("nonce")
+        answer = next(
+            (
+                event.get("payload", {})
+                for event in reversed(replayed.events)
+                if event["type"] == "answer_recorded" and event.get("payload", {}).get("nonce") == nonce
+            ),
+            {},
+        )
+        approved = answer.get("choice") == "approve"
+        if nonce:
+            payload["execution_approval_nonce"] = nonce
+        payload["execution_approved"] = approved
+        if approved:
+            argv = [
+                "python3",
+                "scripts/optim_plans.py",
+                "start-execution",
+                "--repo",
+                str(state.repo),
+                "--approval-nonce",
+                str(nonce),
+            ]
+            payload["resume_command"] = shlex.join(argv)
+            payload["next_action"] = "fix any clean-worktree blockers, then run resume_command"
+        else:
+            payload["next_action"] = "approve the execution launch nonce before running start-execution"
     elif replayed.status == "awaiting_retry_decision":
         for event in reversed(replayed.events):
             event_payload = event.get("payload", {})
@@ -586,6 +628,10 @@ def cmd_status(args: argparse.Namespace) -> None:
         payload["finish_approval_nonce"] = approval["nonce"]
         payload["finish_choices"] = [option["id"] for option in approval["options"]]
     print_json(payload)
+
+
+def cmd_previous_run(args: argparse.Namespace) -> None:
+    print_json(latest_preserved_run(Path(args.repo)))
 
 
 def cmd_prepare_execution(args: argparse.Namespace) -> None:
@@ -793,6 +839,7 @@ def main(argv: list[str] | None = None) -> int:
             "answer": cmd_answer,
             "worker-config": cmd_worker_config,
             "status": cmd_status,
+            "previous-run": cmd_previous_run,
             "prepare-execution": cmd_prepare_execution,
             "start-execution": cmd_start_execution,
             "run-item": cmd_run_item,

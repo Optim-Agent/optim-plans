@@ -428,10 +428,14 @@ python3 scripts/optim_plans.py fail-validator --repo <repo> --item-id TASK-001 -
 # CLI adapter fallback:
 python3 scripts/optim_plans.py run-item --repo <repo> --item-id TASK-001
 python3 scripts/optim_plans.py status --repo <repo>
+# if no active pointer exists, rediscover the latest preserved run:
+python3 scripts/optim_plans.py previous-run --repo <repo>
 # if status reports awaiting_integration:
 python3 scripts/optim_plans.py answer --repo <repo> --nonce <finish-nonce> --choice kept
 python3 scripts/optim_plans.py finish-run --repo <repo> --outcome kept --approval-nonce <finish-nonce>
 ```
+
+Use `$optim-plans:resume-previous-plan` for a read-only resume check. It reports the active run first, including `resume_command` when an approved execution launch can be retried; if there is no active pointer, it falls back to `previous-run` and suggests the latest preserved run from Git common state.
 
 ## Why optim-plans?
 

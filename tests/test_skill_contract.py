@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills/optim-plans/SKILL.md"
 ANALYZE_SKILL = ROOT / "skills/analyze-and-plan/SKILL.md"
+RESUME_SKILL = ROOT / "skills/resume-previous-plan/SKILL.md"
 
 
 def skill_description(path: Path) -> str:
@@ -200,6 +201,25 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn(f"`{level}`", text)
             self.assertNotIn("depth preset", text)
 
+    def test_resume_previous_plan_skill_is_read_only_and_active_first(self) -> None:
+        self.assertTrue(RESUME_SKILL.is_file())
+        text = RESUME_SKILL.read_text(encoding="utf-8")
+        description = skill_description(RESUME_SKILL).lower()
+        self.assertIn("resume", description)
+        self.assertIn("interrupted", description)
+        self.assertIn("read-only", description)
+        for expected in (
+            "status --repo",
+            "previous-run --repo",
+            "no active pointer",
+            "Git-common fallback",
+            "resume_command",
+            "finish_approval_nonce",
+            "Do not approve execution",
+            "restore an active pointer",
+        ):
+            self.assertIn(expected, text)
+
     def test_analyze_and_plan_problem_flow_contract(self) -> None:
         self.assertTrue(ANALYZE_SKILL.is_file())
         text = ANALYZE_SKILL.read_text(encoding="utf-8")
@@ -358,6 +378,9 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("wait_agent", readme)
         self.assertIn("run-item", readme)
         self.assertIn("finish-run", readme)
+        self.assertIn("$optim-plans:resume-previous-plan", readme)
+        self.assertIn("previous-run", readme)
+        self.assertIn("resume_command", readme)
         self.assertIn("automatic checked-out fast-forward `run_finished` / `integrated`", readme)
         self.assertNotIn("--worker-command", readme)
         self.assertNotIn("python3 scripts/optim_plans.py run-worker", readme)

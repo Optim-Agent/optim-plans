@@ -829,6 +829,59 @@ def lifecycle_status(events: list[dict[str, Any]]) -> str:
     return status
 
 
+def latest_preserved_run(repo: Path | str) -> dict[str, Any]:
+    repo = Path(repo).absolute()
+    runs_dir = git_common_dir(repo) / "optim-plans" / "runs"
+    best: tuple[str, str, dict[str, Any]] | None = None
+    if not runs_dir.exists():
+        return {"candidate": None}
+    for run_dir in runs_dir.iterdir():
+        if not run_dir.is_dir():
+            continue
+        try:
+            run = parse_json_strict((run_dir / "run.json").read_text(encoding="utf-8"), source=str(run_dir / "run.json"))
+            events = []
+            for line_number, line in enumerate((run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines(), start=1):
+                if line.strip():
+                    event = parse_json_strict(line, source=f"{run_dir / 'events.jsonl'}:{line_number}")
+                    expected = len(events) + 1
+                    if event.get("schema") != SCHEMA_VERSION or event.get("seq") != expected:
+                        raise ContractError("event sequence gap or schema mismatch")
+                    if not isinstance(event.get("type"), str):
+                        raise ContractError("event type missing")
+                    events.append(event)
+        except (ContractError, OSError):
+            continue
+        run_id = run.get("run_id")
+        if not isinstance(run_id, str):
+            continue
+        terminal = next(
+            (
+                event
+                for event in reversed(events)
+                if event.get("type") == "run_finished" and event.get("payload", {}).get("preserved") is True
+            ),
+            None,
+        )
+        if terminal is None:
+            continue
+        last_event = events[-1] if events else terminal
+        candidate = {
+            "run_id": run_id,
+            "status": lifecycle_status(events),
+            "artifact_dir": run.get("artifact_dir"),
+            "terminal_time": terminal.get("time", ""),
+            "outcome": terminal.get("payload", {}).get("outcome"),
+            "last_event_type": last_event.get("type"),
+            "last_event_time": last_event.get("time", ""),
+            "next_action": "inspect the artifact_dir or run worktree; this command does not restore an active pointer",
+        }
+        key = (str(candidate["terminal_time"]), run_id, candidate)
+        if best is None or key[:2] > best[:2]:
+            best = key
+    return {"candidate": None if best is None else best[2]}
+
+
 @dataclass(frozen=True)
 class OptimPlansState:
     repo: Path

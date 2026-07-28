@@ -63,6 +63,7 @@ def main() -> int:
         "skills/plan/SKILL.md",
         "skills/big-plan/SKILL.md",
         "skills/huge-plan/SKILL.md",
+        "skills/resume-previous-plan/SKILL.md",
         "hooks/codex-hooks.json",
         "hooks/hooks.json",
         "scripts/optim_plans.py",

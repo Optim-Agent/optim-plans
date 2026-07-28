@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -1185,6 +1186,111 @@ class E2ETests(unittest.TestCase):
             )
             self.assertNotIn("checkpoint-item", help_result.stdout)
             self.assertIn("complete-item", help_result.stdout)
+            self.assertIn("previous-run", help_result.stdout)
+
+    def test_status_surfaces_execution_approval_resume_only_after_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            run_worktree = raw_path / "run-worktree"
+            init_controller(repo, "Approval Resume")
+            manifest = {
+                "plan_hash": "abc123",
+                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "run_worktree_path": str(run_worktree),
+                "items": [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}],
+            }
+            manifest_path = raw_path / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            write_executor_worker_config(repo)
+            prepared = controller_json("prepare-execution", "--repo", str(repo), "--manifest", str(manifest_path))
+
+            pending = controller_json("status", "--repo", str(repo))
+            self.assertEqual(pending["status"], "awaiting_approval")
+            self.assertEqual(pending["execution_approval_nonce"], prepared["nonce"])
+            self.assertFalse(pending["execution_approved"])
+            self.assertNotIn("resume_command", pending)
+
+            answer_choice(repo, prepared["nonce"], "approve")
+            (repo / "dirty.tmp").write_text("dirty\n", encoding="utf-8")
+            blocked = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/optim_plans.py"),
+                    "start-execution",
+                    "--repo",
+                    str(repo),
+                    "--approval-nonce",
+                    prepared["nonce"],
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(blocked.returncode, 2)
+            self.assertIn("source worktree must be clean", blocked.stderr)
+
+            resumable = controller_json("status", "--repo", str(repo))
+            self.assertTrue(resumable["execution_approved"])
+            self.assertIn(prepared["nonce"], resumable["resume_command"])
+            (repo / "dirty.tmp").unlink()
+            resumed = subprocess.run(
+                shlex.split(resumable["resume_command"]),
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            self.assertEqual(json.loads(resumed.stdout)["approval_nonce"], prepared["nonce"])
+            self.assertTrue(run_worktree.is_dir())
+
+    def test_previous_run_reports_latest_preserved_without_active_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            from scripts.optim_plans_core import git_common_dir
+
+            runs_dir = git_common_dir(repo) / "optim-plans" / "runs"
+
+            def write_run(run_id: str, terminal_time: str, *, preserved: bool = True, malformed: bool = False) -> None:
+                run_dir = runs_dir / run_id
+                run_dir.mkdir(parents=True)
+                (run_dir / "run.json").write_text(
+                    json.dumps({"schema": 1, "run_id": run_id, "artifact_dir": f"docs/optim-plans/{run_id}"}),
+                    encoding="utf-8",
+                )
+                if malformed:
+                    (run_dir / "events.jsonl").write_text("{not-json}\n", encoding="utf-8")
+                    return
+                events = [
+                    {"schema": 1, "seq": 1, "time": "2026-07-28T00:00:00Z", "type": "pending_question", "payload": {"stage": "x"}},
+                    {
+                        "schema": 1,
+                        "seq": 2,
+                        "time": terminal_time,
+                        "type": "run_finished",
+                        "payload": {"outcome": "kept", "preserved": preserved},
+                    },
+                ]
+                (run_dir / "events.jsonl").write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+
+            write_run("older", "2026-07-28T00:00:01Z")
+            write_run("latest", "2026-07-28T00:00:02Z")
+            write_run("newer-not-preserved", "2026-07-28T00:00:03Z", preserved=False)
+            write_run("bad", "2026-07-28T00:00:04Z", malformed=True)
+
+            status = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "status", "--repo", str(repo)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(status.returncode, 2)
+            previous = controller_json("previous-run", "--repo", str(repo))
+            self.assertEqual(previous["candidate"]["run_id"], "latest")
+            self.assertEqual(previous["candidate"]["terminal_time"], "2026-07-28T00:00:02Z")
+            self.assertEqual(previous["candidate"]["artifact_dir"], "docs/optim-plans/latest")
 
     def test_cli_lifecycle_rejects_invalid_states_before_mutation_and_finishes_integrated(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
