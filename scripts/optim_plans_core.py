@@ -4466,6 +4466,46 @@ class QuestionLedger:
         return {"nonce": nonce, "choice": choice}
 
 
+GENERIC_QUESTION_RESERVED_NAMES = {
+    "agent-choice",
+    "background-model",
+    "default",
+    "execution_launch",
+    "execution_summary",
+    "finish_run",
+    "finish-run",
+    "approve",
+    "stop",
+    "integrated",
+    "pr-opened",
+    "kept",
+    "discarded",
+    "failed",
+    "aborted",
+    "generate-summary",
+    "skip-summary",
+    "always-skip-summary",
+    "other",
+    "auto",
+    "skip-refinement-execute",
+}
+
+
+def validate_generic_question(stage: str, decision_id: str, option_ids: list[str]) -> None:
+    if not stage.strip():
+        raise ContractError("generic question stage is required")
+    if not decision_id.strip():
+        raise ContractError("generic question decision_id is required")
+    names = [stage, *option_ids]
+    for name in names:
+        if name != name.strip() or not name:
+            raise ContractError("generic question names must be non-empty and trimmed")
+        if name in GENERIC_QUESTION_RESERVED_NAMES or name.startswith("execution_") or name.startswith("execution-"):
+            raise ContractError(f"generic question name {name!r} is reserved")
+    if len(set(option_ids)) != len(option_ids):
+        raise ContractError("generic question option ids must be unique")
+
+
 def may_auto_answer(stage: str) -> bool:
     return stage in {
         "planning",

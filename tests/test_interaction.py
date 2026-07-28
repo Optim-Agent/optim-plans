@@ -43,6 +43,17 @@ class InteractionTests(unittest.TestCase):
         )
         self.assertEqual([option.id for option in question.options], ["approve", "stop", "other"])
 
+    def test_generic_question_reserved_names_are_rejected(self) -> None:
+        from scripts.optim_plans_core import ContractError, validate_generic_question
+
+        validate_generic_question("review-and-plan", "OPP-003", ["accept", "defer", "reject"])
+        for stage in ("execution_launch", "execution_retry", "finish_run", "agent-choice", "background-model"):
+            with self.subTest(stage=stage), self.assertRaises(ContractError):
+                validate_generic_question(stage, "OPP-003", ["accept"])
+        for option_id in ("skip-refinement-execute", "approve", "auto", "agent-choice"):
+            with self.subTest(option_id=option_id), self.assertRaises(ContractError):
+                validate_generic_question("review-and-plan", "OPP-003", [option_id])
+
     def test_plan_levels_capture_question_bounds(self) -> None:
         from scripts.optim_plans_core import ContractError, PLAN_LEVELS, plan_level
 

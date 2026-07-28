@@ -27,6 +27,7 @@ try:
         read_optim_plans_config,
         save_optim_plans_config_value,
         sha256_text,
+        validate_generic_question,
         validator_prompt_hash,
         worker_launch_files,
     )
@@ -46,6 +47,7 @@ except ImportError:  # pragma: no cover - package import path
         read_optim_plans_config,
         save_optim_plans_config_value,
         sha256_text,
+        validate_generic_question,
         validator_prompt_hash,
         worker_launch_files,
     )
@@ -63,8 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--repo", required=True)
     ask.add_argument("--prompt", required=True)
     ask.add_argument("--plan-level", default="plan")
-    ask.add_argument("--stage", choices=["default", "agent-choice", "background-model"], default="default")
+    ask.add_argument("--stage", default="default")
     ask.add_argument("--role", choices=["refinement", "executor", "validator"], default="refinement")
+    ask.add_argument("--decision-id")
+    ask.add_argument("--recommended-option", nargs=3, metavar=("ID", "LABEL", "REASON"))
+    ask.add_argument("--alternative-option", nargs=3, action="append", default=[], metavar=("ID", "LABEL", "REASON"))
 
     answer = sub.add_parser("answer")
     answer.add_argument("--repo", required=True)
@@ -330,6 +335,10 @@ def _worker_question(state: OptimPlansState, *, prompt: str, level: Any, key: st
         print_json(payload)
 
 
+def _option_tuple(raw: list[str]) -> tuple[str, str, str]:
+    return (raw[0].strip(), raw[1].strip(), raw[2].strip())
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     state = OptimPlansState.initialize(Path(args.repo), topic=args.topic, plan_hash=sha256_text(args.topic))
     state.append_event("initialized", {"topic": args.topic})
@@ -340,6 +349,7 @@ def cmd_ask(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     level = plan_level(args.plan_level)
     ledger = QuestionLedger()
+    generic = args.decision_id is not None or args.recommended_option is not None or bool(args.alternative_option)
     foreground = (
         "foreground",
         "Current foreground session",
@@ -352,7 +362,14 @@ def cmd_ask(args: argparse.Namespace) -> None:
         "Jump to executor",
         "skip refinement; use this choice as direct execution launch approval",
     )
-    if args.stage == "agent-choice":
+    if generic:
+        if args.recommended_option is None or args.decision_id is None:
+            raise ContractError("generic question requires --decision-id and --recommended-option")
+        recommended = _option_tuple(args.recommended_option)
+        alternatives = [_option_tuple(option) for option in args.alternative_option]
+        validate_generic_question(args.stage, args.decision_id, [recommended[0], *(option[0] for option in alternatives)])
+        question = ledger.ask(args.prompt, recommended=recommended, alternatives=alternatives)
+    elif args.stage == "agent-choice":
         delegated_label = "Delegated validator run" if args.role == "validator" else "Delegated foreground run"
         delegated = ("background", delegated_label, "choose a standalone sub-agent with visible output")
         question = ledger.ask(
@@ -375,10 +392,14 @@ def cmd_ask(args: argparse.Namespace) -> None:
             alternatives=[criticizer, jump],
             allow_other=False,
         )
+    if args.stage not in {"default", "agent-choice", "background-model"} and not generic:
+        raise ContractError("custom question stage requires --decision-id and --recommended-option")
     expected_seq = len(state.replay().events) + 1
     payload = question.to_json(expected_seq=expected_seq)
     payload["plan_level"] = level.to_json()
-    if args.stage != "default":
+    if generic:
+        payload.update({"stage": args.stage, "decision_id": args.decision_id.strip(), "planning_only": True})
+    elif args.stage != "default":
         payload["stage"] = args.stage
     if args.stage == "agent-choice":
         payload["config_key"] = _worker_config_key(args.role)

@@ -354,6 +354,109 @@ class E2ETests(unittest.TestCase):
                 )
             )
 
+    def test_cli_ask_generic_planning_question_records_custom_options(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Generic Question")
+            q = controller_json(
+                "ask",
+                "--repo",
+                str(repo),
+                "--prompt",
+                "Should OPP-003 enter implementation scope?",
+                "--plan-level",
+                "huge-plan",
+                "--stage",
+                "review-and-plan",
+                "--decision-id",
+                "OPP-003",
+                "--recommended-option",
+                "accept",
+                "Accept",
+                "highest feature-completeness gap",
+                "--alternative-option",
+                "defer",
+                "Defer",
+                "document the gap only",
+                "--alternative-option",
+                "reject",
+                "Reject",
+                "current behavior is intentional",
+            )
+
+            self.assertEqual(q["stage"], "review-and-plan")
+            self.assertEqual(q["decision_id"], "OPP-003")
+            self.assertTrue(q["planning_only"])
+            self.assertEqual(q["plan_level"]["name"], "huge-plan")
+            self.assertEqual(q["recommended_option_id"], "accept")
+            self.assertEqual([option["id"] for option in q["options"]], ["accept", "defer", "reject", "other", "auto"])
+            self.assertEqual(q["free_form"], {"option_id": "other", "required": False})
+            self.assertEqual(answer_choice(repo, q["nonce"], "accept")["choice"], "accept")
+
+            stale = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/optim_plans.py"),
+                    "answer",
+                    "--repo",
+                    str(repo),
+                    "--nonce",
+                    q["nonce"],
+                    "--choice",
+                    "accept",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(stale.returncode, 2)
+            self.assertIn("stale or replayed question nonce", stale.stderr)
+
+    def test_cli_ask_generic_planning_question_rejects_reserved_names(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Generic Question Rejections")
+            base = [
+                sys.executable,
+                str(ROOT / "scripts/optim_plans.py"),
+                "ask",
+                "--repo",
+                str(repo),
+                "--prompt",
+                "Should OPP-003 enter implementation scope?",
+                "--decision-id",
+                "OPP-003",
+                "--recommended-option",
+                "accept",
+                "Accept",
+                "highest feature-completeness gap",
+            ]
+            bad_stage = subprocess.run(
+                [*base, "--stage", "execution_launch"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(bad_stage.returncode, 2)
+            self.assertIn("reserved", bad_stage.stderr)
+
+            bad_option = subprocess.run(
+                [
+                    *base,
+                    "--stage",
+                    "review-and-plan",
+                    "--alternative-option",
+                    "skip-refinement-execute",
+                    "Jump",
+                    "reserved execution approval choice",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(bad_option.returncode, 2)
+            self.assertIn("reserved", bad_option.stderr)
+
     def test_cli_ask_background_model_stage_offers_model_effort_choices(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
