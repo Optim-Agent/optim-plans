@@ -8,6 +8,18 @@ first, ISO dates, and grouped change types.
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-28
+
+### Added
+
+- Added the `review-and-plan` skill for multi-angle repository improvement
+  review before optim-plans handoff.
+- Added Codex agent metadata and README coverage for `review-and-plan`.
+
+### Changed
+
+- Bumped Claude and Codex plugin metadata to `0.2.0`.
+
 ## 0.1.2 - 2026-07-27
 
 ### Added

@@ -108,7 +108,7 @@ class PluginSmokeTests(unittest.TestCase):
 
         payload = json.loads(listed.stdout)
         strings = self._strings(payload)
-        for expected in ("optim-plans-dev", "optim-plans", "0.1.2"):
+        for expected in ("optim-plans-dev", "optim-plans", "0.2.0"):
             self.assertIn(expected, strings)
         if "skills" not in strings and "components" not in strings:
             self.skipTest("codex plugin list --json does not expose component inventory")
