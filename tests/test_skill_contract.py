@@ -391,6 +391,29 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("Repository-integrity detection and integration gating", readme)
         self.assertIn("does not provide host confinement", readme)
 
+    def test_readme_documents_review_and_plan_method(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("$optim-plans:review-and-plan", readme)
+        for expected in (
+            "Documentation",
+            "Efficiency/cost",
+            "Feature completeness",
+            "UX",
+            "Safety/recoverability",
+            "GitHub open-source project search",
+            "repository URL",
+            "supported claim",
+            "one opportunity question at a time",
+            "planning-only controller-backed choice",
+            "Accepted opportunity IDs",
+        ):
+            self.assertIn(expected, readme)
+        example = readme.split("<summary><strong>Detailed example: generic Python CLI project</strong></summary>", 1)[1].split("</details>", 1)[0]
+        self.assertIn("<details>", readme)
+        self.assertIn("generic Python CLI project", example)
+        self.assertIn("OPP-003", example)
+        self.assertIn("start/resume/terminate", example)
+
     def test_eval_pressure_cases_exist(self) -> None:
         cases = ROOT / "evals/pressure_cases.json"
         self.assertTrue(cases.is_file())

@@ -67,6 +67,62 @@ The first ring fights the wrong-plan problem. It turns vague intent into a plan,
 
 The second ring fights the wrong-execution problem. It starts only from an immutable manifest-bound human approval, runs serial checkpointed work in one controller-owned worktree and branch, inserts a read-only validator before controller verification, and only sends bounded safe-audit validator feedback back to the executor when that retry path is valid. Validator pass, controller-run verification, and Git audits are all required before checkpointing; protocol failures, drift, unsafe audits, or exhausted retries route to recovery. Clean final audits automatically fast-forward the checked-out destination and record `integrated` after the full local proof passes.
 
+## Review and Plan
+
+Use `$optim-plans:review-and-plan` when you want the agent to inspect a repository for concrete improvement opportunities before choosing what to implement. It reviews the repo first, then produces ranked opportunities across Documentation, Efficiency/cost, Feature completeness, UX, and Safety/recoverability.
+
+Feature-completeness review must include GitHub open-source project search for inspiration. Each external source records a repository URL, the supported claim, and whether the source came from `gh`, `github-api`, or GitHub-constrained web search when `gh` is unavailable.
+
+The skill asks one opportunity question at a time with a planning-only controller-backed choice. Accepted opportunity IDs become resolved scope for the normal optim-plans flow: `PLAN_v1.md`, refinement, immutable manifest approval, execution, validation, controller verification, and integration gates.
+
+<details>
+<summary><strong>Detailed example: generic Python CLI project</strong></summary>
+
+```text
+You: $optim-plans:review-and-plan Review this Python CLI repo and plan the worthwhile improvements.
+
+AI:  Project: generic Python CLI project.
+     I inspected README.md, pyproject.toml, tests/, src/, and command entry points.
+     I also searched GitHub repositories for comparable Python CLI tooling.
+
+     Ranked opportunities:
+
+     Documentation
+     OPP-001: README documents install and commands, but not exit codes or config file precedence.
+       repo_evidence: README.md, src/config.py
+       repository_url: https://github.com/example/python-cli-reference
+       supported_claim: comparable CLIs document config precedence and command examples
+       source_tool: github-api
+
+     Efficiency/cost
+     OPP-002: test collection is serial even though independent integration tests can run separately.
+
+     Feature completeness
+     OPP-003: long-running commands support start but lack resume and terminate flows.
+
+     UX
+     OPP-004: validation errors are accurate but not grouped by command option.
+
+     Safety/recoverability
+     OPP-005: temporary files are written beside user input without a recovery note.
+
+     Should OPP-003 enter implementation scope?
+
+     1. accept - start/resume/terminate is the highest feature-completeness gap
+     2. defer - document the gap but avoid adding lifecycle commands now
+     3. reject - current one-shot command design is intentional
+     4. Other
+     5. Auto-complete
+
+You: 1
+
+AI:  Recorded OPP-003 as accepted scope. I will pass that opportunity ID into
+     optim-plans and continue through PLAN_v1, refinement, manifest approval,
+     execution, validation, and controller verification before any code lands.
+```
+
+</details>
+
 ## See it in action
 
 ```text
