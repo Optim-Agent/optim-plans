@@ -326,10 +326,15 @@ class SkillContractTests(unittest.TestCase):
             "start-execution",
             "run-item",
             "assign-item",
+            "assign-batch",
             "authorize-spawn",
+            "authorize-batch-spawn",
             "register-agent",
+            "register-batch-agent",
             "complete-item",
+            "complete-batch",
             "advance-item",
+            "advance-batch",
             "host-multi-agent",
             "`spawn_agent`",
             "`wait_agent`",
@@ -337,6 +342,9 @@ class SkillContractTests(unittest.TestCase):
             "assignment nonce",
             "registered handle",
             "retry-item",
+            "retry-batch",
+            "all-or-nothing",
+            "session resume",
             "finish-run",
             "adapter",
             "argv array",
@@ -374,13 +382,21 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("prepare-execution", readme)
         self.assertIn("start-execution", readme)
         self.assertIn("assign-item", readme)
+        self.assertIn("assign-batch", readme)
         self.assertIn("authorize-spawn", readme)
+        self.assertIn("authorize-batch-spawn", readme)
         self.assertIn("register-agent", readme)
+        self.assertIn("register-batch-agent", readme)
         self.assertIn("complete-item", readme)
+        self.assertIn("complete-batch", readme)
         self.assertIn("advance-item", readme)
+        self.assertIn("advance-batch", readme)
         self.assertIn("spawn_agent", readme)
         self.assertIn("wait_agent", readme)
         self.assertIn("run-item", readme)
+        self.assertIn("retry-batch", readme)
+        self.assertIn("all-or-nothing", readme)
+        self.assertIn("session resume", readme)
         self.assertIn("finish-run", readme)
         self.assertIn("$optim-plans:resume-previous-plan", readme)
         self.assertIn("previous-run", readme)

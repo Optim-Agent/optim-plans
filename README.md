@@ -481,6 +481,15 @@ python3 scripts/optim_plans.py register-validator --repo <repo> --item-id TASK-0
 python3 scripts/optim_plans.py complete-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --agent-handle <handle> --result '<json>'
 python3 scripts/optim_plans.py fail-validator --repo <repo> --item-id TASK-001 --reason interrupted --validator-nonce <nonce> --evidence "<summary>"
 
+# Host batch path: assign-batch selects a continuous ready prefix from manifest order.
+python3 scripts/optim_plans.py assign-batch --repo <repo>
+python3 scripts/optim_plans.py authorize-batch-spawn --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --launch-block '<json>'
+python3 scripts/optim_plans.py register-batch-agent --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
+python3 scripts/optim_plans.py complete-batch --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --agent-handle <handle> --evidence "<summary>"
+python3 scripts/optim_plans.py advance-batch --repo <repo> --batch-id <batch-id>
+# batch validation/checkpoint is all-or-nothing; recovery uses retry-batch, not retry-item.
+python3 scripts/optim_plans.py retry-batch --repo <repo> --batch-id <batch-id> --approval-nonce <nonce>
+
 # CLI adapter fallback:
 python3 scripts/optim_plans.py run-item --repo <repo> --item-id TASK-001
 python3 scripts/optim_plans.py status --repo <repo>
@@ -492,6 +501,8 @@ python3 scripts/optim_plans.py finish-run --repo <repo> --outcome kept --approva
 ```
 
 Use `$optim-plans:resume-previous-plan` for a read-only resume check. It reports the active run first, including `resume_command`, `retry_approval_nonce`, or `finish_approval_nonce` when recovery is available; if there is no active pointer, it falls back to `previous-run` and suggests the latest preserved run from Git common state.
+
+Batch launch blocks include prior agent handles when a related executor or validator session can be reused, plus bounded `prior_context` as a session resume fallback when the host cannot resume directly.
 
 ## Why optim-plans?
 

@@ -195,6 +195,45 @@ class ExecutionTests(unittest.TestCase):
         state.start_execution(question["nonce"])
         return state, run_worktree
 
+    def _start_host_batch_execution(
+        self,
+        repo: Path,
+        items: list[dict[str, object]],
+        *,
+        verification_argv: list[str] | None = None,
+        validator: bool = False,
+        validator_retry_limit: int = 1,
+    ):
+        from scripts.optim_plans_core import EXECUTION_PROTOCOL, EXECUTION_SCHEMA_VERSION, OptimPlansState
+
+        state = OptimPlansState.initialize(repo, topic="Host Batch Execution", plan_hash="abc123")
+        run_worktree = state.root / "run-worktrees" / state.run_id
+        manifest: dict[str, object] = {
+            "plan_hash": "abc123",
+            "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+            "integration_destination": "main",
+            "run_worktree_path": str(run_worktree),
+            "worker": self._host_worker(),
+            "verification_argv": verification_argv or [sys.executable, "-c", "pass"],
+            "verification_timeout_seconds": 5,
+            "items": items,
+        }
+        if validator:
+            manifest.update(
+                {
+                    "schema_version": EXECUTION_SCHEMA_VERSION,
+                    "protocol_version": EXECUTION_PROTOCOL,
+                    "validator_worker": self._host_validator(),
+                    "validator_prompt": self._validator_prompt(),
+                    "validator_retry_limit": validator_retry_limit,
+                }
+            )
+        state.persist_execution_manifest(manifest)
+        question = state.request_execution_approval()
+        state.record_answer(question["nonce"], "approve")
+        state.start_execution(question["nonce"])
+        return state, run_worktree
+
     def _start_execution(self, repo: Path, items: list[dict[str, object]], *, integration_destination: str = "main"):
         from scripts.optim_plans_core import OptimPlansState
 
@@ -516,6 +555,298 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(recorded["agent_handle"], "validator-agent")
             self.assertEqual(recorded["launch_nonce"], validator_auth["launch_nonce"])
             self.assertIn("commit", checkpoint)
+
+    def test_batch_selection_uses_ready_prefix_and_projects_status(self) -> None:
+        from scripts.optim_plans_core import ContractError
+
+        items = [{"id": f"TASK-00{index}", "allowed_paths": [f"src/{index}.txt"]} for index in range(1, 5)]
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, _run_worktree = self._start_host_batch_execution(repo, items)
+            assignment = state.assign_batch()
+            self.assertEqual(assignment["item_ids"], ["TASK-001", "TASK-002", "TASK-003", "TASK-004"])
+            self.assertEqual(
+                {item_id: state._item_statuses(state.replay().events, state._execution_manifest_record(state.replay().events)["manifest"])[item_id] for item_id in assignment["item_ids"]},
+                {item_id: "in_progress" for item_id in assignment["item_ids"]},
+            )
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, _run_worktree = self._start_host_batch_execution(repo, items)
+            with self.assertRaisesRegex(ContractError, "continuous ready prefix"):
+                state.assign_batch(["TASK-002", "TASK-003", "TASK-004"])
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, _run_worktree = self._start_host_batch_execution(repo, items + [{"id": "TASK-005", "allowed_paths": ["src/5.txt"]}])
+            base = git(repo, "rev-parse", "--verify", "HEAD")
+            state.append_event("batch_checkpoint_created", {"batch_id": "B-old", "item_ids": ["TASK-001", "TASK-002", "TASK-003"], "commit": base, "changed_files": []})
+            self.assertEqual(state.assign_batch()["item_ids"], ["TASK-004", "TASK-005"])
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, _run_worktree = self._start_host_batch_execution(
+                repo,
+                [
+                    {"id": "TASK-001", "allowed_paths": ["src/1.txt"]},
+                    {"id": "TASK-002", "depends_on": ["TASK-001"], "allowed_paths": ["src/2.txt"]},
+                    {"id": "TASK-003", "allowed_paths": ["src/3.txt"]},
+                ],
+            )
+            self.assertEqual(state.assign_batch()["item_ids"], ["TASK-001"])
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, _run_worktree = self._start_host_batch_execution(repo, items)
+            manifest = state._execution_manifest_record(state.replay().events)["manifest"]
+            cases = [
+                ("batch_started", {}, "in_progress"),
+                ("batch_completed", {}, "completed"),
+                ("batch_validator_assigned", {}, "validating"),
+                ("batch_validator_result_recorded", {"status": "pass"}, "validated"),
+                ("batch_validator_result_recorded", {"status": "fail"}, "failed"),
+                ("batch_worker_failed", {}, "failed"),
+                ("batch_retry_restored", {}, "pending"),
+                ("batch_checkpoint_prepared", {}, "prepared"),
+                ("batch_checkpoint_created", {}, "verified"),
+            ]
+            for event_type, extra, expected in cases:
+                with self.subTest(event_type=event_type):
+                    statuses = state._item_statuses(
+                        [{"type": event_type, "payload": {"batch_id": "B-test", "item_ids": ["TASK-001", "TASK-002"], **extra}}],
+                        manifest,
+                    )
+                    self.assertEqual(statuses["TASK-001"], expected)
+                    self.assertEqual(statuses["TASK-002"], expected)
+
+    def test_batch_host_workflow_blocks_item_commands_and_reuses_context(self) -> None:
+        from scripts.optim_plans_core import ContractError
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            self._add_passing_full_proof_files(repo)
+            state, run_worktree = self._start_host_batch_execution(
+                repo,
+                [
+                    {"id": "TASK-001", "allowed_paths": ["src/1.txt"]},
+                    {"id": "TASK-002", "allowed_paths": ["src/2.txt"]},
+                    {"id": "TASK-003", "allowed_paths": ["src/3.txt"]},
+                    {"id": "TASK-004", "allowed_paths": ["src/4.txt"]},
+                ],
+            )
+            assignment = state.assign_batch(["TASK-001", "TASK-002", "TASK-003"])
+            with self.assertRaisesRegex(ContractError, "active batch"):
+                state.assign_item("TASK-001")
+            authorized = state.authorize_batch_spawn(assignment["batch_id"], assignment["assignment_nonce"], assignment["launch_block"])
+            state.register_batch_agent(
+                assignment["batch_id"],
+                assignment_nonce=assignment["assignment_nonce"],
+                launch_nonce=authorized["launch_nonce"],
+                agent_handle="batch-agent-1",
+                launch_block=assignment["launch_block"],
+            )
+            for index in range(1, 4):
+                target = run_worktree / f"src/{index}.txt"
+                target.parent.mkdir(exist_ok=True)
+                target.write_text(f"{index}\n", encoding="utf-8")
+            state.complete_host_batch(
+                assignment["batch_id"],
+                assignment_nonce=assignment["assignment_nonce"],
+                agent_handle="batch-agent-1",
+                evidence="batch one done",
+            )
+            checkpoint = state.advance_batch(assignment["batch_id"])
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                checkpoint = state.advance_batch(assignment["batch_id"])
+            self.assertIn("commit", checkpoint)
+
+            tail = state.assign_batch()
+            self.assertEqual(tail["item_ids"], ["TASK-004"])
+            self.assertEqual(tail["launch_block"]["prior_executor_agent_handle"], "batch-agent-1")
+            self.assertIn("batch one done", tail["launch_block"]["prior_context"])
+
+    def test_batch_validator_envelope_retry_and_checkpoint_atomicity(self) -> None:
+        from scripts import optim_plans_core as core
+        from scripts.optim_plans_core import ContractError
+
+        items = [
+            {"id": "TASK-001", "allowed_paths": ["src/1.txt"], "validator": {"check_ids": ["VC-1"]}},
+            {"id": "TASK-002", "allowed_paths": ["src/2.txt"], "validator": {"check_ids": ["VC-2"]}},
+            {"id": "TASK-003", "allowed_paths": ["src/3.txt"], "validator": {"check_ids": ["VC-3"]}},
+        ]
+
+        def prepare_batch(state, run_worktree: Path):
+            assignment = state.assign_batch()
+            auth = state.authorize_batch_spawn(assignment["batch_id"], assignment["assignment_nonce"], assignment["launch_block"])
+            state.register_batch_agent(
+                assignment["batch_id"],
+                assignment_nonce=assignment["assignment_nonce"],
+                launch_nonce=auth["launch_nonce"],
+                agent_handle="executor-agent",
+                launch_block=assignment["launch_block"],
+            )
+            for index in range(1, 4):
+                target = run_worktree / f"src/{index}.txt"
+                target.parent.mkdir(exist_ok=True)
+                target.write_text(f"{index}\n", encoding="utf-8")
+            state.complete_host_batch(
+                assignment["batch_id"],
+                assignment_nonce=assignment["assignment_nonce"],
+                agent_handle="executor-agent",
+                evidence="executor done",
+            )
+            validator_assignment = state.advance_batch(assignment["batch_id"])
+            validator_auth = state.authorize_batch_validator_spawn(
+                assignment["batch_id"],
+                validator_assignment["validator_nonce"],
+                validator_assignment["validator_launch_block"],
+            )
+            state.register_batch_validator_agent(
+                assignment["batch_id"],
+                validator_nonce=validator_assignment["validator_nonce"],
+                launch_nonce=validator_auth["launch_nonce"],
+                agent_handle="validator-agent",
+                launch_block=validator_assignment["validator_launch_block"],
+            )
+            return assignment, validator_assignment
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_batch_execution(repo, items, validator=True, validator_retry_limit=1)
+            assignment, validator_assignment = prepare_batch(state, run_worktree)
+            result = {
+                "run_id": state.run_id,
+                "batch_id": assignment["batch_id"],
+                "item_ids": assignment["item_ids"],
+                "attempt": validator_assignment["attempt"],
+                "assignment_nonce": assignment["assignment_nonce"],
+                "nonce": validator_assignment["validator_nonce"],
+                "validator_config_hash": validator_assignment["validator_config_hash"],
+                "validator_prompt_hash": validator_assignment["validator_prompt_hash"],
+                "delta_fingerprint": validator_assignment["delta_fingerprint"],
+                "status": "pass",
+                "evidence": "batch validator passed",
+                "feedback_for_executor": "",
+                "checked_items": ["VC-1", "VC-2", "VC-3"],
+            }
+            recorded = state.record_batch_validator_result(
+                assignment["batch_id"],
+                validator_nonce=validator_assignment["validator_nonce"],
+                agent_handle="validator-agent",
+                result=result,
+            )
+            self.assertEqual(recorded["checked_items"], ["VC-1", "VC-2", "VC-3"])
+            checkpoint = state.advance_batch(assignment["batch_id"])
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                checkpoint = state.advance_batch(assignment["batch_id"])
+            self.assertIn("commit", checkpoint)
+
+        for label, mutate, error in (
+            ("partial_checks", lambda result: {**result, "checked_items": ["VC-1"]}, "checked_items"),
+            ("wrong_item_order", lambda result: {**result, "item_ids": list(reversed(result["item_ids"]))}, "item_ids"),
+            ("wrong_batch", lambda result: {**result, "batch_id": "B-wrong"}, "batch_id"),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as raw:
+                repo = make_repo(Path(raw))
+                state, run_worktree = self._start_host_batch_execution(repo, items, validator=True, validator_retry_limit=0)
+                assignment, validator_assignment = prepare_batch(state, run_worktree)
+                result = {
+                    "run_id": state.run_id,
+                    "batch_id": assignment["batch_id"],
+                    "item_ids": assignment["item_ids"],
+                    "attempt": validator_assignment["attempt"],
+                    "assignment_nonce": assignment["assignment_nonce"],
+                    "nonce": validator_assignment["validator_nonce"],
+                    "validator_config_hash": validator_assignment["validator_config_hash"],
+                    "validator_prompt_hash": validator_assignment["validator_prompt_hash"],
+                    "delta_fingerprint": validator_assignment["delta_fingerprint"],
+                    "status": "pass",
+                    "evidence": "batch validator passed",
+                    "feedback_for_executor": "",
+                    "checked_items": ["VC-1", "VC-2", "VC-3"],
+                }
+                with self.assertRaisesRegex(ContractError, error):
+                    state.record_batch_validator_result(
+                        assignment["batch_id"],
+                        validator_nonce=validator_assignment["validator_nonce"],
+                        agent_handle="validator-agent",
+                        result=mutate(result),
+                    )
+                self.assertNotIn("batch_checkpoint_created", [event["type"] for event in state.replay().events])
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_batch_execution(repo, items, validator=True, validator_retry_limit=1)
+            assignment, validator_assignment = prepare_batch(state, run_worktree)
+            failed = state.record_batch_validator_result(
+                assignment["batch_id"],
+                validator_nonce=validator_assignment["validator_nonce"],
+                agent_handle="validator-agent",
+                result={
+                    "run_id": state.run_id,
+                    "batch_id": assignment["batch_id"],
+                    "item_ids": assignment["item_ids"],
+                    "attempt": validator_assignment["attempt"],
+                    "assignment_nonce": assignment["assignment_nonce"],
+                    "nonce": validator_assignment["validator_nonce"],
+                    "validator_config_hash": validator_assignment["validator_config_hash"],
+                    "validator_prompt_hash": validator_assignment["validator_prompt_hash"],
+                    "delta_fingerprint": validator_assignment["delta_fingerprint"],
+                    "status": "fail",
+                    "evidence": "needs changes",
+                    "feedback_for_executor": "fix batch",
+                    "checked_items": ["VC-1", "VC-2", "VC-3"],
+                },
+            )
+            self.assertTrue(failed["auto_validator_retry"])
+            retry = state.assign_batch()
+            self.assertEqual(retry["batch_id"], assignment["batch_id"])
+            self.assertEqual(retry["item_ids"], assignment["item_ids"])
+            self.assertEqual(retry["attempt"], 2)
+            self.assertEqual(retry["launch_block"]["validator_feedback"]["feedback_for_executor"], "fix batch")
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_batch_execution(repo, [item | {"validator": {"check_ids": [f"VC-{index}"]}} for index, item in enumerate(items, start=1)])
+            assignment = state.assign_batch()
+            auth = state.authorize_batch_spawn(assignment["batch_id"], assignment["assignment_nonce"], assignment["launch_block"])
+            state.register_batch_agent(
+                assignment["batch_id"],
+                assignment_nonce=assignment["assignment_nonce"],
+                launch_nonce=auth["launch_nonce"],
+                agent_handle="executor-agent",
+                launch_block=assignment["launch_block"],
+            )
+            for index in range(1, 4):
+                target = run_worktree / f"src/{index}.txt"
+                target.parent.mkdir(exist_ok=True)
+                target.write_text(f"{index}\n", encoding="utf-8")
+            state.complete_host_batch(
+                assignment["batch_id"],
+                assignment_nonce=assignment["assignment_nonce"],
+                agent_handle="executor-agent",
+                evidence="executor done",
+            )
+            prepared = state.checkpoint_batch(assignment["batch_id"], evidence="verified")
+            if prepared.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+            original_run = core.subprocess.run
+
+            def fail_commit(argv, *args, **kwargs):
+                if isinstance(argv, list) and "commit" in argv:
+                    raise subprocess.CalledProcessError(1, argv)
+                return original_run(argv, *args, **kwargs)
+
+            with mock.patch.object(core.subprocess, "run", side_effect=fail_commit):
+                with self.assertRaises((ContractError, subprocess.CalledProcessError)):
+                    state.checkpoint_batch(assignment["batch_id"], evidence="verified")
+            events = state.replay().events
+            self.assertIn("batch_audit_failed", [event["type"] for event in events])
+            self.assertNotIn("batch_checkpoint_created", [event["type"] for event in events])
+            statuses = state._item_statuses(events, state._execution_manifest_record(events)["manifest"])
+            self.assertEqual({statuses[item_id] for item_id in assignment["item_ids"]}, {"failed"})
 
     def test_host_advance_reports_resume_phases_and_failure_enters_retry(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

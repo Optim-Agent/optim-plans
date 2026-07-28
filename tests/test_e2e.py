@@ -1205,6 +1205,107 @@ class E2ETests(unittest.TestCase):
             self.assertIn("host_agent_registered", [event["type"] for event in events])
             self.assertIn("run_finished", [event["type"] for event in events])
 
+    def test_cli_host_batch_workflow_assigns_completes_and_advances(self) -> None:
+        from scripts.optim_plans_core import host_executor_prompt_hash
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            add_passing_full_proof_files(repo)
+            run_worktree = raw_path / "batch-run-worktree"
+            init = controller_json("init", "--repo", str(repo), "--topic", "Host Batch CLI")
+            manifest = {
+                "plan_hash": "abc123",
+                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "run_worktree_path": str(run_worktree),
+                "worker": {
+                    "mode": "host-multi-agent",
+                    "platform": "codex",
+                    "agent_type": "optim-plans-executor",
+                    "model": "gpt-test",
+                    "reasoning_effort": "high",
+                    "prompt_protocol": "optim-plans-host-executor-v1",
+                    "prompt_hash": host_executor_prompt_hash(),
+                    "allowed_tools": ["Read", "Write", "Edit", "MultiEdit", "Bash"],
+                    "sandbox": "workspace-write",
+                    "result_schema": "optim-plans-worker-result-v1",
+                },
+                "verification_argv": [sys.executable, "-c", "pass"],
+                "items": [
+                    {"id": "TASK-001", "allowed_paths": ["src/1.txt"]},
+                    {"id": "TASK-002", "allowed_paths": ["src/2.txt"]},
+                    {"id": "TASK-003", "allowed_paths": ["src/3.txt"]},
+                ],
+            }
+            manifest_path = raw_path / "batch-manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            write_executor_worker_config(repo)
+            prepared = controller_json("prepare-execution", "--repo", str(repo), "--manifest", str(manifest_path))
+            answer_choice(repo, prepared["nonce"], "approve")
+            controller_json("start-execution", "--repo", str(repo), "--approval-nonce", prepared["nonce"])
+
+            assignment = controller_json("assign-batch", "--repo", str(repo))
+            self.assertEqual(assignment["item_ids"], ["TASK-001", "TASK-002", "TASK-003"])
+            launch_block = json.dumps(assignment["launch_block"], sort_keys=True)
+            authorized = controller_json(
+                "authorize-batch-spawn",
+                "--repo",
+                str(repo),
+                "--batch-id",
+                assignment["batch_id"],
+                "--assignment-nonce",
+                assignment["assignment_nonce"],
+                "--launch-block",
+                launch_block,
+            )
+            controller_json(
+                "register-batch-agent",
+                "--repo",
+                str(repo),
+                "--batch-id",
+                assignment["batch_id"],
+                "--assignment-nonce",
+                assignment["assignment_nonce"],
+                "--launch-nonce",
+                authorized["launch_nonce"],
+                "--agent-handle",
+                "batch-agent-cli",
+                "--launch-block",
+                launch_block,
+            )
+            for index in range(1, 4):
+                target = run_worktree / f"src/{index}.txt"
+                target.parent.mkdir(exist_ok=True)
+                target.write_text(f"{index}\n", encoding="utf-8")
+            controller_json(
+                "complete-batch",
+                "--repo",
+                str(repo),
+                "--batch-id",
+                assignment["batch_id"],
+                "--assignment-nonce",
+                assignment["assignment_nonce"],
+                "--agent-handle",
+                "batch-agent-cli",
+                "--evidence",
+                "batch complete",
+            )
+            advanced = controller_json("advance-batch", "--repo", str(repo), "--batch-id", assignment["batch_id"])
+            if advanced.get("phase") == "awaiting_execution_summary":
+                answer_choice(repo, advanced["question"]["nonce"], "skip-summary")
+                advanced = controller_json("advance-batch", "--repo", str(repo), "--batch-id", assignment["batch_id"])
+            self.assertIn("commit", advanced)
+            events = [
+                json.loads(line)
+                for line in (repo / ".git" / "optim-plans" / "runs" / init["run_id"] / "events.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertIn("batch_host_spawn_authorized", [event["type"] for event in events])
+            self.assertIn("batch_agent_registered", [event["type"] for event in events])
+            self.assertIn("batch_checkpoint_created", [event["type"] for event in events])
+
     def test_cli_execution_manifest_approval_and_start_flow(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
@@ -1399,7 +1500,7 @@ class E2ETests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             raw_path = Path(raw)
             repo = make_repo(raw_path)
-            from scripts.optim_plans_core import OptimPlansState
+            from scripts.optim_plans_core import OptimPlansState, host_executor_prompt_hash
 
             state = OptimPlansState.initialize(repo, topic="Retry Resume", plan_hash="abc123")
             run_worktree = raw_path / "run-worktree"
@@ -1444,6 +1545,70 @@ class E2ETests(unittest.TestCase):
             self.assertIn("retry_approval_nonce", second)
             self.assertIn("--approval-nonce", second["retry_command"])
             self.assertIn("finish_approval_nonce", second)
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            from scripts.optim_plans_core import OptimPlansState
+
+            state = OptimPlansState.initialize(repo, topic="Batch Retry Resume", plan_hash="abc123")
+            run_worktree = raw_path / "batch-run-worktree"
+            base = git(repo, "rev-parse", "--verify", "HEAD")
+            state.persist_execution_manifest(
+                {
+                    "plan_hash": "abc123",
+                    "source_base": base,
+                    "integration_destination": "main",
+                    "run_worktree_path": str(run_worktree),
+                    "worker": {
+                        "mode": "host-multi-agent",
+                        "platform": "codex",
+                        "agent_type": "optim-plans-executor",
+                        "model": "gpt-test",
+                        "reasoning_effort": "high",
+                        "prompt_protocol": "optim-plans-host-executor-v1",
+                        "prompt_hash": host_executor_prompt_hash(),
+                        "allowed_tools": ["Read", "Write", "Edit", "MultiEdit", "Bash"],
+                        "sandbox": "workspace-write",
+                        "result_schema": "optim-plans-worker-result-v1",
+                    },
+                    "verification_argv": [sys.executable, "-c", "pass"],
+                    "items": [
+                        {"id": "TASK-001", "allowed_paths": ["src/1.txt"]},
+                        {"id": "TASK-002", "allowed_paths": ["src/2.txt"]},
+                        {"id": "TASK-003", "allowed_paths": ["src/3.txt"]},
+                    ],
+                }
+            )
+            approval = state.request_execution_approval()
+            state.record_answer(approval["nonce"], "approve")
+            state.start_execution(approval["nonce"])
+            batch_started = {
+                "batch_id": "B-test",
+                "item_ids": ["TASK-001", "TASK-002", "TASK-003"],
+                "attempt": 1,
+                "base_commit": base,
+                "run_worktree": str(run_worktree),
+                "run_branch": f"optim-plans/run/{state.run_id}",
+                "allowed_paths": ["src/1.txt", "src/2.txt", "src/3.txt"],
+                "assignment_nonce": "nonce",
+            }
+            state.append_event("batch_started", batch_started)
+            state.append_event(
+                "batch_worker_failed",
+                {
+                    "batch_id": "B-test",
+                    "item_ids": ["TASK-001", "TASK-002", "TASK-003"],
+                    "attempt": 1,
+                    "base_commit": base,
+                    "run_worktree": str(run_worktree),
+                    "evidence": "failed",
+                },
+            )
+            batch_status = controller_json("status", "--repo", str(repo))
+            self.assertEqual(batch_status["retry_batch_id"], "B-test")
+            self.assertIn("retry-batch", batch_status["resume_command"])
+            self.assertNotIn("retry_item_id", batch_status)
 
     def test_cli_lifecycle_rejects_invalid_states_before_mutation_and_finishes_integrated(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1642,6 +1807,9 @@ class E2ETests(unittest.TestCase):
                 check=True,
             )
             self.assertIn("retry-item", help_result.stdout)
+            self.assertIn("assign-batch", help_result.stdout)
+            self.assertIn("advance-batch", help_result.stdout)
+            self.assertIn("retry-batch", help_result.stdout)
             self.assertIn("finish-run", help_result.stdout)
             self.assertIn("fail-validator", help_result.stdout)
             self.assertNotIn("restore-retry", help_result.stdout)

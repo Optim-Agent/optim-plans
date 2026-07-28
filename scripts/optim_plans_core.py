@@ -60,23 +60,39 @@ LIFECYCLE_EVENT_TYPES = {
     "execution_manifest_created",
     "execution_started",
     "item_started",
+    "batch_started",
     "host_spawn_authorized",
+    "batch_host_spawn_authorized",
     "host_agent_registered",
+    "batch_agent_registered",
     "worker_completed",
+    "batch_completed",
     "worker_failed",
+    "batch_worker_failed",
     "validator_assigned",
+    "batch_validator_assigned",
     "validator_spawn_authorized",
+    "batch_validator_spawn_authorized",
     "validator_agent_registered",
+    "batch_validator_agent_registered",
     "validator_result_recorded",
+    "batch_validator_result_recorded",
     "validator_protocol_rejected",
+    "batch_validator_protocol_rejected",
     "validator_failed",
+    "batch_validator_failed",
     "verification_failed",
+    "batch_verification_failed",
     "audit_failed",
+    "batch_audit_failed",
     "awaiting_retry_decision",
     "retry_restored",
+    "batch_retry_restored",
     "item_verified",
     "checkpoint_prepared",
+    "batch_checkpoint_prepared",
     "checkpoint_created",
+    "batch_checkpoint_created",
     "final_audit_passed",
     "awaiting_integration",
     "integration_verification_failed",
@@ -810,11 +826,22 @@ def lifecycle_status(events: list[dict[str, Any]]) -> str:
             status = "awaiting_integration"
         elif event_type == "awaiting_retry_decision":
             status = "awaiting_retry_decision"
-        elif event_type in {"worker_failed", "validator_protocol_rejected", "validator_failed", "verification_failed", "audit_failed"}:
+        elif event_type in {
+            "worker_failed",
+            "batch_worker_failed",
+            "validator_protocol_rejected",
+            "batch_validator_protocol_rejected",
+            "validator_failed",
+            "batch_validator_failed",
+            "verification_failed",
+            "batch_verification_failed",
+            "audit_failed",
+            "batch_audit_failed",
+        }:
             status = "awaiting_retry_decision"
-        elif event_type == "validator_result_recorded":
+        elif event_type in {"validator_result_recorded", "batch_validator_result_recorded"}:
             status = "verifying" if payload.get("status") == "pass" else "awaiting_retry_decision"
-        elif event_type == "worker_completed":
+        elif event_type in {"worker_completed", "batch_completed"}:
             status = "validating"
         elif event_type == "pending_question" and payload.get("stage") == "execution_launch":
             status = "awaiting_approval"
@@ -823,15 +850,24 @@ def lifecycle_status(events: list[dict[str, Any]]) -> str:
         elif event_type in {
             "execution_started",
             "item_started",
+            "batch_started",
             "host_spawn_authorized",
+            "batch_host_spawn_authorized",
             "host_agent_registered",
+            "batch_agent_registered",
             "validator_assigned",
+            "batch_validator_assigned",
             "validator_spawn_authorized",
+            "batch_validator_spawn_authorized",
             "validator_agent_registered",
+            "batch_validator_agent_registered",
             "retry_restored",
+            "batch_retry_restored",
             "item_verified",
             "checkpoint_prepared",
+            "batch_checkpoint_prepared",
             "checkpoint_created",
+            "batch_checkpoint_created",
             "final_audit_passed",
         }:
             status = "executing"
@@ -1006,6 +1042,7 @@ class OptimPlansState:
         write_json_atomic(self.runtime_file, {"status": lifecycle_status(events), "last_seq": event["seq"]})
         if event_type in {
             "checkpoint_created",
+            "batch_checkpoint_created",
             "final_audit_passed",
             "awaiting_integration",
             "integration_verification_failed",
@@ -1226,7 +1263,7 @@ class OptimPlansState:
                     None,
                 )
                 if answer_seq is None or not any(
-                    candidate["type"] == "retry_restored" and candidate["seq"] > answer_seq
+                    candidate["type"] in {"retry_restored", "batch_retry_restored"} and candidate["seq"] > answer_seq
                     for candidate in events
                 ):
                     return payload
@@ -1282,6 +1319,47 @@ class OptimPlansState:
             "free_form": {"option_id": "other", "required": False},
             "stage": "execution_retry",
             "item_id": item_id,
+            "failed_base_commit": failed_base_commit,
+        }
+        return self._append_event_locked("pending_question", payload)["payload"]
+
+    def _batch_retry_question_payload_locked(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        batch_id: str,
+        item_ids: list[str],
+        failed_base_commit: str,
+    ) -> dict[str, Any]:
+        consumed_nonces = {
+            event.get("payload", {}).get("approval_nonce")
+            for event in events
+            if event["type"] == "batch_retry_restored"
+        }
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if (
+                event["type"] == "pending_question"
+                and payload.get("stage") == "execution_batch_retry"
+                and payload.get("batch_id") == batch_id
+                and payload.get("item_ids") == item_ids
+                and payload.get("failed_base_commit") == failed_base_commit
+                and payload.get("nonce") not in consumed_nonces
+            ):
+                return payload
+        payload = {
+            "nonce": uuid.uuid4().hex,
+            "prompt": f"Approve retry restore for {batch_id}?",
+            "options": [
+                {"id": "approve", "label": "Approve retry", "reason": "restore failed batch worktree once"},
+                {"id": "stop", "label": "Stop", "reason": "preserve failed batch attempt"},
+                {"id": "other", "label": "Other", "reason": "free-form answer"},
+            ],
+            "recommended_option_id": "approve",
+            "free_form": {"option_id": "other", "required": False},
+            "stage": "execution_batch_retry",
+            "batch_id": batch_id,
+            "item_ids": list(item_ids),
             "failed_base_commit": failed_base_commit,
         }
         return self._append_event_locked("pending_question", payload)["payload"]
@@ -1531,7 +1609,7 @@ class OptimPlansState:
 
     def _latest_checkpoint(self, events: list[dict[str, Any]], started: dict[str, Any]) -> str:
         for event in reversed(events):
-            if event["type"] == "checkpoint_created":
+            if event["type"] in {"checkpoint_created", "batch_checkpoint_created"}:
                 return event["payload"]["commit"]
         return started["source_base"]
 
@@ -1875,6 +1953,38 @@ class OptimPlansState:
         )
         return payload
 
+    def _record_batch_attempt_failure_locked(
+        self,
+        event_type: str,
+        batch_id: str,
+        *,
+        evidence: str,
+        start: dict[str, Any],
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "batch_id": batch_id,
+            "item_ids": list(start["item_ids"]),
+            "attempt": start["attempt"],
+            "evidence": bounded_evidence(evidence),
+            "base_commit": start["base_commit"],
+            "run_worktree": start["run_worktree"],
+        }
+        if extra:
+            payload.update(extra)
+        self._append_event_locked(event_type, payload)
+        self._append_event_locked(
+            "awaiting_retry_decision",
+            {
+                "batch_id": batch_id,
+                "item_ids": list(start["item_ids"]),
+                "failure_event": event_type,
+                "base_commit": start["base_commit"],
+                "run_worktree": start["run_worktree"],
+            },
+        )
+        return payload
+
     def record_attempt_failure(self, event_type: str, item_id: str, *, evidence: str) -> dict[str, Any]:
         if event_type not in {"verification_failed", "audit_failed"}:
             raise ContractError(f"unsupported failure event {event_type!r}")
@@ -1884,11 +1994,26 @@ class OptimPlansState:
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
             self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "record-attempt-failure")
             statuses = self._item_statuses(replayed.events, record["manifest"])
             if statuses[item_id] not in {"in_progress", "completed", "validated"}:
                 raise ContractError(f"{item_id} has no active attempt to fail")
             start = self._latest_item_start(replayed.events, item_id)
             return self._record_attempt_failure_locked(event_type, item_id, evidence=evidence, start=start)
+
+    def record_batch_attempt_failure(self, event_type: str, batch_id: str, *, evidence: str) -> dict[str, Any]:
+        if event_type not in {"batch_verification_failed", "batch_audit_failed"}:
+            raise ContractError(f"unsupported failure event {event_type!r}")
+        if not evidence.strip():
+            raise ContractError("failure evidence is required")
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            start = self._latest_batch_start(replayed.events, batch_id)
+            statuses = self._item_statuses(replayed.events, record["manifest"])
+            if any(statuses.get(item_id) not in {"in_progress", "completed", "validated"} for item_id in start["item_ids"]):
+                raise ContractError(f"{batch_id} has no active attempt to fail")
+            return self._record_batch_attempt_failure_locked(event_type, batch_id, evidence=evidence, start=start)
 
     def _worker_result_evidence(self, item_id: str, *, stdout: str, worker_nonce: str) -> str:
         if not stdout.strip():
@@ -1915,7 +2040,15 @@ class OptimPlansState:
             raise ContractError("item is not configured for host-multi-agent execution; use run-item for CLI adapter workers")
         return config
 
+    def _require_host_batch_worker_config(self, manifest: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
+        configs = [self._require_host_worker_config(manifest, item) for item in items]
+        first = stable_json_hash(configs[0])
+        if any(stable_json_hash(config) != first for config in configs[1:]):
+            raise ContractError("batch items must share one approved host worker config")
+        return configs[0]
+
     def _host_launch_block(self, *, item_id: str, start: dict[str, Any], worker_config: dict[str, Any]) -> dict[str, Any]:
+        events = self.replay().events
         block = {
             "run_id": self.run_id,
             "item_id": item_id,
@@ -1926,7 +2059,48 @@ class OptimPlansState:
             "allowed_paths": list(start["allowed_paths"]),
             "worker": worker_config,
         }
-        feedback = self._latest_validator_feedback(self.replay().events, item_id)
+        block.update(
+            self._prior_context(
+                events,
+                role="executor",
+                config_hash=stable_json_hash(worker_config),
+                exclude_nonce=start["assignment_nonce"],
+            )
+        )
+        feedback = self._latest_validator_feedback(events, item_id)
+        if feedback is not None:
+            block["validator_feedback"] = feedback
+        return block
+
+    def _host_batch_launch_block(
+        self,
+        *,
+        batch_id: str,
+        item_ids: list[str],
+        start: dict[str, Any],
+        worker_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        events = self.replay().events
+        block = {
+            "run_id": self.run_id,
+            "batch_id": batch_id,
+            "item_ids": list(item_ids),
+            "attempt": start["attempt"],
+            "assignment_nonce": start["assignment_nonce"],
+            "base_commit": start["base_commit"],
+            "cwd": start["run_worktree"],
+            "allowed_paths": list(start["allowed_paths"]),
+            "worker": worker_config,
+        }
+        block.update(
+            self._prior_context(
+                events,
+                role="executor",
+                config_hash=stable_json_hash(worker_config),
+                exclude_nonce=start["assignment_nonce"],
+            )
+        )
+        feedback = self._latest_batch_validator_feedback(events, batch_id)
         if feedback is not None:
             block["validator_feedback"] = feedback
         return block
@@ -1940,6 +2114,213 @@ class OptimPlansState:
         if not isinstance(check_ids, list):
             raise ContractError(f"validator.check_ids for {item['id']} must be recorded")
         return list(check_ids)
+
+    def _batch_items(self, manifest: dict[str, Any], item_ids: list[str]) -> list[dict[str, Any]]:
+        return [self._manifest_item(manifest, item_id) for item_id in item_ids]
+
+    def _batch_allowed_paths(self, items: list[dict[str, Any]]) -> list[str]:
+        paths: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            for path in self._item_allowed_paths(item):
+                if path not in seen:
+                    paths.append(path)
+                    seen.add(path)
+        return paths
+
+    def _batch_validator_check_ids(self, items: list[dict[str, Any]]) -> list[str]:
+        check_ids: list[str] = []
+        for item in items:
+            check_ids.extend(self._item_validator_check_ids(item))
+        return check_ids
+
+    def _item_is_high_risk(self, item: dict[str, Any]) -> bool:
+        if item.get("high_risk") is True:
+            return True
+        raw = item.get("risk", item.get("validation_risk", item.get("batch")))
+        return isinstance(raw, str) and raw.lower() in {"high", "high-risk", "single", "solo"}
+
+    def _ready_batch_prefix(
+        self,
+        manifest: dict[str, Any],
+        statuses: dict[str, str],
+        *,
+        limit: int = 6,
+    ) -> list[str]:
+        pending_index = next(
+            (index for index, item in enumerate(manifest["items"]) if statuses[item["id"]] == "pending"),
+            None,
+        )
+        if pending_index is None:
+            return []
+        selected: list[str] = []
+        for item in manifest["items"][pending_index:]:
+            item_id = item["id"]
+            if statuses[item_id] != "pending":
+                break
+            if any(statuses.get(dependency) != "verified" for dependency in item.get("depends_on", [])):
+                break
+            if self._item_is_high_risk(item):
+                if not selected:
+                    selected.append(item_id)
+                break
+            selected.append(item_id)
+            if len(selected) >= limit:
+                break
+        return selected
+
+    def _select_batch_item_ids(
+        self,
+        manifest: dict[str, Any],
+        statuses: dict[str, str],
+        requested_item_ids: list[str] | None = None,
+    ) -> list[str]:
+        auto = self._ready_batch_prefix(manifest, statuses)
+        if not auto:
+            raise ContractError("no ready execution batch is available")
+        if requested_item_ids is None:
+            return auto
+        if not requested_item_ids:
+            raise ContractError("batch item_ids are required")
+        if len(requested_item_ids) > 6:
+            raise ContractError("batch may contain at most 6 items")
+        if requested_item_ids != auto[: len(requested_item_ids)]:
+            raise ContractError("batch item_ids must be a continuous ready prefix from manifest order")
+        if len(requested_item_ids) < 3 and len(auto) >= 3 and not self._item_is_high_risk(self._manifest_item(manifest, requested_item_ids[0])):
+            raise ContractError("batch size below 3 is allowed only for tail, dependency, or high-risk exceptions")
+        return list(requested_item_ids)
+
+    def _event_item_ids(self, payload: dict[str, Any]) -> list[str]:
+        raw = payload.get("item_ids")
+        if isinstance(raw, list):
+            return [item_id for item_id in raw if isinstance(item_id, str)]
+        item_id = payload.get("item_id")
+        return [item_id] if isinstance(item_id, str) else []
+
+    def _latest_batch_start(self, events: list[dict[str, Any]], batch_id: str) -> dict[str, Any]:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if payload.get("batch_id") != batch_id:
+                continue
+            if event["type"] == "batch_started":
+                return payload
+            if event["type"] in {"batch_checkpoint_created", "batch_retry_restored"}:
+                break
+        raise ContractError(f"{batch_id} has not been started")
+
+    def _active_batch_for_item(self, events: list[dict[str, Any]], item_id: str) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if item_id not in self._event_item_ids(payload):
+                continue
+            if event["type"] == "batch_started":
+                return payload
+            if event["type"] in {"batch_checkpoint_created", "batch_retry_restored"}:
+                return None
+        return None
+
+    def _reject_item_command_if_batch_member(self, events: list[dict[str, Any]], item_id: str, command: str) -> None:
+        batch = self._active_batch_for_item(events, item_id)
+        if batch is not None:
+            raise ContractError(f"{item_id} belongs to active batch {batch['batch_id']}; use batch commands")
+
+    def _latest_batch_failure(self, events: list[dict[str, Any]], batch_id: str) -> dict[str, Any]:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if payload.get("batch_id") != batch_id:
+                continue
+            if event["type"] in {
+                "batch_worker_failed",
+                "batch_validator_result_recorded",
+                "batch_validator_protocol_rejected",
+                "batch_validator_failed",
+                "batch_verification_failed",
+                "batch_audit_failed",
+            }:
+                if event["type"] != "batch_validator_result_recorded" or payload.get("status") == "fail":
+                    return payload
+            if event["type"] in {"batch_checkpoint_created", "batch_retry_restored", "batch_started"}:
+                break
+        raise ContractError(f"{batch_id} has no failed attempt to retry")
+
+    def _pending_retry_batch(self, events: list[dict[str, Any]]) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if event["type"] == "batch_started":
+                return None
+            if event["type"] == "batch_retry_restored":
+                return payload
+        return None
+
+    def _latest_batch_checkpoint_created(self, events: list[dict[str, Any]], batch_id: str) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if payload.get("batch_id") != batch_id:
+                continue
+            if event["type"] == "batch_checkpoint_created":
+                return payload
+            if event["type"] == "batch_retry_restored":
+                return None
+        return None
+
+    def _latest_batch_checkpoint_prepared(self, events: list[dict[str, Any]], batch_id: str) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if payload.get("batch_id") != batch_id:
+                continue
+            if event["type"] == "batch_checkpoint_prepared":
+                return payload
+            if event["type"] in {"batch_checkpoint_created", "batch_retry_restored"}:
+                return None
+        return None
+
+    def _prior_context(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        role: str,
+        config_hash: str,
+        prompt_hash: str | None = None,
+        exclude_nonce: str | None = None,
+    ) -> dict[str, Any]:
+        handle: str | None = None
+        snippets: list[str] = []
+        registration_types = {
+            "executor": {"host_agent_registered", "batch_agent_registered"},
+            "validator": {"validator_agent_registered", "batch_validator_agent_registered"},
+        }[role]
+        result_types = {
+            "executor": {"worker_completed", "batch_completed"},
+            "validator": {"validator_result_recorded", "batch_validator_result_recorded"},
+        }[role]
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if payload.get("assignment_nonce") == exclude_nonce or payload.get("validator_nonce") == exclude_nonce:
+                continue
+            if event["type"] in registration_types and payload.get(f"{'worker' if role == 'executor' else 'validator'}_config_hash") == config_hash:
+                if role == "validator" and prompt_hash is not None and payload.get("validator_prompt_hash") != prompt_hash:
+                    continue
+                if isinstance(payload.get("agent_handle"), str):
+                    handle = payload["agent_handle"]
+                    break
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if event["type"] not in result_types:
+                continue
+            ids = self._event_item_ids(payload)
+            if not ids:
+                continue
+            evidence = payload.get("evidence")
+            if isinstance(evidence, str) and evidence:
+                snippets.append(f"{','.join(ids)}: {evidence}")
+            if len(snippets) >= 3:
+                break
+        out: dict[str, Any] = {}
+        if handle:
+            out[f"prior_{role}_agent_handle"] = handle
+        if snippets:
+            out["prior_context"] = bounded_evidence("\n".join(reversed(snippets)))
+        return out
 
     def _latest_validator_feedback(self, events: list[dict[str, Any]], item_id: str) -> dict[str, Any] | None:
         saw_validator_retry = False
@@ -1963,6 +2344,30 @@ class OptimPlansState:
                 return None
         return None
 
+    def _latest_batch_validator_feedback(self, events: list[dict[str, Any]], batch_id: str) -> dict[str, Any] | None:
+        saw_validator_retry = False
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if payload.get("batch_id") != batch_id:
+                continue
+            if event["type"] == "batch_retry_restored":
+                if not payload.get("auto_validator_retry"):
+                    return None
+                saw_validator_retry = True
+                continue
+            if saw_validator_retry and event["type"] == "batch_validator_result_recorded" and payload.get("status") == "fail":
+                return {
+                    "batch_id": batch_id,
+                    "item_ids": list(payload.get("item_ids", [])),
+                    "attempt": payload.get("attempt"),
+                    "evidence": payload.get("evidence", ""),
+                    "feedback_for_executor": payload.get("feedback_for_executor", ""),
+                    "checked_items": list(payload.get("checked_items", [])),
+                }
+            if event["type"] == "batch_checkpoint_created":
+                return None
+        return None
+
     def _latest_validator_assignment(self, events: list[dict[str, Any]], item_id: str) -> dict[str, Any] | None:
         for event in reversed(events):
             payload = event.get("payload", {})
@@ -1971,6 +2376,23 @@ class OptimPlansState:
             if event["type"] == "validator_assigned":
                 return payload
             if event["type"] in {"validator_result_recorded", "validator_protocol_rejected", "validator_failed", "retry_restored", "checkpoint_created"}:
+                return None
+        return None
+
+    def _latest_batch_validator_assignment(self, events: list[dict[str, Any]], batch_id: str) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if payload.get("batch_id") != batch_id:
+                continue
+            if event["type"] == "batch_validator_assigned":
+                return payload
+            if event["type"] in {
+                "batch_validator_result_recorded",
+                "batch_validator_protocol_rejected",
+                "batch_validator_failed",
+                "batch_retry_restored",
+                "batch_checkpoint_created",
+            }:
                 return None
         return None
 
@@ -2004,6 +2426,36 @@ class OptimPlansState:
                 return payload
         return None
 
+    def _latest_batch_validator_host_registration(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        validator_nonce: str,
+        agent_handle: str | None = None,
+    ) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if event["type"] != "batch_validator_agent_registered" or payload.get("validator_nonce") != validator_nonce:
+                continue
+            if agent_handle is None or payload.get("agent_handle") == agent_handle:
+                return payload
+        return None
+
+    def _latest_batch_validator_host_authorization(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        validator_nonce: str,
+        launch_nonce: str | None = None,
+    ) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if event["type"] != "batch_validator_spawn_authorized" or payload.get("validator_nonce") != validator_nonce:
+                continue
+            if launch_nonce is None or payload.get("launch_nonce") == launch_nonce:
+                return payload
+        return None
+
     def _item_delta_locked(
         self,
         events: list[dict[str, Any]],
@@ -2027,6 +2479,28 @@ class OptimPlansState:
             "delta_fingerprint": checkpoint_delta_fingerprint(run_worktree, audit["changed_files"]),
         }
 
+    def _batch_delta_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        started: dict[str, Any],
+        start: dict[str, Any],
+    ) -> dict[str, Any]:
+        run_worktree = self._require_run_worktree(started, expected_head=start["base_commit"], clean=False)
+        allowed_paths = self._batch_allowed_paths(self._batch_items(manifest, list(start["item_ids"])))
+        audit = audit_git_delta(
+            run_worktree,
+            allowed_paths=allowed_paths,
+            base_commit=start["base_commit"],
+            head_commit=start["base_commit"],
+        )
+        return {
+            "run_worktree": str(run_worktree),
+            "allowed_paths": allowed_paths,
+            "changed_files": audit["changed_files"],
+            "delta_fingerprint": checkpoint_delta_fingerprint(run_worktree, audit["changed_files"]),
+        }
+
     def _validator_launch_block(
         self,
         *,
@@ -2035,7 +2509,7 @@ class OptimPlansState:
         validator_prompt: dict[str, Any],
         check_ids: list[str],
     ) -> dict[str, Any]:
-        return {
+        block = {
             "run_id": self.run_id,
             "item_id": assignment["item_id"],
             "attempt": assignment["attempt"],
@@ -2051,6 +2525,53 @@ class OptimPlansState:
             "validator": validator_config,
             "validator_prompt": validator_prompt,
         }
+        block.update(
+            self._prior_context(
+                self.replay().events,
+                role="validator",
+                config_hash=assignment["validator_config_hash"],
+                prompt_hash=assignment["validator_prompt_hash"],
+                exclude_nonce=assignment["validator_nonce"],
+            )
+        )
+        return block
+
+    def _batch_validator_launch_block(
+        self,
+        *,
+        assignment: dict[str, Any],
+        validator_config: dict[str, Any],
+        validator_prompt: dict[str, Any],
+        check_ids: list[str],
+    ) -> dict[str, Any]:
+        block = {
+            "run_id": self.run_id,
+            "batch_id": assignment["batch_id"],
+            "item_ids": list(assignment["item_ids"]),
+            "attempt": assignment["attempt"],
+            "assignment_nonce": assignment["assignment_nonce"],
+            "validator_nonce": assignment["validator_nonce"],
+            "base_commit": assignment["base_commit"],
+            "cwd": assignment["run_worktree"],
+            "allowed_paths": list(assignment["allowed_paths"]),
+            "changed_files": list(assignment["changed_files"]),
+            "check_ids": list(check_ids),
+            "delta_fingerprint": assignment["delta_fingerprint"],
+            "validator_config_hash": assignment["validator_config_hash"],
+            "validator_prompt_hash": assignment["validator_prompt_hash"],
+            "validator": validator_config,
+            "validator_prompt": validator_prompt,
+        }
+        block.update(
+            self._prior_context(
+                self.replay().events,
+                role="validator",
+                config_hash=assignment["validator_config_hash"],
+                prompt_hash=assignment["validator_prompt_hash"],
+                exclude_nonce=assignment["validator_nonce"],
+            )
+        )
+        return block
 
     def _validator_assignment_response_locked(
         self,
@@ -2132,6 +2653,85 @@ class OptimPlansState:
             validator_config,
         )
 
+    def _batch_validator_assignment_response_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        assignment: dict[str, Any],
+        validator_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        check_ids = self._batch_validator_check_ids(self._batch_items(manifest, list(assignment["item_ids"])))
+        validator_prompt = manifest["validator_prompt"]
+        launch_block = self._batch_validator_launch_block(
+            assignment=assignment,
+            validator_config=validator_config,
+            validator_prompt=validator_prompt,
+            check_ids=check_ids,
+        )
+        phase = "validator_assigned"
+        if self._latest_batch_validator_host_registration(events, validator_nonce=assignment["validator_nonce"]) is not None:
+            phase = "validator_agent_registered"
+        elif self._latest_batch_validator_host_authorization(events, validator_nonce=assignment["validator_nonce"]) is not None:
+            phase = "validator_spawn_authorized"
+        return {
+            **assignment,
+            "phase": phase,
+            "validator": validator_config,
+            "validator_launch_block": launch_block,
+            "validator_launch_block_hash": stable_json_hash(launch_block),
+        }
+
+    def _assign_batch_validator_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        start: dict[str, Any],
+    ) -> dict[str, Any]:
+        existing = self._latest_batch_validator_assignment(events, start["batch_id"])
+        validator_config = self._validator_config(manifest)
+        if existing is not None:
+            current = self._batch_delta_locked(events, manifest, self._execution_started_record(events), start)
+            if current["delta_fingerprint"] != existing.get("delta_fingerprint"):
+                self._record_batch_attempt_failure_locked(
+                    "batch_audit_failed",
+                    start["batch_id"],
+                    evidence="audit failed: delta fingerprint changed before validator assignment",
+                    start=start,
+                )
+                raise ContractError("delta fingerprint changed before validator assignment")
+            return self._batch_validator_assignment_response_locked(events, manifest, existing, validator_config)
+
+        started = self._execution_started_record(events)
+        try:
+            self._require_protected_metadata_clean(started)
+            delta = self._batch_delta_locked(events, manifest, started, start)
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            self._record_batch_attempt_failure_locked("batch_audit_failed", start["batch_id"], evidence=f"audit failed: {exc}", start=start)
+            raise
+        prompt_hash = manifest["validator_prompt"]["hash"]
+        assignment = {
+            "batch_id": start["batch_id"],
+            "item_ids": list(start["item_ids"]),
+            "attempt": start["attempt"],
+            "assignment_nonce": start["assignment_nonce"],
+            "base_commit": start["base_commit"],
+            "run_worktree": delta["run_worktree"],
+            "run_branch": started["run_branch"],
+            "allowed_paths": delta["allowed_paths"],
+            "changed_files": delta["changed_files"],
+            "validator_nonce": uuid.uuid4().hex,
+            "validator_config_hash": stable_json_hash(validator_config),
+            "validator_prompt_hash": prompt_hash,
+            "delta_fingerprint": delta["delta_fingerprint"],
+        }
+        payload = self._append_event_locked("batch_validator_assigned", assignment)["payload"]
+        return self._batch_validator_assignment_response_locked(
+            [*events, {"type": "batch_validator_assigned", "payload": payload}],
+            manifest,
+            payload,
+            validator_config,
+        )
+
     def _latest_host_registration(
         self,
         events: list[dict[str, Any]],
@@ -2201,6 +2801,7 @@ class OptimPlansState:
             started = self._execution_started_record(replayed.events)
             self._require_protected_metadata_clean(started)
             item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "assign-item")
             worker_config = self._require_host_worker_config(record["manifest"], item)
             worker_config_hash = stable_json_hash(worker_config)
             statuses = self._item_statuses(replayed.events, record["manifest"])
@@ -2264,6 +2865,392 @@ class OptimPlansState:
                 worker_config,
             )
 
+    def _latest_batch_host_registration(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        assignment_nonce: str,
+        agent_handle: str | None = None,
+    ) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if event["type"] != "batch_agent_registered" or payload.get("assignment_nonce") != assignment_nonce:
+                continue
+            if agent_handle is None or payload.get("agent_handle") == agent_handle:
+                return payload
+        return None
+
+    def _latest_batch_host_authorization(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        assignment_nonce: str,
+        launch_nonce: str | None = None,
+    ) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if event["type"] != "batch_host_spawn_authorized" or payload.get("assignment_nonce") != assignment_nonce:
+                continue
+            if launch_nonce is None or payload.get("launch_nonce") == launch_nonce:
+                return payload
+        return None
+
+    def _batch_assignment_response_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        start: dict[str, Any],
+        worker_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        item_ids = list(start["item_ids"])
+        launch_block = self._host_batch_launch_block(
+            batch_id=start["batch_id"],
+            item_ids=item_ids,
+            start=start,
+            worker_config=worker_config,
+        )
+        statuses = self._item_statuses(events, manifest)
+        phases = {statuses[item_id] for item_id in item_ids}
+        phase = phases.pop() if len(phases) == 1 else "mixed"
+        if phase == "in_progress":
+            if self._latest_batch_host_registration(events, assignment_nonce=start["assignment_nonce"]) is not None:
+                phase = "agent_registered"
+            elif self._latest_batch_host_authorization(events, assignment_nonce=start["assignment_nonce"]) is not None:
+                phase = "spawn_authorized"
+            else:
+                phase = "assigned"
+        elif phase == "completed":
+            phase = "worker_completed"
+        elif phase == "verified":
+            phase = "checkpointed"
+        return {
+            **start,
+            "phase": phase,
+            "worker": worker_config,
+            "worker_config_hash": stable_json_hash(worker_config),
+            "launch_block": launch_block,
+            "launch_block_hash": stable_json_hash(launch_block),
+        }
+
+    def _begin_batch_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        started: dict[str, Any],
+        item_ids: list[str],
+        *,
+        batch_id: str | None = None,
+    ) -> dict[str, Any]:
+        items = self._batch_items(manifest, item_ids)
+        worker_config = self._require_host_batch_worker_config(manifest, items)
+        worker_config_hash = stable_json_hash(worker_config)
+        run_worktree = self._require_run_worktree(
+            started,
+            expected_head=self._latest_checkpoint(events, started),
+            clean=True,
+        )
+        batch_id = batch_id or f"B-{uuid.uuid4().hex[:12]}"
+        start = {
+            "batch_id": batch_id,
+            "item_ids": list(item_ids),
+            "attempt": sum(
+                1
+                for event in events
+                if event["type"] == "batch_started" and event.get("payload", {}).get("batch_id") == batch_id
+            )
+            + 1,
+            "base_commit": git(run_worktree, "rev-parse", "--verify", "HEAD"),
+            "run_worktree": str(run_worktree),
+            "run_branch": started["run_branch"],
+            "allowed_paths": self._batch_allowed_paths(items),
+            "assignment_nonce": uuid.uuid4().hex,
+            "worker_config_hash": worker_config_hash,
+        }
+        payload = self._append_event_locked("batch_started", start)["payload"]
+        return self._batch_assignment_response_locked(
+            [*events, {"type": "batch_started", "payload": payload}],
+            manifest,
+            payload,
+            worker_config,
+        )
+
+    def assign_batch(self, item_ids: list[str] | None = None) -> dict[str, Any]:
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing"}, "assign-batch")
+            record = self._execution_manifest_record(replayed.events)
+            started = self._execution_started_record(replayed.events)
+            self._require_protected_metadata_clean(started)
+            statuses = self._item_statuses(replayed.events, record["manifest"])
+            pending_retry = self._pending_retry_batch(replayed.events)
+            if pending_retry is not None:
+                selected_ids = list(pending_retry["item_ids"])
+                if item_ids is not None and item_ids != selected_ids:
+                    raise ContractError("retry batch item_ids must match the failed batch")
+                return self._begin_batch_locked(
+                    replayed.events,
+                    record["manifest"],
+                    started,
+                    selected_ids,
+                    batch_id=pending_retry["batch_id"],
+                )
+            active = next(
+                (
+                    event.get("payload", {})
+                    for event in reversed(replayed.events)
+                    if event["type"] == "batch_started"
+                    and any(statuses.get(current) in {"in_progress", "completed", "validating", "validated", "prepared", "failed"} for current in event.get("payload", {}).get("item_ids", []))
+                ),
+                None,
+            )
+            if active is not None:
+                if item_ids is not None and item_ids != active.get("item_ids"):
+                    raise ContractError(f"another batch attempt must be resolved first: {active['batch_id']}")
+                if all(statuses.get(current) == "in_progress" for current in active.get("item_ids", [])):
+                    items = self._batch_items(record["manifest"], list(active["item_ids"]))
+                    worker_config = self._require_host_batch_worker_config(record["manifest"], items)
+                    return self._batch_assignment_response_locked(
+                        replayed.events,
+                        record["manifest"],
+                        active,
+                        worker_config,
+                    )
+                raise ContractError(f"another batch attempt must be resolved first: {active['batch_id']}")
+            blocked = [
+                current_id
+                for current_id, status in statuses.items()
+                if status in {"in_progress", "completed", "validating", "validated", "prepared", "failed"}
+            ]
+            if blocked:
+                raise ContractError(f"another item attempt must be resolved first: {blocked[0]}")
+            selected_ids = self._select_batch_item_ids(record["manifest"], statuses, item_ids)
+            return self._begin_batch_locked(replayed.events, record["manifest"], started, selected_ids)
+
+    def _require_host_batch_assignment_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        batch_id: str,
+        assignment_nonce: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not isinstance(assignment_nonce, str) or not assignment_nonce.strip():
+            raise ContractError("assignment nonce is required")
+        start = self._latest_batch_start(events, batch_id)
+        statuses = self._item_statuses(events, manifest)
+        if any(statuses.get(item_id) != "in_progress" for item_id in start["item_ids"]):
+            raise ContractError(f"{batch_id} does not have an active host assignment")
+        if start.get("assignment_nonce") != assignment_nonce:
+            raise ContractError("assignment nonce does not match active batch assignment")
+        worker_config = self._require_host_batch_worker_config(manifest, self._batch_items(manifest, list(start["item_ids"])))
+        if start.get("worker_config_hash") != stable_json_hash(worker_config):
+            raise ContractError("active batch assignment is not bound to the approved host worker config")
+        return start, worker_config
+
+    def authorize_batch_spawn(self, batch_id: str, assignment_nonce: str, launch_block: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(launch_block, dict):
+            raise ContractError("launch block must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing"}, "authorize-batch-spawn")
+            record = self._execution_manifest_record(replayed.events)
+            start, worker_config = self._require_host_batch_assignment_locked(replayed.events, record["manifest"], batch_id, assignment_nonce)
+            expected = self._host_batch_launch_block(
+                batch_id=batch_id,
+                item_ids=list(start["item_ids"]),
+                start=start,
+                worker_config=worker_config,
+            )
+            if launch_block != expected:
+                raise ContractError("host launch block does not match the approved batch assignment")
+            if self._latest_batch_host_registration(replayed.events, assignment_nonce=assignment_nonce) is not None:
+                raise ContractError("host agent is already registered for this batch assignment")
+            launch_block_hash = stable_json_hash(launch_block)
+            existing = self._latest_batch_host_authorization(replayed.events, assignment_nonce=assignment_nonce)
+            if existing is not None:
+                if existing.get("launch_block_hash") != launch_block_hash:
+                    raise ContractError("active batch host spawn authorization is bound to a different launch block")
+                return existing
+            payload = {
+                "batch_id": batch_id,
+                "item_ids": list(start["item_ids"]),
+                "attempt": start["attempt"],
+                "assignment_nonce": assignment_nonce,
+                "launch_nonce": uuid.uuid4().hex,
+                "worker_config_hash": stable_json_hash(worker_config),
+                "launch_block_hash": launch_block_hash,
+                "launch_block": launch_block,
+            }
+            return self._append_event_locked("batch_host_spawn_authorized", payload)["payload"]
+
+    def register_batch_agent(
+        self,
+        batch_id: str,
+        *,
+        assignment_nonce: str,
+        launch_nonce: str,
+        agent_handle: str,
+        launch_block: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(agent_handle, str) or not agent_handle.strip():
+            raise ContractError("agent handle is required")
+        if not isinstance(launch_nonce, str) or not launch_nonce.strip():
+            raise ContractError("launch nonce is required")
+        if not isinstance(launch_block, dict):
+            raise ContractError("launch block must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing"}, "register-batch-agent")
+            record = self._execution_manifest_record(replayed.events)
+            start, worker_config = self._require_host_batch_assignment_locked(replayed.events, record["manifest"], batch_id, assignment_nonce)
+            expected = self._host_batch_launch_block(
+                batch_id=batch_id,
+                item_ids=list(start["item_ids"]),
+                start=start,
+                worker_config=worker_config,
+            )
+            if launch_block != expected:
+                raise ContractError("host launch block does not match the approved batch assignment")
+            authorization = self._latest_batch_host_authorization(
+                replayed.events,
+                assignment_nonce=assignment_nonce,
+                launch_nonce=launch_nonce,
+            )
+            if authorization is None:
+                raise ContractError("unknown or stale host launch nonce")
+            if authorization.get("launch_block_hash") != stable_json_hash(launch_block):
+                raise ContractError("host launch nonce is not bound to this launch block")
+            if any(
+                event["type"] == "batch_agent_registered"
+                and event.get("payload", {}).get("launch_nonce") == launch_nonce
+                for event in replayed.events
+            ):
+                raise ContractError("host launch nonce is stale or already used")
+            payload = {
+                "batch_id": batch_id,
+                "item_ids": list(start["item_ids"]),
+                "attempt": start["attempt"],
+                "assignment_nonce": assignment_nonce,
+                "launch_nonce": launch_nonce,
+                "agent_handle": agent_handle,
+                "worker_config_hash": stable_json_hash(worker_config),
+                "launch_block_hash": stable_json_hash(launch_block),
+            }
+            return self._append_event_locked("batch_agent_registered", payload)["payload"]
+
+    def _require_registered_batch_agent_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        batch_id: str,
+        *,
+        assignment_nonce: str,
+        agent_handle: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not isinstance(agent_handle, str) or not agent_handle.strip():
+            raise ContractError("agent handle is required")
+        start, _worker_config = self._require_host_batch_assignment_locked(events, manifest, batch_id, assignment_nonce)
+        registration = self._latest_batch_host_registration(
+            events,
+            assignment_nonce=assignment_nonce,
+            agent_handle=agent_handle,
+        )
+        if registration is None:
+            raise ContractError("registered host agent handle does not match active batch assignment")
+        return start, registration
+
+    def complete_host_batch(
+        self,
+        batch_id: str,
+        *,
+        assignment_nonce: str,
+        agent_handle: str,
+        evidence: str,
+    ) -> dict[str, Any]:
+        if not evidence.strip():
+            raise ContractError("worker completion evidence is required")
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            start, registration = self._require_registered_batch_agent_locked(
+                replayed.events,
+                record["manifest"],
+                batch_id,
+                assignment_nonce=assignment_nonce,
+                agent_handle=agent_handle,
+            )
+            payload = {
+                "batch_id": batch_id,
+                "item_ids": list(start["item_ids"]),
+                "attempt": start["attempt"],
+                "assignment_nonce": assignment_nonce,
+                "agent_handle": agent_handle,
+                "launch_nonce": registration["launch_nonce"],
+                "evidence": bounded_evidence(evidence),
+            }
+            return self._append_event_locked("batch_completed", payload)["payload"]
+
+    def fail_host_batch(
+        self,
+        batch_id: str,
+        *,
+        assignment_nonce: str,
+        agent_handle: str | None = None,
+        launch_nonce: str | None = None,
+        evidence: str,
+    ) -> dict[str, Any]:
+        if not evidence.strip():
+            raise ContractError("worker failure evidence is required")
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            if agent_handle is not None:
+                start, registration = self._require_registered_batch_agent_locked(
+                    replayed.events,
+                    record["manifest"],
+                    batch_id,
+                    assignment_nonce=assignment_nonce,
+                    agent_handle=agent_handle,
+                )
+                extra = {
+                    "assignment_nonce": assignment_nonce,
+                    "agent_handle": agent_handle,
+                    "launch_nonce": registration["launch_nonce"],
+                }
+            else:
+                if not isinstance(launch_nonce, str) or not launch_nonce.strip():
+                    raise ContractError("launch nonce is required when failing a host batch without an agent handle")
+                start, _worker_config = self._require_host_batch_assignment_locked(
+                    replayed.events,
+                    record["manifest"],
+                    batch_id,
+                    assignment_nonce,
+                )
+                authorization = self._latest_batch_host_authorization(
+                    replayed.events,
+                    assignment_nonce=assignment_nonce,
+                    launch_nonce=launch_nonce,
+                )
+                if authorization is None:
+                    raise ContractError("unknown or stale host launch nonce")
+                if any(
+                    event["type"] == "batch_agent_registered"
+                    and event.get("payload", {}).get("launch_nonce") == launch_nonce
+                    for event in replayed.events
+                ):
+                    raise ContractError("agent handle is required after host launch nonce registration")
+                extra = {
+                    "assignment_nonce": assignment_nonce,
+                    "launch_nonce": launch_nonce,
+                    "agent_handle_lost": True,
+                }
+            return self._record_batch_attempt_failure_locked(
+                "batch_worker_failed",
+                batch_id,
+                evidence=evidence,
+                start=start,
+                extra=extra,
+            )
+
     def _require_validator_assignment_locked(
         self,
         events: list[dict[str, Any]],
@@ -2294,6 +3281,7 @@ class OptimPlansState:
             self._require_lifecycle_locked(replayed.events, {"executing", "validating"}, "authorize-validator-spawn")
             record = self._execution_manifest_record(replayed.events)
             item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "authorize-validator-spawn")
             validator_config = self._validator_config(record["manifest"])
             if validator_config.get("mode") != "host-multi-agent":
                 raise ContractError("validator is not configured for host-multi-agent execution")
@@ -2347,6 +3335,7 @@ class OptimPlansState:
             self._require_lifecycle_locked(replayed.events, {"executing", "validating"}, "register-validator")
             record = self._execution_manifest_record(replayed.events)
             item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "register-validator")
             validator_config = self._validator_config(record["manifest"])
             assignment = self._require_validator_assignment_locked(replayed.events, record["manifest"], item, validator_nonce)
             expected = self._validator_launch_block(
@@ -2384,6 +3373,130 @@ class OptimPlansState:
                 "launch_block_hash": stable_json_hash(launch_block),
             }
             return self._append_event_locked("validator_agent_registered", payload)["payload"]
+
+    def _require_batch_validator_assignment_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        batch_id: str,
+        validator_nonce: str,
+    ) -> dict[str, Any]:
+        if not isinstance(validator_nonce, str) or not validator_nonce.strip():
+            raise ContractError("validator nonce is required")
+        start = self._latest_batch_start(events, batch_id)
+        statuses = self._item_statuses(events, manifest)
+        if any(statuses.get(item_id) != "validating" for item_id in start["item_ids"]):
+            raise ContractError(f"{batch_id} does not have an active validator assignment")
+        assignment = self._latest_batch_validator_assignment(events, batch_id)
+        if assignment is None or assignment.get("validator_nonce") != validator_nonce:
+            raise ContractError("validator nonce does not match active batch validator assignment")
+        validator_config = self._validator_config(manifest)
+        if assignment.get("validator_config_hash") != stable_json_hash(validator_config):
+            raise ContractError("active batch validator assignment is not bound to the approved validator config")
+        if assignment.get("validator_prompt_hash") != manifest["validator_prompt"]["hash"]:
+            raise ContractError("active batch validator assignment is not bound to the approved validator prompt")
+        return assignment
+
+    def authorize_batch_validator_spawn(self, batch_id: str, validator_nonce: str, launch_block: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(launch_block, dict):
+            raise ContractError("validator launch block must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing", "validating"}, "authorize-batch-validator-spawn")
+            record = self._execution_manifest_record(replayed.events)
+            validator_config = self._validator_config(record["manifest"])
+            if validator_config.get("mode") != "host-multi-agent":
+                raise ContractError("validator is not configured for host-multi-agent execution")
+            assignment = self._require_batch_validator_assignment_locked(replayed.events, record["manifest"], batch_id, validator_nonce)
+            expected = self._batch_validator_launch_block(
+                assignment=assignment,
+                validator_config=validator_config,
+                validator_prompt=record["manifest"]["validator_prompt"],
+                check_ids=self._batch_validator_check_ids(self._batch_items(record["manifest"], list(assignment["item_ids"]))),
+            )
+            if launch_block != expected:
+                raise ContractError("validator launch block does not match the approved batch validator assignment")
+            if self._latest_batch_validator_host_registration(replayed.events, validator_nonce=validator_nonce) is not None:
+                raise ContractError("validator agent is already registered for this batch assignment")
+            launch_block_hash = stable_json_hash(launch_block)
+            existing = self._latest_batch_validator_host_authorization(replayed.events, validator_nonce=validator_nonce)
+            if existing is not None:
+                if existing.get("launch_block_hash") != launch_block_hash:
+                    raise ContractError("active batch validator spawn authorization is bound to a different launch block")
+                return existing
+            payload = {
+                "batch_id": batch_id,
+                "item_ids": list(assignment["item_ids"]),
+                "attempt": assignment["attempt"],
+                "assignment_nonce": assignment["assignment_nonce"],
+                "validator_nonce": validator_nonce,
+                "launch_nonce": uuid.uuid4().hex,
+                "validator_config_hash": assignment["validator_config_hash"],
+                "validator_prompt_hash": assignment["validator_prompt_hash"],
+                "delta_fingerprint": assignment["delta_fingerprint"],
+                "launch_block_hash": launch_block_hash,
+                "launch_block": launch_block,
+            }
+            return self._append_event_locked("batch_validator_spawn_authorized", payload)["payload"]
+
+    def register_batch_validator_agent(
+        self,
+        batch_id: str,
+        *,
+        validator_nonce: str,
+        launch_nonce: str,
+        agent_handle: str,
+        launch_block: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(agent_handle, str) or not agent_handle.strip():
+            raise ContractError("validator agent handle is required")
+        if not isinstance(launch_nonce, str) or not launch_nonce.strip():
+            raise ContractError("validator launch nonce is required")
+        if not isinstance(launch_block, dict):
+            raise ContractError("validator launch block must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing", "validating"}, "register-batch-validator")
+            record = self._execution_manifest_record(replayed.events)
+            validator_config = self._validator_config(record["manifest"])
+            assignment = self._require_batch_validator_assignment_locked(replayed.events, record["manifest"], batch_id, validator_nonce)
+            expected = self._batch_validator_launch_block(
+                assignment=assignment,
+                validator_config=validator_config,
+                validator_prompt=record["manifest"]["validator_prompt"],
+                check_ids=self._batch_validator_check_ids(self._batch_items(record["manifest"], list(assignment["item_ids"]))),
+            )
+            if launch_block != expected:
+                raise ContractError("validator launch block does not match the approved batch validator assignment")
+            authorization = self._latest_batch_validator_host_authorization(
+                replayed.events,
+                validator_nonce=validator_nonce,
+                launch_nonce=launch_nonce,
+            )
+            if authorization is None:
+                raise ContractError("unknown or stale validator launch nonce")
+            if authorization.get("launch_block_hash") != stable_json_hash(launch_block):
+                raise ContractError("validator launch nonce is not bound to this launch block")
+            if any(
+                event["type"] == "batch_validator_agent_registered"
+                and event.get("payload", {}).get("launch_nonce") == launch_nonce
+                for event in replayed.events
+            ):
+                raise ContractError("validator launch nonce is stale or already used")
+            payload = {
+                "batch_id": batch_id,
+                "item_ids": list(assignment["item_ids"]),
+                "attempt": assignment["attempt"],
+                "assignment_nonce": assignment["assignment_nonce"],
+                "validator_nonce": validator_nonce,
+                "launch_nonce": launch_nonce,
+                "agent_handle": agent_handle,
+                "validator_config_hash": assignment["validator_config_hash"],
+                "validator_prompt_hash": assignment["validator_prompt_hash"],
+                "delta_fingerprint": assignment["delta_fingerprint"],
+                "launch_block_hash": stable_json_hash(launch_block),
+            }
+            return self._append_event_locked("batch_validator_agent_registered", payload)["payload"]
 
     def _reject_validator_result_locked(
         self,
@@ -2466,6 +3579,94 @@ class OptimPlansState:
             "delta_fingerprint": assignment["delta_fingerprint"],
         }
 
+    def _reject_batch_validator_result_locked(
+        self,
+        batch_id: str,
+        *,
+        evidence: str,
+        assignment: dict[str, Any],
+        start: dict[str, Any],
+    ) -> None:
+        self._record_batch_attempt_failure_locked(
+            "batch_validator_protocol_rejected",
+            batch_id,
+            evidence=evidence,
+            start=start,
+            extra={
+                "attempt": assignment["attempt"],
+                "assignment_nonce": assignment["assignment_nonce"],
+                "validator_nonce": assignment["validator_nonce"],
+                "validator_config_hash": assignment["validator_config_hash"],
+                "validator_prompt_hash": assignment["validator_prompt_hash"],
+                "delta_fingerprint": assignment["delta_fingerprint"],
+            },
+        )
+
+    def _batch_validator_result_payload(
+        self,
+        result: dict[str, Any],
+        *,
+        assignment: dict[str, Any],
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        for key in (
+            "run_id",
+            "batch_id",
+            "item_ids",
+            "attempt",
+            "assignment_nonce",
+            "nonce",
+            "validator_config_hash",
+            "validator_prompt_hash",
+            "delta_fingerprint",
+            "status",
+            "evidence",
+            "feedback_for_executor",
+            "checked_items",
+        ):
+            if key not in result:
+                raise ContractError(f"validator result is missing {key!r}")
+        expected = {
+            "run_id": self.run_id,
+            "batch_id": assignment["batch_id"],
+            "item_ids": assignment["item_ids"],
+            "attempt": assignment["attempt"],
+            "assignment_nonce": assignment["assignment_nonce"],
+            "nonce": assignment["validator_nonce"],
+            "validator_config_hash": assignment["validator_config_hash"],
+            "validator_prompt_hash": assignment["validator_prompt_hash"],
+            "delta_fingerprint": assignment["delta_fingerprint"],
+        }
+        for key, value in expected.items():
+            if result.get(key) != value:
+                raise ContractError(f"validator result {key} does not match assignment")
+        if result["status"] not in {"pass", "fail"}:
+            raise ContractError("validator result status must be pass or fail")
+        if not isinstance(result["evidence"], str) or not result["evidence"].strip():
+            raise ContractError("validator result evidence is required")
+        if not isinstance(result["feedback_for_executor"], str):
+            raise ContractError("validator result feedback_for_executor must be a string")
+        checked_items = result["checked_items"]
+        expected_checks = self._batch_validator_check_ids(items)
+        if checked_items != expected_checks:
+            raise ContractError("validator result checked_items does not match batch check IDs")
+        return {
+            "batch_id": assignment["batch_id"],
+            "item_ids": list(assignment["item_ids"]),
+            "attempt": assignment["attempt"],
+            "assignment_nonce": assignment["assignment_nonce"],
+            "validator_nonce": assignment["validator_nonce"],
+            "status": result["status"],
+            "evidence": bounded_evidence(result["evidence"]),
+            "feedback_for_executor": bounded_evidence(result["feedback_for_executor"]),
+            "checked_items": list(checked_items),
+            "base_commit": assignment["base_commit"],
+            "run_worktree": assignment["run_worktree"],
+            "changed_files": list(assignment["changed_files"]),
+            "validator_config_hash": assignment["validator_config_hash"],
+            "validator_prompt_hash": assignment["validator_prompt_hash"],
+            "delta_fingerprint": assignment["delta_fingerprint"],
+        }
     def _auto_restore_validator_retry_locked(
         self,
         events: list[dict[str, Any]],
@@ -2517,6 +3718,59 @@ class OptimPlansState:
         }
         return self._append_event_locked("retry_restored", payload)["payload"]
 
+    def _auto_restore_batch_validator_retry_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        start: dict[str, Any],
+        result_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        batch_id = start["batch_id"]
+        retries = sum(
+            1
+            for event in events
+            if event["type"] == "batch_validator_result_recorded"
+            and event.get("payload", {}).get("batch_id") == batch_id
+            and event.get("payload", {}).get("status") == "fail"
+        )
+        if retries > manifest["validator_retry_limit"]:
+            self._append_event_locked(
+                "awaiting_retry_decision",
+                {
+                    "batch_id": batch_id,
+                    "item_ids": list(start["item_ids"]),
+                    "failure_event": "batch_validator_result_recorded",
+                    "base_commit": start["base_commit"],
+                    "run_worktree": start["run_worktree"],
+                },
+            )
+            return result_payload
+        started = self._execution_started_record(events)
+        try:
+            self._require_protected_metadata_clean(started)
+            delta = self._batch_delta_locked(events, manifest, started, start)
+            if delta["delta_fingerprint"] != result_payload["delta_fingerprint"]:
+                raise ContractError("delta fingerprint changed before validator retry restore")
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            self._record_batch_attempt_failure_locked("batch_audit_failed", batch_id, evidence=f"audit failed: {exc}", start=start)
+            raise
+        run_worktree = Path(start["run_worktree"])
+        git(run_worktree, "reset", "--hard", start["base_commit"])
+        git(run_worktree, "clean", "-fdx")
+        payload = {
+            "batch_id": batch_id,
+            "item_ids": list(start["item_ids"]),
+            "approval_nonce": None,
+            "auto_approved": True,
+            "auto_validator_retry": True,
+            "restored_to": start["base_commit"],
+            "run_worktree": str(run_worktree),
+            "validator_nonce": result_payload["validator_nonce"],
+            "feedback_for_executor": result_payload["feedback_for_executor"],
+            "evidence": result_payload["evidence"],
+        }
+        return self._append_event_locked("batch_retry_restored", payload)["payload"]
+
     def record_validator_result(
         self,
         item_id: str,
@@ -2531,6 +3785,7 @@ class OptimPlansState:
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
             item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "complete-validator")
             assignment = self._require_validator_assignment_locked(replayed.events, record["manifest"], item, validator_nonce)
             start = self._latest_item_start(replayed.events, item_id)
             validator_config = self._validator_config(record["manifest"])
@@ -2573,6 +3828,65 @@ class OptimPlansState:
                 )
             return recorded
 
+    def record_batch_validator_result(
+        self,
+        batch_id: str,
+        *,
+        validator_nonce: str,
+        result: dict[str, Any],
+        agent_handle: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise ContractError("validator result must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            assignment = self._require_batch_validator_assignment_locked(replayed.events, record["manifest"], batch_id, validator_nonce)
+            start = self._latest_batch_start(replayed.events, batch_id)
+            items = self._batch_items(record["manifest"], list(assignment["item_ids"]))
+            validator_config = self._validator_config(record["manifest"])
+            if validator_config.get("mode") == "host-multi-agent":
+                if agent_handle is None:
+                    raise ContractError("validator agent handle is required for host validator results")
+                registration = self._latest_batch_validator_host_registration(
+                    replayed.events,
+                    validator_nonce=validator_nonce,
+                    agent_handle=agent_handle,
+                )
+                if registration is None:
+                    raise ContractError("registered validator agent handle does not match active assignment")
+            else:
+                registration = None
+            try:
+                current = self._batch_delta_locked(
+                    replayed.events,
+                    record["manifest"],
+                    self._execution_started_record(replayed.events),
+                    start,
+                )
+                if current["delta_fingerprint"] != assignment["delta_fingerprint"]:
+                    raise ContractError("delta fingerprint changed before validator result receipt")
+                payload = self._batch_validator_result_payload(result, assignment=assignment, items=items)
+            except ContractError as exc:
+                self._reject_batch_validator_result_locked(
+                    batch_id,
+                    evidence=f"validator result rejected: {exc}",
+                    assignment=assignment,
+                    start=start,
+                )
+                raise
+            if registration is not None:
+                payload.update({"agent_handle": agent_handle, "launch_nonce": registration["launch_nonce"]})
+            recorded = self._append_event_locked("batch_validator_result_recorded", payload)["payload"]
+            if recorded["status"] == "fail":
+                return self._auto_restore_batch_validator_retry_locked(
+                    [*replayed.events, {"type": "batch_validator_result_recorded", "payload": recorded}],
+                    record["manifest"],
+                    start,
+                    recorded,
+                )
+            return recorded
+
     def fail_validator(
         self,
         item_id: str,
@@ -2589,6 +3903,7 @@ class OptimPlansState:
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
             item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "fail-validator")
             assignment = self._latest_validator_assignment(replayed.events, item_id)
             if assignment is None:
                 raise ContractError(f"{item_id} has no active validator assignment")
@@ -2629,6 +3944,64 @@ class OptimPlansState:
                 extra=extra,
             )
 
+    def fail_batch_validator(
+        self,
+        batch_id: str,
+        *,
+        reason: str,
+        validator_nonce: str | None = None,
+        agent_handle: str | None = None,
+        launch_nonce: str | None = None,
+        evidence: str = "",
+    ) -> dict[str, Any]:
+        if reason not in {"process", "crash", "timeout", "interrupted", "unknown"}:
+            raise ContractError("validator failure reason must be process, crash, timeout, interrupted, or unknown")
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            assignment = self._latest_batch_validator_assignment(replayed.events, batch_id)
+            if assignment is None:
+                raise ContractError(f"{batch_id} has no active validator assignment")
+            if validator_nonce is not None and assignment.get("validator_nonce") != validator_nonce:
+                raise ContractError("validator nonce does not match active validator assignment")
+            start = self._latest_batch_start(replayed.events, batch_id)
+            extra = {
+                "attempt": assignment["attempt"],
+                "assignment_nonce": assignment["assignment_nonce"],
+                "validator_nonce": assignment["validator_nonce"],
+                "reason": reason,
+                "validator_config_hash": assignment["validator_config_hash"],
+                "validator_prompt_hash": assignment["validator_prompt_hash"],
+                "delta_fingerprint": assignment["delta_fingerprint"],
+            }
+            if agent_handle is not None:
+                registration = self._latest_batch_validator_host_registration(
+                    replayed.events,
+                    validator_nonce=assignment["validator_nonce"],
+                    agent_handle=agent_handle,
+                )
+                if registration is None:
+                    raise ContractError("registered validator agent handle does not match active assignment")
+                extra.update({"agent_handle": agent_handle, "launch_nonce": registration["launch_nonce"]})
+            elif launch_nonce is not None:
+                authorization = self._latest_batch_validator_host_authorization(
+                    replayed.events,
+                    validator_nonce=assignment["validator_nonce"],
+                    launch_nonce=launch_nonce,
+                )
+                if authorization is None:
+                    raise ContractError("unknown or stale validator launch nonce")
+                extra.update({"launch_nonce": launch_nonce, "agent_handle_lost": True})
+            # record["manifest"] is read above to keep the manifest event validated before failure recording.
+            _ = record
+            return self._record_batch_attempt_failure_locked(
+                "batch_validator_failed",
+                batch_id,
+                evidence=evidence or f"validator {reason}",
+                start=start,
+                extra=extra,
+            )
+
     def assign_validator(self, item_id: str) -> dict[str, Any]:
         with self.controller_lock():
             replayed = self.replay()
@@ -2636,6 +4009,7 @@ class OptimPlansState:
             if not self._manifest_uses_validator(record["manifest"]):
                 raise ContractError("execution manifest does not use validator workers")
             item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "assign-validator")
             statuses = self._item_statuses(replayed.events, record["manifest"])
             if statuses[item_id] == "validating":
                 assignment = self._latest_validator_assignment(replayed.events, item_id)
@@ -2653,15 +4027,47 @@ class OptimPlansState:
             start = self._latest_item_start(replayed.events, item_id)
             return self._assign_validator_locked(replayed.events, record["manifest"], item, start)
 
+    def assign_batch_validator(self, batch_id: str) -> dict[str, Any]:
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            if not self._manifest_uses_validator(record["manifest"]):
+                raise ContractError("execution manifest does not use validator workers")
+            start = self._latest_batch_start(replayed.events, batch_id)
+            statuses = self._item_statuses(replayed.events, record["manifest"])
+            if all(statuses.get(item_id) == "validating" for item_id in start["item_ids"]):
+                assignment = self._latest_batch_validator_assignment(replayed.events, batch_id)
+                if assignment is None:
+                    raise ContractError(f"{batch_id} validator assignment is missing")
+                return self._batch_validator_assignment_response_locked(
+                    replayed.events,
+                    record["manifest"],
+                    assignment,
+                    self._validator_config(record["manifest"]),
+                )
+            if any(statuses.get(item_id) != "completed" for item_id in start["item_ids"]):
+                raise ContractError(f"{batch_id} is not ready for validator assignment")
+            return self._assign_batch_validator_locked(replayed.events, record["manifest"], start)
+
     def reject_validator_protocol(self, item_id: str, *, validator_nonce: str, evidence: str) -> dict[str, Any]:
         with self.controller_lock():
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
             item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "complete-validator")
             assignment = self._require_validator_assignment_locked(replayed.events, record["manifest"], item, validator_nonce)
             start = self._latest_item_start(replayed.events, item_id)
             self._reject_validator_result_locked(item_id, evidence=evidence, assignment=assignment, start=start)
             return {"item_id": item_id, "validator_nonce": validator_nonce, "status": "rejected"}
+
+    def reject_batch_validator_protocol(self, batch_id: str, *, validator_nonce: str, evidence: str) -> dict[str, Any]:
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            assignment = self._require_batch_validator_assignment_locked(replayed.events, record["manifest"], batch_id, validator_nonce)
+            start = self._latest_batch_start(replayed.events, batch_id)
+            self._reject_batch_validator_result_locked(batch_id, evidence=evidence, assignment=assignment, start=start)
+            return {"batch_id": batch_id, "validator_nonce": validator_nonce, "status": "rejected"}
 
     def run_validator(self, item_id: str) -> dict[str, Any]:
         assignment = self.assign_validator(item_id)
@@ -2753,6 +4159,7 @@ class OptimPlansState:
             self._require_lifecycle_locked(replayed.events, {"executing"}, "authorize-spawn")
             record = self._execution_manifest_record(replayed.events)
             item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "authorize-spawn")
             worker_config = self._require_host_worker_config(record["manifest"], item)
             start = self._require_host_assignment_locked(replayed.events, record["manifest"], item, assignment_nonce)
             expected = self._host_launch_block(item_id=item_id, start=start, worker_config=worker_config)
@@ -2798,6 +4205,7 @@ class OptimPlansState:
             self._require_lifecycle_locked(replayed.events, {"executing"}, "register-agent")
             record = self._execution_manifest_record(replayed.events)
             item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "register-agent")
             worker_config = self._require_host_worker_config(record["manifest"], item)
             start = self._require_host_assignment_locked(replayed.events, record["manifest"], item, assignment_nonce)
             expected = self._host_launch_block(item_id=item_id, start=start, worker_config=worker_config)
@@ -2864,6 +4272,7 @@ class OptimPlansState:
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
             item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "complete-item")
             _start, registration = self._require_registered_host_agent_locked(
                 replayed.events,
                 record["manifest"],
@@ -2895,6 +4304,7 @@ class OptimPlansState:
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
             item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "fail-item")
             if agent_handle is not None:
                 start, registration = self._require_registered_host_agent_locked(
                     replayed.events,
@@ -2938,11 +4348,179 @@ class OptimPlansState:
                 extra=extra,
             )
 
+    def run_batch_validator(self, batch_id: str) -> dict[str, Any]:
+        assignment = self.assign_batch_validator(batch_id)
+        validator_config = assignment["validator"]
+        if validator_config.get("mode") in {"host-multi-agent", "foreground"}:
+            return assignment
+        self._ensure_adapter_launch_files(validator_config, write=False)
+        run_worktree = Path(assignment["run_worktree"])
+        state_path = self.run_dir / "validator-states" / f"{batch_id}-{assignment['attempt']}.json"
+        item_ids = list(assignment["item_ids"])
+        checked_items = self._batch_validator_check_ids(
+            self._batch_items(self._execution_manifest_record(self.replay().events)["manifest"], item_ids)
+        )
+        validator_state = {
+            "run_id": self.run_id,
+            "batch_id": batch_id,
+            "item_ids": item_ids,
+            "attempt": assignment["attempt"],
+            "assignment_nonce": assignment["assignment_nonce"],
+            "validator_nonce": assignment["validator_nonce"],
+            "validator_config_hash": assignment["validator_config_hash"],
+            "validator_prompt_hash": assignment["validator_prompt_hash"],
+            "delta_fingerprint": assignment["delta_fingerprint"],
+            "checked_items": checked_items,
+            "validator_prompt": self._execution_manifest_record(self.replay().events)["manifest"]["validator_prompt"],
+            "prior_context": assignment["validator_launch_block"].get("prior_context", ""),
+        }
+        write_json_atomic(state_path, validator_state)
+        env = os.environ.copy()
+        env.update(validator_config["env"])
+        env.update(
+            {
+                "OPTIM_PLANS_RUN_ID": self.run_id,
+                "OPTIM_PLANS_BATCH_ID": batch_id,
+                "OPTIM_PLANS_ITEM_IDS": json_text(item_ids),
+                "OPTIM_PLANS_ATTEMPT": str(assignment["attempt"]),
+                "OPTIM_PLANS_ASSIGNMENT_NONCE": assignment["assignment_nonce"],
+                "OPTIM_PLANS_VALIDATOR_NONCE": assignment["validator_nonce"],
+                "OPTIM_PLANS_VALIDATOR_CONFIG_HASH": assignment["validator_config_hash"],
+                "OPTIM_PLANS_VALIDATOR_PROMPT_HASH": assignment["validator_prompt_hash"],
+                "OPTIM_PLANS_DELTA_FINGERPRINT": assignment["delta_fingerprint"],
+                "OPTIM_PLANS_VALIDATOR_STATE_PATH": str(state_path),
+                "OPTIM_PLANS_CHECK_IDS": json_text(checked_items),
+            }
+        )
+        if validator_state["prior_context"]:
+            env["OPTIM_PLANS_PRIOR_CONTEXT"] = str(validator_state["prior_context"])
+        validator = run_process_group(
+            validator_config["argv"],
+            cwd=run_worktree,
+            env=env,
+            timeout_seconds=validator_config["timeout_seconds"],
+        )
+        if not validator.ok():
+            reason = "timeout" if validator.timed_out else "process"
+            evidence = validator.evidence("validator", timeout_seconds=validator_config["timeout_seconds"])
+            self.fail_batch_validator(batch_id, reason=reason, validator_nonce=assignment["validator_nonce"], evidence=evidence)
+            raise ContractError(evidence)
+        if not validator.stdout.strip():
+            evidence = "validator result rejected: validator stdout result is missing"
+            self.reject_batch_validator_protocol(batch_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
+            raise ContractError(evidence)
+        try:
+            result = parse_json_strict(validator.stdout.strip(), source="validator stdout")
+        except ContractError as exc:
+            evidence = f"validator result rejected: {exc}"
+            self.reject_batch_validator_protocol(batch_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
+            raise
+        if not isinstance(result, dict):
+            evidence = "validator result rejected: validator result must be a JSON object"
+            self.reject_batch_validator_protocol(batch_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
+            raise ContractError(evidence)
+        return self.record_batch_validator_result(batch_id, validator_nonce=assignment["validator_nonce"], result=result)
+
+    def advance_batch(self, batch_id: str) -> dict[str, Any]:
+        with self.controller_lock():
+            replayed = self.replay()
+            record = self._execution_manifest_record(replayed.events)
+            start = self._latest_batch_start(replayed.events, batch_id)
+            item_ids = list(start["item_ids"])
+            worker_config = self._require_host_batch_worker_config(record["manifest"], self._batch_items(record["manifest"], item_ids))
+            statuses = self._item_statuses(replayed.events, record["manifest"])
+            phases = {statuses[item_id] for item_id in item_ids}
+            status = phases.pop() if len(phases) == 1 else "mixed"
+            uses_validator = self._manifest_uses_validator(record["manifest"])
+            if status == "pending":
+                return {"batch_id": batch_id, "item_ids": item_ids, "phase": "pending"}
+            if status == "in_progress":
+                return self._batch_assignment_response_locked(replayed.events, record["manifest"], start, worker_config)
+            if status == "validating":
+                assignment = self._latest_batch_validator_assignment(replayed.events, batch_id)
+                if assignment is None:
+                    raise ContractError(f"{batch_id} validator assignment is missing")
+                return self._batch_validator_assignment_response_locked(
+                    replayed.events,
+                    record["manifest"],
+                    assignment,
+                    self._validator_config(record["manifest"]),
+                )
+            if status == "failed":
+                return {"batch_id": batch_id, "item_ids": item_ids, "phase": "failed"}
+            if status == "verified":
+                all_verified = all(current == "verified" for current in statuses.values())
+                checkpoint = next(
+                    event["payload"]
+                    for event in reversed(replayed.events)
+                    if event["type"] == "batch_checkpoint_created" and event.get("payload", {}).get("batch_id") == batch_id
+                )
+                if not all_verified:
+                    return {"batch_id": batch_id, "item_ids": item_ids, "phase": "checkpointed", **checkpoint}
+            elif status == "prepared":
+                pass
+            elif status == "completed" and uses_validator:
+                pass
+            elif status not in {"completed", "validated"}:
+                raise ContractError(f"{batch_id} cannot be advanced from status {status}")
+
+        if status == "completed" and uses_validator:
+            validated = self.run_batch_validator(batch_id)
+            if validated.get("status") == "pass":
+                return self.advance_batch(batch_id)
+            return validated
+        if status in {"completed", "validated"}:
+            self._assert_batch_protected_metadata_before_verification(batch_id)
+            start = self._latest_batch_start(self.replay().events, batch_id)
+            if uses_validator:
+                self._assert_batch_delta_fingerprint_before_verification(batch_id)
+            evidence_parts: list[str] = []
+            run_worktree = Path(start["run_worktree"])
+            for item in self._batch_items(self._execution_manifest_record(self.replay().events)["manifest"], list(start["item_ids"])):
+                verification_config = self._verification_config(self._execution_manifest_record(self.replay().events)["manifest"], item)
+                verifier_env = os.environ.copy()
+                verifier_env.update(verification_config["env"])
+                verifier = run_process_group(
+                    verification_config["argv"],
+                    cwd=run_worktree,
+                    env=verifier_env,
+                    timeout_seconds=verification_config["timeout_seconds"],
+                )
+                verifier_evidence = verifier.evidence(
+                    f"verification {item['id']}",
+                    timeout_seconds=verification_config["timeout_seconds"],
+                )
+                evidence_parts.append(verifier_evidence)
+                if not verifier.ok():
+                    self.record_batch_attempt_failure("batch_verification_failed", batch_id, evidence=verifier_evidence)
+                    raise ContractError(verifier_evidence)
+            if uses_validator:
+                self._assert_batch_delta_fingerprint_after_verification(batch_id)
+            checkpoint = self.checkpoint_batch(batch_id, evidence=bounded_evidence("\n\n".join(evidence_parts)))
+        elif status == "prepared":
+            checkpoint = self.checkpoint_batch(batch_id, evidence="prepared checkpoint")
+        else:
+            checkpoint = None
+        if checkpoint is not None and checkpoint.get("phase") == "awaiting_execution_summary":
+            return checkpoint
+
+        try:
+            final = self.final_audit()
+            payload: dict[str, Any] = {"batch_id": batch_id, "item_ids": item_ids, "phase": "finalized", "final_audit": final}
+        except ContractError:
+            if lifecycle_status(self.replay().events) == "awaiting_retry_decision":
+                raise
+            payload = {"batch_id": batch_id, "item_ids": item_ids, "phase": "checkpointed"}
+        if checkpoint is not None:
+            payload.update(checkpoint)
+        return payload
+
     def advance_item(self, item_id: str) -> dict[str, Any]:
         with self.controller_lock():
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
             item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "advance-item")
             worker_config = self._require_host_worker_config(record["manifest"], item)
             verification_config = self._verification_config(record["manifest"], item)
             statuses = self._item_statuses(replayed.events, record["manifest"])
@@ -3087,11 +4665,69 @@ class OptimPlansState:
             self.record_attempt_failure("audit_failed", item_id, evidence=f"audit failed: {exc}")
             raise
 
+    def _latest_batch_validator_pass(self, events: list[dict[str, Any]], batch_id: str) -> dict[str, Any]:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if payload.get("batch_id") != batch_id:
+                continue
+            if event["type"] == "batch_validator_result_recorded" and payload.get("status") == "pass":
+                return payload
+            if event["type"] in {"batch_retry_restored", "batch_checkpoint_created", "batch_started"}:
+                break
+        raise ContractError(f"{batch_id} does not have a passing validator result")
+
+    def _assert_batch_protected_metadata_before_verification(self, batch_id: str) -> None:
+        try:
+            with self.controller_lock():
+                replayed = self.replay()
+                started = self._execution_started_record(replayed.events)
+                self._require_protected_metadata_clean(started)
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            start = self._latest_batch_start(self.replay().events, batch_id)
+            with self.controller_lock():
+                self._record_batch_attempt_failure_locked("batch_audit_failed", batch_id, evidence=f"audit failed: {exc}", start=start)
+            raise
+
+    def _assert_batch_delta_fingerprint_before_verification(self, batch_id: str) -> None:
+        try:
+            with self.controller_lock():
+                replayed = self.replay()
+                record = self._execution_manifest_record(replayed.events)
+                started = self._execution_started_record(replayed.events)
+                start = self._latest_batch_start(replayed.events, batch_id)
+                validator = self._latest_batch_validator_pass(replayed.events, batch_id)
+                delta = self._batch_delta_locked(replayed.events, record["manifest"], started, start)
+                if delta["delta_fingerprint"] != validator["delta_fingerprint"]:
+                    raise ContractError("delta fingerprint changed before verification")
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            start = self._latest_batch_start(self.replay().events, batch_id)
+            with self.controller_lock():
+                self._record_batch_attempt_failure_locked("batch_audit_failed", batch_id, evidence=f"audit failed: {exc}", start=start)
+            raise
+
+    def _assert_batch_delta_fingerprint_after_verification(self, batch_id: str) -> None:
+        try:
+            with self.controller_lock():
+                replayed = self.replay()
+                record = self._execution_manifest_record(replayed.events)
+                started = self._execution_started_record(replayed.events)
+                start = self._latest_batch_start(replayed.events, batch_id)
+                validator = self._latest_batch_validator_pass(replayed.events, batch_id)
+                delta = self._batch_delta_locked(replayed.events, record["manifest"], started, start)
+                if delta["delta_fingerprint"] != validator["delta_fingerprint"]:
+                    raise ContractError("delta fingerprint changed after verification")
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            start = self._latest_batch_start(self.replay().events, batch_id)
+            with self.controller_lock():
+                self._record_batch_attempt_failure_locked("batch_audit_failed", batch_id, evidence=f"audit failed: {exc}", start=start)
+            raise
+
     def run_item(self, item_id: str) -> dict[str, Any]:
         replayed = self.replay()
         self._require_lifecycle_locked(replayed.events, {"executing", "validating", "verifying"}, "run-item")
         record = self._execution_manifest_record(replayed.events)
         item = self._manifest_item(record["manifest"], item_id)
+        self._reject_item_command_if_batch_member(replayed.events, item_id, "run-item")
         statuses = self._item_statuses(replayed.events, record["manifest"])
         uses_validator = self._manifest_uses_validator(record["manifest"])
         if statuses[item_id] == "prepared":
@@ -3204,6 +4840,28 @@ class OptimPlansState:
         statuses = {item["id"]: "pending" for item in manifest["items"]}
         for event in events:
             payload = event.get("payload", {})
+            batch_status: str | None = None
+            if event["type"] == "batch_started":
+                batch_status = "in_progress"
+            elif event["type"] == "batch_completed":
+                batch_status = "completed"
+            elif event["type"] in {"batch_validator_assigned", "batch_validator_spawn_authorized", "batch_validator_agent_registered"}:
+                batch_status = "validating"
+            elif event["type"] == "batch_validator_result_recorded":
+                batch_status = "validated" if payload.get("status") == "pass" else "failed"
+            elif event["type"] in {"batch_worker_failed", "batch_validator_protocol_rejected", "batch_validator_failed", "batch_verification_failed", "batch_audit_failed"}:
+                batch_status = "failed"
+            elif event["type"] == "batch_retry_restored":
+                batch_status = "pending"
+            elif event["type"] == "batch_checkpoint_prepared":
+                batch_status = "prepared"
+            elif event["type"] == "batch_checkpoint_created":
+                batch_status = "verified"
+            if batch_status is not None:
+                for current_id in self._event_item_ids(payload):
+                    if current_id in statuses:
+                        statuses[current_id] = batch_status
+                continue
             item_id = payload.get("item_id")
             if item_id not in statuses:
                 continue
@@ -3314,6 +4972,7 @@ class OptimPlansState:
             started = self._execution_started_record(replayed.events)
             self._require_protected_metadata_clean(started)
             item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "run-item")
             statuses = self._item_statuses(replayed.events, record["manifest"])
             if statuses[item_id] != "pending":
                 raise ContractError(f"{item_id} is not ready for execution")
@@ -3360,6 +5019,7 @@ class OptimPlansState:
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
             self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "complete-item")
             statuses = self._item_statuses(replayed.events, record["manifest"])
             if statuses[item_id] != "in_progress":
                 raise ContractError(f"{item_id} is not in progress")
@@ -3373,6 +5033,7 @@ class OptimPlansState:
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
             self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "fail-item")
             statuses = self._item_statuses(replayed.events, record["manifest"])
             if statuses[item_id] != "in_progress":
                 raise ContractError(f"{item_id} is not in progress")
@@ -3530,6 +5191,7 @@ class OptimPlansState:
             raise ContractError("verification evidence is required")
         with self.controller_lock():
             replayed = self.replay()
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "checkpoint-item")
             existing = self._latest_checkpoint_created(replayed.events, item_id)
             if existing is not None:
                 return existing
@@ -3540,12 +5202,233 @@ class OptimPlansState:
                 return {"item_id": item_id, "phase": "awaiting_execution_summary", "question": question}
             return self._commit_prepared_checkpoint_locked(self.replay().events, prepared)
 
+    def _prepare_batch_checkpoint_locked(
+        self,
+        events: list[dict[str, Any]],
+        batch_id: str,
+        *,
+        evidence: str,
+    ) -> dict[str, Any]:
+        existing = self._latest_batch_checkpoint_prepared(events, batch_id)
+        if existing is not None:
+            return existing
+        record = self._execution_manifest_record(events)
+        started = self._execution_started_record(events)
+        start = self._latest_batch_start(events, batch_id)
+        statuses = self._item_statuses(events, record["manifest"])
+        item_ids = list(start["item_ids"])
+        if self._manifest_uses_validator(record["manifest"]) and any(statuses[item_id] != "validated" for item_id in item_ids):
+            raise ContractError(f"{batch_id} is not validated and ready for checkpoint")
+        if any(statuses[item_id] not in {"completed", "validated"} for item_id in item_ids):
+            raise ContractError(f"{batch_id} is not completed and ready for checkpoint")
+        try:
+            self._require_protected_metadata_clean(started)
+            run_worktree = self._require_run_worktree(
+                started,
+                expected_head=start["base_commit"],
+                clean=False,
+            )
+            allowed_paths = self._batch_allowed_paths(self._batch_items(record["manifest"], item_ids))
+            audit = audit_git_delta(
+                run_worktree,
+                allowed_paths=allowed_paths,
+                base_commit=start["base_commit"],
+                head_commit=start["base_commit"],
+            )
+            fingerprint = checkpoint_delta_fingerprint(run_worktree, audit["changed_files"])
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            self._record_batch_attempt_failure_locked("batch_audit_failed", batch_id, evidence=f"audit failed: {exc}", start=start)
+            raise
+        payload = {
+            "batch_id": batch_id,
+            "item_ids": item_ids,
+            "evidence": bounded_evidence(evidence),
+            "worker_evidence": next(
+                (
+                    event.get("payload", {}).get("evidence")
+                    for event in reversed(events)
+                    if event["type"] == "batch_completed" and event.get("payload", {}).get("batch_id") == batch_id
+                ),
+                None,
+            ),
+            "changed_files": audit["changed_files"],
+            "base_commit": start["base_commit"],
+            "run_worktree": str(run_worktree),
+            "run_branch": started["run_branch"],
+            "allowed_paths": allowed_paths,
+            "attempt": start["attempt"],
+            "assignment_nonce": start["assignment_nonce"],
+            "head_commit": git(run_worktree, "rev-parse", "--verify", "HEAD"),
+            "delta_fingerprint": fingerprint,
+        }
+        return self._append_event_locked("batch_checkpoint_prepared", payload)["payload"]
+
+    def _commit_prepared_batch_checkpoint_locked(
+        self,
+        events: list[dict[str, Any]],
+        prepared: dict[str, Any],
+    ) -> dict[str, Any]:
+        batch_id = prepared["batch_id"]
+        started = self._execution_started_record(events)
+        start = self._latest_batch_start(events, batch_id)
+        try:
+            self._require_protected_metadata_clean(started)
+            run_worktree = self._require_run_worktree(
+                started,
+                expected_head=prepared["head_commit"],
+                clean=False,
+            )
+            if Path(prepared["run_worktree"]).resolve() != run_worktree.resolve():
+                raise ContractError("prepared checkpoint is bound to a different run worktree")
+            if prepared["base_commit"] != start["base_commit"]:
+                raise ContractError("prepared checkpoint base no longer matches the active batch attempt")
+            allowed_paths = list(prepared["allowed_paths"])
+            audit = audit_git_delta(
+                run_worktree,
+                allowed_paths=allowed_paths,
+                base_commit=prepared["base_commit"],
+                head_commit=prepared["head_commit"],
+            )
+            if audit["changed_files"] != prepared["changed_files"]:
+                raise ContractError("run worktree changed since checkpoint preparation")
+            if checkpoint_delta_fingerprint(run_worktree, audit["changed_files"]) != prepared["delta_fingerprint"]:
+                raise ContractError("run worktree changed since checkpoint preparation")
+            for path in audit["changed_files"]:
+                git(run_worktree, "add", "-A", "--", path)
+            subject = f"Update batch {', '.join(prepared['item_ids'])}"
+            body = (
+                f"optim-plans run: {self.run_id}\n"
+                f"batch: {batch_id}\n"
+                f"items: {', '.join(prepared['item_ids'])}\n"
+                f"attempt: {prepared['attempt']}"
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    subject,
+                    "-m",
+                    body,
+                ],
+                cwd=run_worktree,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            commit = git(run_worktree, "rev-parse", "--verify", "HEAD")
+            clean_audit = audit_git_delta(run_worktree, allowed_paths=allowed_paths)
+            if clean_audit["changed_files"]:
+                raise ContractError("run worktree is not clean after checkpoint")
+        except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            self._record_batch_attempt_failure_locked("batch_audit_failed", batch_id, evidence=f"checkpoint failed: {exc}", start=start)
+            raise
+        payload = {
+            "batch_id": batch_id,
+            "item_ids": list(prepared["item_ids"]),
+            "commit": commit,
+            "changed_files": audit["changed_files"],
+        }
+        return self._append_event_locked("batch_checkpoint_created", payload)["payload"]
+
+    def checkpoint_batch(self, batch_id: str, *, evidence: str) -> dict[str, Any]:
+        if not evidence.strip():
+            raise ContractError("verification evidence is required")
+        with self.controller_lock():
+            replayed = self.replay()
+            existing = self._latest_batch_checkpoint_created(replayed.events, batch_id)
+            if existing is not None:
+                return existing
+            prepared = self._prepare_batch_checkpoint_locked(replayed.events, batch_id, evidence=evidence)
+            replayed = self.replay()
+            question = self._execution_summary_question_payload_locked(replayed.events)
+            if question is not None:
+                return {"batch_id": batch_id, "item_ids": list(prepared["item_ids"]), "phase": "awaiting_execution_summary", "question": question}
+            return self._commit_prepared_batch_checkpoint_locked(self.replay().events, prepared)
+
+    def request_batch_retry(self, batch_id: str) -> dict[str, Any]:
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"awaiting_retry_decision"}, "batch retry approval")
+            failure = self._latest_batch_failure(replayed.events, batch_id)
+            return self._batch_retry_question_payload_locked(
+                replayed.events,
+                batch_id=batch_id,
+                item_ids=list(failure["item_ids"]),
+                failed_base_commit=failure["base_commit"],
+            )
+
+    def restore_batch_retry(self, batch_id: str, approval_nonce: str | None) -> dict[str, Any]:
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"awaiting_retry_decision"}, "retry-batch")
+            started = self._execution_started_record(replayed.events)
+            self._require_protected_metadata_clean(started)
+            failure = self._latest_batch_failure(replayed.events, batch_id)
+            item_ids = list(failure["item_ids"])
+            question: dict[str, Any] | None = None
+            answer: dict[str, Any] | None = None
+            auto_approved = approval_nonce is None and not any(
+                event["type"] == "batch_retry_restored" and event.get("payload", {}).get("batch_id") == batch_id
+                for event in replayed.events
+            )
+            if not auto_approved:
+                if approval_nonce is None:
+                    raise ContractError("batch retry approval is required after the first retry")
+                for event in replayed.events:
+                    payload = event.get("payload", {})
+                    if (
+                        event["type"] == "pending_question"
+                        and payload.get("stage") == "execution_batch_retry"
+                        and payload.get("nonce") == approval_nonce
+                        and payload.get("batch_id") == batch_id
+                        and payload.get("item_ids") == item_ids
+                    ):
+                        question = payload
+                    if event["type"] == "answer_recorded" and payload.get("nonce") == approval_nonce:
+                        answer = payload
+                    if event["type"] == "batch_retry_restored" and payload.get("approval_nonce") == approval_nonce:
+                        raise ContractError("batch retry approval nonce is stale or already used")
+                if question is None:
+                    raise ContractError("unknown batch retry approval nonce")
+                if question.get("failed_base_commit") != failure["base_commit"]:
+                    raise ContractError("batch retry approval is not bound to the failed attempt")
+                if answer is None or answer.get("choice") != "approve":
+                    raise ContractError("batch retry restore has not been approved")
+            run_worktree = self._require_run_worktree(
+                started,
+                expected_head=failure["base_commit"],
+                clean=False,
+            )
+            if Path(failure["run_worktree"]).resolve() != run_worktree.resolve():
+                raise ContractError("failed batch attempt is not bound to the controller-owned worktree")
+            git(run_worktree, "reset", "--hard", failure["base_commit"])
+            git(run_worktree, "clean", "-fdx")
+            payload = {
+                "batch_id": batch_id,
+                "item_ids": item_ids,
+                "approval_nonce": approval_nonce,
+                "auto_approved": auto_approved,
+                "restored_to": failure["base_commit"],
+                "run_worktree": str(run_worktree),
+            }
+            return self._append_event_locked("batch_retry_restored", payload)["payload"]
+
+    def retry_batch(self, batch_id: str, approval_nonce: str | None) -> dict[str, Any]:
+        self.restore_batch_retry(batch_id, approval_nonce)
+        return self.assign_batch()
+
     def request_retry(self, item_id: str) -> dict[str, Any]:
         with self.controller_lock():
             replayed = self.replay()
             self._require_lifecycle_locked(replayed.events, {"awaiting_retry_decision"}, "retry approval")
             record = self._execution_manifest_record(replayed.events)
             self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "request-retry")
             failure = self._latest_failure(replayed.events, item_id)
             return self._retry_question_payload_locked(
                 replayed.events,
@@ -3559,6 +5442,7 @@ class OptimPlansState:
             self._require_lifecycle_locked(replayed.events, {"awaiting_retry_decision"}, "retry-item")
             record = self._execution_manifest_record(replayed.events)
             self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "retry-item")
             started = self._execution_started_record(replayed.events)
             self._require_protected_metadata_clean(started)
             failure = self._latest_failure(replayed.events, item_id)
@@ -4064,6 +5948,50 @@ class OptimPlansState:
         }
         for event in events:
             payload = event.get("payload", {})
+            batch_ids = self._event_item_ids(payload) if event["type"].startswith("batch_") else []
+            if batch_ids:
+                event_type = event["type"]
+                for current_id in batch_ids:
+                    result = results.get(current_id)
+                    if result is None:
+                        continue
+                    if event_type == "batch_started":
+                        result["status"] = "in_progress"
+                        result["attempts"] += 1
+                    elif event_type == "batch_completed":
+                        result["status"] = "worker_completed"
+                        result["explanation"] = payload.get("evidence", "")
+                    elif event_type == "batch_validator_result_recorded":
+                        result["status"] = "validator_passed" if payload.get("status") == "pass" else "validator_failed"
+                        result["evidence"] = payload.get("evidence", "")
+                        if payload.get("feedback_for_executor"):
+                            result["limitations"] = payload["feedback_for_executor"]
+                    elif event_type in {
+                        "batch_worker_failed",
+                        "batch_validator_protocol_rejected",
+                        "batch_validator_failed",
+                        "batch_verification_failed",
+                        "batch_audit_failed",
+                    }:
+                        result["status"] = "failed"
+                        result["limitations"] = payload.get("evidence", "")
+                    elif event_type == "batch_retry_restored":
+                        result["status"] = "pending"
+                        result["retry_decisions"].append(f"restored batch {payload.get('batch_id', 'unknown')} to {payload.get('restored_to', 'unknown')}")
+                    elif event_type == "batch_checkpoint_prepared":
+                        result["status"] = "prepared"
+                        result["changed_files"] = list(payload.get("changed_files", []))
+                    elif event_type == "batch_checkpoint_created":
+                        result["status"] = "checkpointed"
+                        result["changed_files"] = list(payload.get("changed_files", []))
+                        result["commits"].append(payload.get("commit", ""))
+                continue
+            if event["type"] == "awaiting_retry_decision" and isinstance(payload.get("item_ids"), list):
+                for current_id in self._event_item_ids(payload):
+                    result = results.get(current_id)
+                    if result is not None:
+                        result["retry_decisions"].append(f"awaiting batch retry after {payload.get('failure_event', 'failure')}")
+                continue
             item_id = payload.get("item_id")
             result = results.get(item_id)
             if result is None:

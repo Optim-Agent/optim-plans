@@ -105,11 +105,21 @@ def build_parser() -> argparse.ArgumentParser:
     assign.add_argument("--repo", required=True)
     assign.add_argument("--item-id", required=True)
 
+    assign_batch = sub.add_parser("assign-batch")
+    assign_batch.add_argument("--repo", required=True)
+    assign_batch.add_argument("--item-id", action="append", dest="item_ids")
+
     authorize = sub.add_parser("authorize-spawn")
     authorize.add_argument("--repo", required=True)
     authorize.add_argument("--item-id", required=True)
     authorize.add_argument("--assignment-nonce", required=True)
     authorize.add_argument("--launch-block", required=True)
+
+    authorize_batch = sub.add_parser("authorize-batch-spawn")
+    authorize_batch.add_argument("--repo", required=True)
+    authorize_batch.add_argument("--batch-id", required=True)
+    authorize_batch.add_argument("--assignment-nonce", required=True)
+    authorize_batch.add_argument("--launch-block", required=True)
 
     register = sub.add_parser("register-agent")
     register.add_argument("--repo", required=True)
@@ -119,12 +129,27 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--agent-handle", required=True)
     register.add_argument("--launch-block", required=True)
 
+    register_batch = sub.add_parser("register-batch-agent")
+    register_batch.add_argument("--repo", required=True)
+    register_batch.add_argument("--batch-id", required=True)
+    register_batch.add_argument("--assignment-nonce", required=True)
+    register_batch.add_argument("--launch-nonce", required=True)
+    register_batch.add_argument("--agent-handle", required=True)
+    register_batch.add_argument("--launch-block", required=True)
+
     complete = sub.add_parser("complete-item")
     complete.add_argument("--repo", required=True)
     complete.add_argument("--item-id", required=True)
     complete.add_argument("--assignment-nonce", required=True)
     complete.add_argument("--agent-handle", required=True)
     complete.add_argument("--evidence", required=True)
+
+    complete_batch = sub.add_parser("complete-batch")
+    complete_batch.add_argument("--repo", required=True)
+    complete_batch.add_argument("--batch-id", required=True)
+    complete_batch.add_argument("--assignment-nonce", required=True)
+    complete_batch.add_argument("--agent-handle", required=True)
+    complete_batch.add_argument("--evidence", required=True)
 
     fail = sub.add_parser("fail-item")
     fail.add_argument("--repo", required=True)
@@ -134,19 +159,41 @@ def build_parser() -> argparse.ArgumentParser:
     fail.add_argument("--launch-nonce")
     fail.add_argument("--evidence", required=True)
 
+    fail_batch = sub.add_parser("fail-batch")
+    fail_batch.add_argument("--repo", required=True)
+    fail_batch.add_argument("--batch-id", required=True)
+    fail_batch.add_argument("--assignment-nonce", required=True)
+    fail_batch.add_argument("--agent-handle")
+    fail_batch.add_argument("--launch-nonce")
+    fail_batch.add_argument("--evidence", required=True)
+
     advance = sub.add_parser("advance-item")
     advance.add_argument("--repo", required=True)
     advance.add_argument("--item-id", required=True)
 
+    advance_batch = sub.add_parser("advance-batch")
+    advance_batch.add_argument("--repo", required=True)
+    advance_batch.add_argument("--batch-id", required=True)
+
     assign_validator = sub.add_parser("assign-validator")
     assign_validator.add_argument("--repo", required=True)
     assign_validator.add_argument("--item-id", required=True)
+
+    assign_batch_validator = sub.add_parser("assign-batch-validator")
+    assign_batch_validator.add_argument("--repo", required=True)
+    assign_batch_validator.add_argument("--batch-id", required=True)
 
     authorize_validator = sub.add_parser("authorize-validator-spawn")
     authorize_validator.add_argument("--repo", required=True)
     authorize_validator.add_argument("--item-id", required=True)
     authorize_validator.add_argument("--validator-nonce", required=True)
     authorize_validator.add_argument("--launch-block", required=True)
+
+    authorize_batch_validator = sub.add_parser("authorize-batch-validator-spawn")
+    authorize_batch_validator.add_argument("--repo", required=True)
+    authorize_batch_validator.add_argument("--batch-id", required=True)
+    authorize_batch_validator.add_argument("--validator-nonce", required=True)
+    authorize_batch_validator.add_argument("--launch-block", required=True)
 
     register_validator = sub.add_parser("register-validator")
     register_validator.add_argument("--repo", required=True)
@@ -156,12 +203,27 @@ def build_parser() -> argparse.ArgumentParser:
     register_validator.add_argument("--agent-handle", required=True)
     register_validator.add_argument("--launch-block", required=True)
 
+    register_batch_validator = sub.add_parser("register-batch-validator")
+    register_batch_validator.add_argument("--repo", required=True)
+    register_batch_validator.add_argument("--batch-id", required=True)
+    register_batch_validator.add_argument("--validator-nonce", required=True)
+    register_batch_validator.add_argument("--launch-nonce", required=True)
+    register_batch_validator.add_argument("--agent-handle", required=True)
+    register_batch_validator.add_argument("--launch-block", required=True)
+
     complete_validator = sub.add_parser("complete-validator")
     complete_validator.add_argument("--repo", required=True)
     complete_validator.add_argument("--item-id", required=True)
     complete_validator.add_argument("--validator-nonce", required=True)
     complete_validator.add_argument("--agent-handle")
     complete_validator.add_argument("--result", required=True)
+
+    complete_batch_validator = sub.add_parser("complete-batch-validator")
+    complete_batch_validator.add_argument("--repo", required=True)
+    complete_batch_validator.add_argument("--batch-id", required=True)
+    complete_batch_validator.add_argument("--validator-nonce", required=True)
+    complete_batch_validator.add_argument("--agent-handle")
+    complete_batch_validator.add_argument("--result", required=True)
 
     fail_validator = sub.add_parser("fail-validator")
     fail_validator.add_argument("--repo", required=True)
@@ -172,10 +234,24 @@ def build_parser() -> argparse.ArgumentParser:
     fail_validator.add_argument("--launch-nonce")
     fail_validator.add_argument("--evidence", default="")
 
+    fail_batch_validator = sub.add_parser("fail-batch-validator")
+    fail_batch_validator.add_argument("--repo", required=True)
+    fail_batch_validator.add_argument("--batch-id", required=True)
+    fail_batch_validator.add_argument("--reason", required=True, choices=["process", "crash", "timeout", "interrupted", "unknown"])
+    fail_batch_validator.add_argument("--validator-nonce")
+    fail_batch_validator.add_argument("--agent-handle")
+    fail_batch_validator.add_argument("--launch-nonce")
+    fail_batch_validator.add_argument("--evidence", default="")
+
     retry = sub.add_parser("retry-item")
     retry.add_argument("--repo", required=True)
     retry.add_argument("--item-id", required=True)
     retry.add_argument("--approval-nonce")
+
+    retry_batch = sub.add_parser("retry-batch")
+    retry_batch.add_argument("--repo", required=True)
+    retry_batch.add_argument("--batch-id", required=True)
+    retry_batch.add_argument("--approval-nonce")
 
     finish = sub.add_parser("finish-run")
     finish.add_argument("--repo", required=True)
@@ -633,7 +709,57 @@ def cmd_status(args: argparse.Namespace) -> None:
         else:
             payload["next_action"] = "approve the execution launch nonce before running start-execution"
     elif replayed.status == "awaiting_retry_decision":
-        retry_item_id = next(
+        retry_batch_id = next(
+            (
+                event.get("payload", {}).get("batch_id")
+                for event in reversed(replayed.events)
+                if event["type"]
+                in {
+                    "batch_worker_failed",
+                    "batch_validator_protocol_rejected",
+                    "batch_validator_failed",
+                    "batch_verification_failed",
+                    "batch_audit_failed",
+                }
+                or (event["type"] == "batch_validator_result_recorded" and event.get("payload", {}).get("status") == "fail")
+            ),
+            None,
+        )
+        if isinstance(retry_batch_id, str):
+            payload["retry_batch_id"] = retry_batch_id
+            retry_seen = any(
+                event["type"] == "batch_retry_restored" and event.get("payload", {}).get("batch_id") == retry_batch_id
+                for event in replayed.events
+            )
+            retry_argv = [
+                "python3",
+                "scripts/optim_plans.py",
+                "retry-batch",
+                "--repo",
+                str(state.repo),
+                "--batch-id",
+                retry_batch_id,
+            ]
+            if retry_seen:
+                retry = state.request_batch_retry(retry_batch_id)
+                payload["retry_approval_nonce"] = retry["nonce"]
+                retry_argv.extend(["--approval-nonce", retry["nonce"]])
+                retry_answer = next(
+                    (
+                        event.get("payload", {})
+                        for event in reversed(state.replay().events)
+                        if event["type"] == "answer_recorded" and event.get("payload", {}).get("nonce") == retry["nonce"]
+                    ),
+                    {},
+                )
+                payload["retry_approved"] = retry_answer.get("choice") == "approve"
+                payload["retry_command"] = shlex.join(retry_argv)
+                if payload["retry_approved"]:
+                    payload["resume_command"] = payload["retry_command"]
+            else:
+                payload["resume_command"] = shlex.join(retry_argv)
+                payload["next_action"] = "run resume_command for the automatic first batch retry, or finish with finish_approval_nonce"
+        retry_item_id = None if isinstance(retry_batch_id, str) else next(
             (
                 event.get("payload", {}).get("item_id")
                 for event in reversed(replayed.events)
@@ -749,6 +875,11 @@ def cmd_assign_item(args: argparse.Namespace) -> None:
     print_json(state.assign_item(args.item_id))
 
 
+def cmd_assign_batch(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(state.assign_batch(args.item_ids))
+
+
 def cmd_authorize_spawn(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     print_json(
@@ -760,11 +891,35 @@ def cmd_authorize_spawn(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_authorize_batch_spawn(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.authorize_batch_spawn(
+            args.batch_id,
+            args.assignment_nonce,
+            _json_object_arg(args.launch_block, label="launch block"),
+        )
+    )
+
+
 def cmd_register_agent(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     print_json(
         state.register_agent(
             args.item_id,
+            assignment_nonce=args.assignment_nonce,
+            launch_nonce=args.launch_nonce,
+            agent_handle=args.agent_handle,
+            launch_block=_json_object_arg(args.launch_block, label="launch block"),
+        )
+    )
+
+
+def cmd_register_batch_agent(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.register_batch_agent(
+            args.batch_id,
             assignment_nonce=args.assignment_nonce,
             launch_nonce=args.launch_nonce,
             agent_handle=args.agent_handle,
@@ -785,6 +940,18 @@ def cmd_complete_item(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_complete_batch(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.complete_host_batch(
+            args.batch_id,
+            assignment_nonce=args.assignment_nonce,
+            agent_handle=args.agent_handle,
+            evidence=args.evidence,
+        )
+    )
+
+
 def cmd_fail_item(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     print_json(
@@ -798,9 +965,27 @@ def cmd_fail_item(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_fail_batch(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.fail_host_batch(
+            args.batch_id,
+            assignment_nonce=args.assignment_nonce,
+            agent_handle=args.agent_handle,
+            launch_nonce=args.launch_nonce,
+            evidence=args.evidence,
+        )
+    )
+
+
 def cmd_advance_item(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     print_json(state.advance_item(args.item_id))
+
+
+def cmd_advance_batch(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(state.advance_batch(args.batch_id))
 
 
 def cmd_assign_validator(args: argparse.Namespace) -> None:
@@ -808,11 +993,27 @@ def cmd_assign_validator(args: argparse.Namespace) -> None:
     print_json(state.assign_validator(args.item_id))
 
 
+def cmd_assign_batch_validator(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(state.assign_batch_validator(args.batch_id))
+
+
 def cmd_authorize_validator_spawn(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     print_json(
         state.authorize_validator_spawn(
             args.item_id,
+            args.validator_nonce,
+            _json_object_arg(args.launch_block, label="validator launch block"),
+        )
+    )
+
+
+def cmd_authorize_batch_validator_spawn(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.authorize_batch_validator_spawn(
+            args.batch_id,
             args.validator_nonce,
             _json_object_arg(args.launch_block, label="validator launch block"),
         )
@@ -832,11 +1033,36 @@ def cmd_register_validator(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_register_batch_validator(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.register_batch_validator_agent(
+            args.batch_id,
+            validator_nonce=args.validator_nonce,
+            launch_nonce=args.launch_nonce,
+            agent_handle=args.agent_handle,
+            launch_block=_json_object_arg(args.launch_block, label="validator launch block"),
+        )
+    )
+
+
 def cmd_complete_validator(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     print_json(
         state.record_validator_result(
             args.item_id,
+            validator_nonce=args.validator_nonce,
+            agent_handle=args.agent_handle,
+            result=_json_object_arg(args.result, label="validator result"),
+        )
+    )
+
+
+def cmd_complete_batch_validator(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.record_batch_validator_result(
+            args.batch_id,
             validator_nonce=args.validator_nonce,
             agent_handle=args.agent_handle,
             result=_json_object_arg(args.result, label="validator result"),
@@ -858,9 +1084,28 @@ def cmd_fail_validator(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_fail_batch_validator(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.fail_batch_validator(
+            args.batch_id,
+            reason=args.reason,
+            validator_nonce=args.validator_nonce,
+            agent_handle=args.agent_handle,
+            launch_nonce=args.launch_nonce,
+            evidence=args.evidence,
+        )
+    )
+
+
 def cmd_retry_item(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     print_json(state.retry_item(args.item_id, args.approval_nonce))
+
+
+def cmd_retry_batch(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(state.retry_batch(args.batch_id, args.approval_nonce))
 
 
 def cmd_finish_run(args: argparse.Namespace) -> None:
@@ -909,17 +1154,29 @@ def main(argv: list[str] | None = None) -> int:
             "start-execution": cmd_start_execution,
             "run-item": cmd_run_item,
             "assign-item": cmd_assign_item,
+            "assign-batch": cmd_assign_batch,
             "authorize-spawn": cmd_authorize_spawn,
+            "authorize-batch-spawn": cmd_authorize_batch_spawn,
             "register-agent": cmd_register_agent,
+            "register-batch-agent": cmd_register_batch_agent,
             "complete-item": cmd_complete_item,
+            "complete-batch": cmd_complete_batch,
             "fail-item": cmd_fail_item,
+            "fail-batch": cmd_fail_batch,
             "advance-item": cmd_advance_item,
+            "advance-batch": cmd_advance_batch,
             "assign-validator": cmd_assign_validator,
+            "assign-batch-validator": cmd_assign_batch_validator,
             "authorize-validator-spawn": cmd_authorize_validator_spawn,
+            "authorize-batch-validator-spawn": cmd_authorize_batch_validator_spawn,
             "register-validator": cmd_register_validator,
+            "register-batch-validator": cmd_register_batch_validator,
             "complete-validator": cmd_complete_validator,
+            "complete-batch-validator": cmd_complete_batch_validator,
             "fail-validator": cmd_fail_validator,
+            "fail-batch-validator": cmd_fail_batch_validator,
             "retry-item": cmd_retry_item,
+            "retry-batch": cmd_retry_batch,
             "finish-run": cmd_finish_run,
             "run-worker": cmd_run_worker,
         }[args.command](args)
