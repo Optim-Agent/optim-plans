@@ -61,6 +61,9 @@ class PluginSmokeTests(unittest.TestCase):
             return out
         return set()
 
+    def _skill_names(self) -> list[str]:
+        return sorted(path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md"))
+
     def test_validate_structure_script(self) -> None:
         subprocess.run(
             [sys.executable, str(ROOT / "scripts/validate_structure.py")],
@@ -112,8 +115,30 @@ class PluginSmokeTests(unittest.TestCase):
             self.assertIn(expected, strings)
         if "skills" not in strings and "components" not in strings:
             self.skipTest("codex plugin list --json does not expose component inventory")
-        for expected in ("skills", "big-plan"):
+        for expected in ("skills", *self._skill_names()):
             self.assertIn(expected, strings)
+
+    def test_claude_clean_home_plugin_install_inventory_when_supported(self) -> None:
+        claude = self._tool("claude")
+        plugin_help = self._help([claude, "plugin", "--help"])
+        for command in ("marketplace", "install", "details"):
+            if command not in plugin_help:
+                self.skipTest(f"claude plugin {command} is unsupported")
+
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw) / "home"
+            home.mkdir()
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            self._run([claude, "plugin", "marketplace", "add", "./", "--scope", "user"], env=env)
+            self._run([claude, "plugin", "install", "optim-plans@optim-plans-dev", "--scope", "user"], env=env)
+            details = self._run([claude, "plugin", "details", "optim-plans@optim-plans-dev"], env=env)
+
+        inventory = details.stdout + details.stderr
+        skills = self._skill_names()
+        self.assertIn(f"Skills ({len(skills)})", inventory)
+        for expected in skills:
+            self.assertIn(expected, inventory)
 
 
 if __name__ == "__main__":
