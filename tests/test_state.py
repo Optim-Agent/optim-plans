@@ -37,6 +37,23 @@ class StateTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "active run"):
                 OptimPlansState.initialize(repo, topic="Other", plan_hash="abc123")
 
+    def test_load_alias_matches_load_active(self) -> None:
+        from scripts.optim_plans_core import ContractError, OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            with self.assertRaisesRegex(ContractError, "no active optim-plans run"):
+                OptimPlansState.load(repo)
+            with self.assertRaisesRegex(ContractError, "no active optim-plans run"):
+                OptimPlansState.load_active(repo)
+
+            state = OptimPlansState.initialize(repo, topic="Alias", plan_hash="abc123")
+            loaded = OptimPlansState.load(repo)
+            active = OptimPlansState.load_active(repo)
+            self.assertEqual(loaded.run_id, state.run_id)
+            self.assertEqual(loaded.run_id, active.run_id)
+            self.assertEqual(loaded.artifact_dir, active.artifact_dir)
+
     def test_terminal_lifecycle_cannot_regress(self) -> None:
         from scripts.optim_plans_core import lifecycle_status
 

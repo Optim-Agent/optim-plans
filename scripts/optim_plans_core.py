@@ -912,6 +912,10 @@ class OptimPlansState:
             artifact_dir=repo / run["artifact_dir"],
         )
 
+    @classmethod
+    def load(cls, repo: Path | str) -> "OptimPlansState":
+        return cls.load_active(repo)
+
     @contextmanager
     def controller_lock(self):
         self.lock_file.parent.mkdir(parents=True, exist_ok=True)
