@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review and Plan"
+  short_description: "Review a repository before planning"
+  default_prompt: "Use $review-and-plan to review this repository for improvement opportunities before creating an optim-plans solution plan."

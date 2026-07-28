@@ -58,6 +58,8 @@ def main() -> int:
         "skills/optim-plans/SKILL.md",
         "skills/analyze-and-plan/SKILL.md",
         "skills/analyze-and-plan/agents/openai.yaml",
+        "skills/review-and-plan/SKILL.md",
+        "skills/review-and-plan/agents/openai.yaml",
         "skills/mini-plan/SKILL.md",
         "skills/small-plan/SKILL.md",
         "skills/plan/SKILL.md",
