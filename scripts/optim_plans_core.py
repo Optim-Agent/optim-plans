@@ -15,6 +15,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -63,6 +64,7 @@ VALIDATOR_PROMPT_CONTRACT = {
 LEGACY_ACTIVE_EVENT_TYPES = {"item_completed", "execution_completed", "run_completed", "worker_result_recorded"}
 LIFECYCLE_EVENT_TYPES = {
     "execution_manifest_created",
+    "source_snapshot_committed",
     "execution_started",
     "item_started",
     "batch_started",
@@ -559,6 +561,19 @@ def stable_json_hash(value: Any) -> str:
     return hashlib.sha256(json_text(value).encode()).hexdigest()
 
 
+def _git_with_env(repo: Path, env: dict[str, str], *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
 def host_executor_prompt_hash() -> str:
     return stable_json_hash(HOST_EXECUTOR_PROMPT_CONTRACT)
 
@@ -664,6 +679,56 @@ def _protected_metadata_snapshot(repo: Path, *, run_branch: str, run_worktree: P
 def _status_entries(repo: Path) -> list[tuple[str, str]]:
     result = subprocess.run(
         ["git", "status", "--porcelain=v1", "-z", "--ignored", "--untracked-files=all"],
+        cwd=repo,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    fields = result.stdout.split("\0")
+    entries: list[tuple[str, str]] = []
+    index = 0
+    while index < len(fields):
+        raw = fields[index]
+        index += 1
+        if not raw:
+            continue
+        status_code = raw[:2]
+        path = raw[3:].rstrip("/")
+        if "R" in status_code or "C" in status_code:
+            original_path = fields[index].rstrip("/")
+            index += 1
+            if original_path:
+                entries.append((status_code, original_path))
+        if path:
+            entries.append((status_code, path))
+    return entries
+
+
+def _pathspec_exclusions(repo: Path, ignored_paths: list[Path] | None) -> list[str]:
+    root = repo.resolve()
+    exclusions: list[str] = []
+    for path in ignored_paths or []:
+        try:
+            relative = Path(path).resolve().relative_to(root).as_posix()
+        except ValueError:
+            continue
+        exclusions.append(f":(exclude){relative}")
+    return exclusions
+
+
+def _source_status_entries(repo: Path, *, ignored_paths: list[Path] | None = None) -> list[tuple[str, str]]:
+    result = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            ".",
+            *_pathspec_exclusions(repo, ignored_paths),
+        ],
         cwd=repo,
         text=True,
         stdout=subprocess.PIPE,
@@ -1153,6 +1218,16 @@ class OptimPlansState:
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
+    @contextmanager
+    def source_prepare_lock(self):
+        path = self.root / "source-prepare.lock"
+        with path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def append_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         with self.controller_lock():
             return self._append_event_locked(event_type, payload)
@@ -1357,6 +1432,172 @@ class OptimPlansState:
             raise ContractError(f"validator.check_ids for {item['id']} must not contain duplicates")
         return list(check_ids)
 
+    def _temporary_source_index_tree(self, *, head: str) -> str:
+        fd, raw_index = tempfile.mkstemp(prefix="source-snapshot-", dir=self.run_dir)
+        os.close(fd)
+        index = Path(raw_index)
+        try:
+            index.unlink()
+            env = os.environ.copy()
+            env["GIT_INDEX_FILE"] = str(index)
+            _git_with_env(self.repo, env, "read-tree", head)
+            _git_with_env(
+                self.repo,
+                env,
+                "add",
+                "-A",
+                "--",
+                ".",
+                *_pathspec_exclusions(self.repo, [self.artifact_dir]),
+            )
+            return _git_with_env(self.repo, env, "write-tree")
+        finally:
+            if index.exists():
+                index.unlink()
+
+    def _source_snapshot(self) -> dict[str, Any] | None:
+        entries = sorted(_source_status_entries(self.repo, ignored_paths=[self.artifact_dir]))
+        if not entries:
+            return None
+        try:
+            head = git(self.repo, "rev-parse", "--verify", "HEAD")
+        except subprocess.CalledProcessError as exc:
+            raise ContractError("source base commit is required before source auto-commit") from exc
+        tree = self._temporary_source_index_tree(head=head)
+        fingerprint = stable_json_hash({"head": head, "tree": tree, "status": entries})
+        return {
+            "head": head,
+            "tree": tree,
+            "fingerprint": fingerprint,
+            "status": [[status, path] for status, path in entries],
+        }
+
+    def _matching_source_auto_commit_question(
+        self,
+        events: list[dict[str, Any]],
+        snapshot: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None] | None:
+        answers = {
+            event.get("payload", {}).get("nonce"): event.get("payload", {}).get("choice")
+            for event in events
+            if event["type"] == "answer_recorded"
+        }
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if (
+                event["type"] == "pending_question"
+                and payload.get("stage") == "source_auto_commit"
+                and payload.get("source_head") == snapshot["head"]
+                and payload.get("source_snapshot_fingerprint") == snapshot["fingerprint"]
+            ):
+                return payload, answers.get(payload.get("nonce"))
+        return None
+
+    def _source_auto_commit_question_payload_locked(
+        self,
+        events: list[dict[str, Any]],
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        language = self._controller_language()
+        payload = {
+            "nonce": uuid.uuid4().hex,
+            "prompt": _text(language, "Commit dirty source snapshot before execution?", "执行前提交脏的源码快照？"),
+            "options": [
+                {
+                    "id": "approve",
+                    "label": _text(language, "Approve commit", "批准提交"),
+                    "reason": _text(language, "create one controller source snapshot commit", "创建一个控制器源码快照提交"),
+                },
+                {
+                    "id": "stop",
+                    "label": _text(language, "Stop", "停止"),
+                    "reason": _text(language, "do not create an execution manifest", "不创建执行清单"),
+                },
+                {
+                    "id": "other",
+                    "label": _text(language, "Other", "其他"),
+                    "reason": _text(language, "free-form answer", "自由回答"),
+                },
+            ],
+            "recommended_option_id": "approve",
+            "free_form": {"option_id": "other", "required": False},
+            "expected_seq": len(events) + 1,
+            "stage": "source_auto_commit",
+            "source_head": snapshot["head"],
+            "source_tree": snapshot["tree"],
+            "source_snapshot_fingerprint": snapshot["fingerprint"],
+            "source_status": snapshot["status"],
+        }
+        return self._append_event_locked("pending_question", payload)["payload"]
+
+    def _source_auto_commit_decision_locked(
+        self,
+        events: list[dict[str, Any]],
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        match = self._matching_source_auto_commit_question(events, snapshot)
+        if match is None:
+            return {"action": "ask", "question": self._source_auto_commit_question_payload_locked(events, snapshot)}
+        question, choice = match
+        if choice is None:
+            return {"action": "ask", "question": question}
+        if choice != "approve":
+            raise ContractError("source auto-commit was not approved")
+        return {"action": "commit", "question": question}
+
+    def _commit_source_snapshot_locked(self, snapshot: dict[str, Any], *, approval_nonce: str) -> str:
+        current = self._source_snapshot()
+        if (
+            current is None
+            or current["head"] != snapshot["head"]
+            or current["fingerprint"] != snapshot["fingerprint"]
+        ):
+            raise ContractError("approved source snapshot changed")
+        commit = git(
+            self.repo,
+            "commit-tree",
+            current["tree"],
+            "-p",
+            current["head"],
+            "-m",
+            "optim-plans source snapshot",
+        )
+        git(self.repo, "update-ref", "-m", "optim-plans source snapshot", "HEAD", commit, current["head"])
+        git(self.repo, "reset", "-q", commit, "--", ".", *_pathspec_exclusions(self.repo, [self.artifact_dir]))
+        self._append_event_locked(
+            "source_snapshot_committed",
+            {
+                "approval_nonce": approval_nonce,
+                "parent": current["head"],
+                "commit": commit,
+                "tree": current["tree"],
+                "source_snapshot_fingerprint": current["fingerprint"],
+            },
+        )
+        return commit
+
+    def _same_source_snapshot(self, left: dict[str, Any] | None, right: dict[str, Any] | None) -> bool:
+        return (
+            left is not None
+            and right is not None
+            and left["head"] == right["head"]
+            and left["fingerprint"] == right["fingerprint"]
+        )
+
+    def _manifest_with_source_base(self, manifest: dict[str, Any], source_base: str) -> dict[str, Any]:
+        updated = _json_clone(manifest, source="execution manifest")
+        updated["source_base"] = source_base
+        updated["base_commit"] = source_base
+        return updated
+
+    def _persist_execution_manifest_locked(self, canonical: dict[str, Any]) -> dict[str, Any]:
+        replayed = self.replay()
+        self._require_lifecycle_locked(replayed.events, {"planning"}, "prepare-execution")
+        if any(event["type"] == "execution_manifest_created" for event in replayed.events):
+            raise ContractError("execution manifest is write-once")
+        payload = {"manifest": canonical, "manifest_hash": execution_manifest_hash(canonical)}
+        return self._append_event_locked("execution_manifest_created", payload)["payload"]
+
     def persist_execution_manifest(self, manifest: dict[str, Any]) -> dict[str, Any]:
         canonical = self._canonicalize_execution_manifest(canonical_execution_manifest(manifest))
         with self.controller_lock():
@@ -1366,12 +1607,7 @@ class OptimPlansState:
                 raise ContractError("execution manifest is write-once")
         self._smoke_execution_manifest(canonical)
         with self.controller_lock():
-            replayed = self.replay()
-            self._require_lifecycle_locked(replayed.events, {"planning"}, "prepare-execution")
-            if any(event["type"] == "execution_manifest_created" for event in replayed.events):
-                raise ContractError("execution manifest is write-once")
-            payload = {"manifest": canonical, "manifest_hash": execution_manifest_hash(canonical)}
-            return self._append_event_locked("execution_manifest_created", payload)["payload"]
+            return self._persist_execution_manifest_locked(canonical)
 
     def prepare_execution(self, manifest_path: Path) -> dict[str, Any]:
         try:
@@ -1383,8 +1619,56 @@ class OptimPlansState:
             raise ContractError("execution manifest must be a JSON object")
         if self._is_current_execution_manifest(manifest):
             self._require_current_execution_manifest(manifest)
-        self.persist_execution_manifest(manifest)
-        return self.request_execution_approval()
+        approved_snapshot: dict[str, Any] | None = None
+        approved_question: dict[str, Any] | None = None
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"planning"}, "prepare-execution")
+            if any(event["type"] == "execution_manifest_created" for event in replayed.events):
+                raise ContractError("execution manifest is write-once")
+            snapshot = self._source_snapshot()
+            if snapshot is not None:
+                decision = self._source_auto_commit_decision_locked(replayed.events, snapshot)
+                if decision["action"] == "ask":
+                    return decision["question"]
+                approved_snapshot = snapshot
+                approved_question = decision["question"]
+            else:
+                source_base = self._manifest_source_base(manifest)
+                current_base = git(self.repo, "rev-parse", "--verify", "HEAD")
+                if source_base != current_base:
+                    raise ContractError("execution manifest source_base does not match current HEAD")
+
+        self._smoke_execution_manifest(self._canonicalize_execution_manifest(canonical_execution_manifest(manifest)))
+
+        with self.source_prepare_lock():
+            with self.controller_lock():
+                replayed = self.replay()
+                self._require_lifecycle_locked(replayed.events, {"planning"}, "prepare-execution")
+                if any(event["type"] == "execution_manifest_created" for event in replayed.events):
+                    raise ContractError("execution manifest is write-once")
+                snapshot = self._source_snapshot()
+                if approved_snapshot is not None:
+                    if not self._same_source_snapshot(snapshot, approved_snapshot):
+                        if snapshot is None:
+                            raise ContractError("approved source snapshot changed")
+                        return self._source_auto_commit_question_payload_locked(replayed.events, snapshot)
+                    assert approved_question is not None
+                    commit = self._commit_source_snapshot_locked(snapshot, approval_nonce=approved_question["nonce"])
+                    manifest = self._manifest_with_source_base(manifest, commit)
+                elif snapshot is not None:
+                    decision = self._source_auto_commit_decision_locked(replayed.events, snapshot)
+                    if decision["action"] == "ask":
+                        return decision["question"]
+                    raise ContractError("source changed during execution manifest preparation")
+                else:
+                    source_base = self._manifest_source_base(manifest)
+                    current_base = git(self.repo, "rev-parse", "--verify", "HEAD")
+                    if source_base != current_base:
+                        raise ContractError("execution manifest source_base does not match current HEAD")
+                canonical = self._canonicalize_execution_manifest(canonical_execution_manifest(manifest))
+                self._persist_execution_manifest_locked(canonical)
+                return self._execution_approval_question_payload_locked(self.replay().events)
 
     def _execution_manifest_record(self, events: list[dict[str, Any]]) -> dict[str, Any]:
         records = [event.get("payload", {}) for event in events if event["type"] == "execution_manifest_created"]
@@ -1708,67 +1992,25 @@ class OptimPlansState:
             )
             return self._finish_question_payload_locked(replayed.events)
 
-    def request_execution_approval(self) -> dict[str, Any]:
-        with self.controller_lock():
-            replayed = self.replay()
-            record = self._execution_manifest_record(replayed.events)
-            language_gate = self._language_selection_question_payload_locked(replayed.events)
-            if language_gate is not None:
-                return language_gate
-            existing = [
-                event.get("payload", {})
-                for event in replayed.events
-                if event["type"] == "pending_question"
-                and event.get("payload", {}).get("stage") == "execution_launch"
-            ]
-            if len(existing) > 1:
-                raise ContractError("multiple execution approval questions recorded")
-            if existing:
-                question = existing[0]
-                if question.get("manifest") != record["manifest"] or question.get("manifest_hash") != record["manifest_hash"]:
-                    raise ContractError("execution approval question is not bound to the manifest")
-                source_nonce = self._direct_execution_source_nonce(replayed.events)
-                if source_nonce and self._answer_choice(replayed.events, question["nonce"]) is None:
-                    self._append_event_locked(
-                        "answer_recorded",
-                        {"nonce": question["nonce"], "choice": "approve", "source_nonce": source_nonce},
-                    )
-                    question = dict(question)
-                    question["choice"] = "approve"
-                    question["approval_source_nonce"] = source_nonce
-                return question
-
-            language = self._controller_language()
-            payload = {
-                "nonce": uuid.uuid4().hex,
-                "prompt": _text(language, "Approve execution?", "确认执行？"),
-                "options": [
-                    {
-                        "id": "approve",
-                        "label": _text(language, "Approve execution", "批准执行"),
-                        "reason": _text(language, "launch exactly this manifest", "严格按此清单启动"),
-                    },
-                    {
-                        "id": "stop",
-                        "label": _text(language, "Stop", "停止"),
-                        "reason": _text(language, "do not launch execution", "不启动执行"),
-                    },
-                    {
-                        "id": "other",
-                        "label": _text(language, "Other", "其他"),
-                        "reason": _text(language, "free-form answer", "自由回答"),
-                    },
-                ],
-                "recommended_option_id": "approve",
-                "free_form": {"option_id": "other", "required": False},
-                "expected_seq": len(replayed.events) + 1,
-                "stage": "execution_launch",
-                "manifest": record["manifest"],
-                "manifest_hash": record["manifest_hash"],
-            }
-            question = self._append_event_locked("pending_question", payload)["payload"]
-            source_nonce = self._direct_execution_source_nonce(replayed.events)
-            if source_nonce:
+    def _execution_approval_question_payload_locked(self, events: list[dict[str, Any]]) -> dict[str, Any]:
+        record = self._execution_manifest_record(events)
+        language_gate = self._language_selection_question_payload_locked(events)
+        if language_gate is not None:
+            return language_gate
+        existing = [
+            event.get("payload", {})
+            for event in events
+            if event["type"] == "pending_question"
+            and event.get("payload", {}).get("stage") == "execution_launch"
+        ]
+        if len(existing) > 1:
+            raise ContractError("multiple execution approval questions recorded")
+        if existing:
+            question = existing[0]
+            if question.get("manifest") != record["manifest"] or question.get("manifest_hash") != record["manifest_hash"]:
+                raise ContractError("execution approval question is not bound to the manifest")
+            source_nonce = self._direct_execution_source_nonce(events)
+            if source_nonce and self._answer_choice(events, question["nonce"]) is None:
                 self._append_event_locked(
                     "answer_recorded",
                     {"nonce": question["nonce"], "choice": "approve", "source_nonce": source_nonce},
@@ -1777,6 +2019,50 @@ class OptimPlansState:
                 question["choice"] = "approve"
                 question["approval_source_nonce"] = source_nonce
             return question
+
+        language = self._controller_language()
+        payload = {
+            "nonce": uuid.uuid4().hex,
+            "prompt": _text(language, "Approve execution?", "确认执行？"),
+            "options": [
+                {
+                    "id": "approve",
+                    "label": _text(language, "Approve execution", "批准执行"),
+                    "reason": _text(language, "launch exactly this manifest", "严格按此清单启动"),
+                },
+                {
+                    "id": "stop",
+                    "label": _text(language, "Stop", "停止"),
+                    "reason": _text(language, "do not launch execution", "不启动执行"),
+                },
+                {
+                    "id": "other",
+                    "label": _text(language, "Other", "其他"),
+                    "reason": _text(language, "free-form answer", "自由回答"),
+                },
+            ],
+            "recommended_option_id": "approve",
+            "free_form": {"option_id": "other", "required": False},
+            "expected_seq": len(events) + 1,
+            "stage": "execution_launch",
+            "manifest": record["manifest"],
+            "manifest_hash": record["manifest_hash"],
+        }
+        question = self._append_event_locked("pending_question", payload)["payload"]
+        source_nonce = self._direct_execution_source_nonce(events)
+        if source_nonce:
+            self._append_event_locked(
+                "answer_recorded",
+                {"nonce": question["nonce"], "choice": "approve", "source_nonce": source_nonce},
+            )
+            question = dict(question)
+            question["choice"] = "approve"
+            question["approval_source_nonce"] = source_nonce
+        return question
+
+    def request_execution_approval(self) -> dict[str, Any]:
+        with self.controller_lock():
+            return self._execution_approval_question_payload_locked(self.replay().events)
 
     def _manifest_source_base(self, manifest: dict[str, Any]) -> str:
         source_base = manifest.get("source_base", manifest.get("base_commit"))
@@ -6965,6 +7251,7 @@ GENERIC_QUESTION_RESERVED_NAMES = {
     "default",
     "execution_launch",
     "execution_summary",
+    "source_auto_commit",
     "finish_run",
     "finish-run",
     "approve",
@@ -7051,16 +7338,8 @@ class RefinementLedger:
 
 
 def require_clean_source(repo: Path, *, ignored_paths: list[Path] | None = None) -> None:
-    root = repo.resolve()
-    exclusions: list[str] = []
-    for path in ignored_paths or []:
-        try:
-            relative = Path(path).resolve().relative_to(root).as_posix()
-        except ValueError:
-            continue
-        exclusions.append(f":(exclude){relative}")
     result = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", ".", *exclusions],
+        ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", ".", *_pathspec_exclusions(repo, ignored_paths)],
         cwd=repo,
         text=True,
         stdout=subprocess.PIPE,

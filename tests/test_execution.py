@@ -251,6 +251,17 @@ class ExecutionTests(unittest.TestCase):
         started = state.start_execution(question["nonce"])
         return state, Path(started["run_worktree"])
 
+    def _prepare_manifest_path(self, root: Path, repo: Path, *, source_base: str | None = None) -> Path:
+        manifest = {
+            "plan_hash": "abc123",
+            "source_base": source_base or git(repo, "rev-parse", "--verify", "HEAD"),
+            "integration_destination": "main",
+            "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
+        }
+        path = root / "manifest.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path
+
     def _finish_nonce(self, state, outcome: str) -> str:
         question = state.request_finish_approval()
         choices = {option["id"] for option in question["options"]}
@@ -2377,6 +2388,145 @@ class ExecutionTests(unittest.TestCase):
                 state.prepare_execution(manifest_path)
 
             self.assertNotIn("execution_manifest_created", [event["type"] for event in state.replay().events])
+
+    def test_prepare_execution_dirty_source_asks_auto_commit_before_manifest(self) -> None:
+        from scripts.optim_plans_core import OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            base = git(repo, "rev-parse", "--verify", "HEAD")
+            state = OptimPlansState.initialize(repo, topic="Dirty Source", plan_hash="abc123")
+            manifest_path = self._prepare_manifest_path(raw_path, repo, source_base=base)
+            (repo / "src").mkdir()
+            (repo / "src/app.txt").write_text("dirty\n", encoding="utf-8")
+
+            question = state.prepare_execution(manifest_path)
+
+            self.assertEqual(question["stage"], "source_auto_commit")
+            self.assertEqual([option["id"] for option in question["options"]], ["approve", "stop", "other"])
+            self.assertEqual(question["source_head"], base)
+            self.assertIn("source_snapshot_fingerprint", question)
+            self.assertNotIn("auto", [option["id"] for option in question["options"]])
+            self.assertNotIn("execution_manifest_created", [event["type"] for event in state.replay().events])
+
+    def test_prepare_execution_approved_source_snapshot_commit_rewrites_manifest_base(self) -> None:
+        from scripts.optim_plans_core import OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            base = git(repo, "rev-parse", "--verify", "HEAD")
+            state = OptimPlansState.initialize(repo, topic="Dirty Source", plan_hash="abc123")
+            manifest_path = self._prepare_manifest_path(raw_path, repo, source_base=base)
+            (repo / "src").mkdir()
+            (repo / "src/app.txt").write_text("dirty\n", encoding="utf-8")
+
+            question = state.prepare_execution(manifest_path)
+            state.record_answer(question["nonce"], "approve")
+            approval = state.prepare_execution(manifest_path)
+            head = git(repo, "rev-parse", "--verify", "HEAD")
+            events = state.replay().events
+            manifest = next(event["payload"]["manifest"] for event in events if event["type"] == "execution_manifest_created")
+
+            self.assertEqual(approval["stage"], "execution_launch")
+            self.assertEqual(git(repo, "rev-list", "--count", f"{base}..HEAD"), "1")
+            self.assertEqual([event["type"] for event in events].count("source_snapshot_committed"), 1)
+            self.assertEqual(manifest["source_base"], head)
+            self.assertEqual(manifest["base_commit"], head)
+            self.assertEqual(approval["manifest"]["source_base"], head)
+            self.assertEqual(git(repo, "status", "--porcelain=v1", "--untracked-files=all"), "")
+
+    def test_prepare_execution_declined_source_auto_commit_blocks_manifest(self) -> None:
+        from scripts.optim_plans_core import ContractError, OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            base = git(repo, "rev-parse", "--verify", "HEAD")
+            state = OptimPlansState.initialize(repo, topic="Decline Source", plan_hash="abc123")
+            manifest_path = self._prepare_manifest_path(raw_path, repo, source_base=base)
+            (repo / "src").mkdir()
+            (repo / "src/app.txt").write_text("dirty\n", encoding="utf-8")
+
+            question = state.prepare_execution(manifest_path)
+            state.record_answer(question["nonce"], "stop")
+            with self.assertRaisesRegex(ContractError, "source auto-commit"):
+                state.prepare_execution(manifest_path)
+
+            self.assertEqual(git(repo, "rev-parse", "--verify", "HEAD"), base)
+            self.assertNotIn(
+                "source_snapshot_committed",
+                [event["type"] for event in state.replay().events],
+            )
+            self.assertNotIn("execution_manifest_created", [event["type"] for event in state.replay().events])
+
+    def test_prepare_execution_mutation_after_source_auto_commit_approval_reasks(self) -> None:
+        from scripts.optim_plans_core import OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            base = git(repo, "rev-parse", "--verify", "HEAD")
+            state = OptimPlansState.initialize(repo, topic="Changed Source", plan_hash="abc123")
+            manifest_path = self._prepare_manifest_path(raw_path, repo, source_base=base)
+            (repo / "src").mkdir()
+            target = repo / "src/app.txt"
+            target.write_text("first\n", encoding="utf-8")
+
+            first = state.prepare_execution(manifest_path)
+            state.record_answer(first["nonce"], "approve")
+            target.write_text("second\n", encoding="utf-8")
+            second = state.prepare_execution(manifest_path)
+
+            self.assertEqual(second["stage"], "source_auto_commit")
+            self.assertNotEqual(second["nonce"], first["nonce"])
+            self.assertNotEqual(second["source_snapshot_fingerprint"], first["source_snapshot_fingerprint"])
+            self.assertEqual(git(repo, "rev-parse", "--verify", "HEAD"), base)
+            self.assertNotIn("execution_manifest_created", [event["type"] for event in state.replay().events])
+
+    def test_concurrent_prepare_after_source_snapshot_does_not_persist_old_base(self) -> None:
+        from scripts.optim_plans_core import OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            base = git(repo, "rev-parse", "--verify", "HEAD")
+            state = OptimPlansState.initialize(repo, topic="Concurrent Source", plan_hash="abc123")
+            manifest_path = self._prepare_manifest_path(raw_path, repo, source_base=base)
+            (repo / "src").mkdir()
+            (repo / "src/app.txt").write_text("dirty\n", encoding="utf-8")
+            question = state.prepare_execution(manifest_path)
+            state.record_answer(question["nonce"], "approve")
+            script = (
+                "import json, sys\n"
+                "from pathlib import Path\n"
+                "from scripts.optim_plans_core import OptimPlansState\n"
+                "result = OptimPlansState.load_active(Path(sys.argv[1])).prepare_execution(Path(sys.argv[2]))\n"
+                "print(json.dumps(result))\n"
+            )
+
+            workers = [
+                subprocess.Popen(
+                    [sys.executable, "-c", script, str(repo), str(manifest_path)],
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                for _ in range(2)
+            ]
+            results = [worker.communicate(timeout=10) for worker in workers]
+            returncodes = [worker.returncode for worker in workers]
+            events = state.replay().events
+            manifests = [event["payload"]["manifest"] for event in events if event["type"] == "execution_manifest_created"]
+            head = git(repo, "rev-parse", "--verify", "HEAD")
+
+            self.assertEqual(returncodes.count(0), 1, results)
+            self.assertEqual(len(manifests), 1)
+            self.assertEqual([event["type"] for event in events].count("source_snapshot_committed"), 1)
+            self.assertEqual(manifests[0]["source_base"], head)
+            self.assertNotEqual(manifests[0]["source_base"], base)
 
     def test_launch_files_are_refreshed_before_smoke_cache_skip(self) -> None:
         from scripts.optim_plans_core import OptimPlansState, worker_launch_files

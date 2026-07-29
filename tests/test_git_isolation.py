@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,6 +44,75 @@ class GitIsolationTests(unittest.TestCase):
             git(repo, "add", "README.md")
             with self.assertRaises(ContractError):
                 require_clean_source(repo)
+
+    def test_prepare_execution_ignores_active_artifact_dir_for_source_snapshot(self) -> None:
+        from scripts.optim_plans_core import OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            base = git(repo, "rev-parse", "--verify", "HEAD")
+            state = OptimPlansState.initialize(repo, topic="Artifact Dirty", plan_hash="abc123")
+            (state.artifact_dir / "PLAN_v1.md").write_text("# plan\n", encoding="utf-8")
+            manifest_path = raw_path / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "plan_hash": "abc123",
+                        "source_base": base,
+                        "integration_destination": "main",
+                        "items": [{"id": "TASK-001", "allowed_paths": ["README.md"]}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            question = state.prepare_execution(manifest_path)
+
+            self.assertEqual(question["stage"], "execution_launch")
+            self.assertEqual(git(repo, "rev-parse", "--verify", "HEAD"), base)
+            self.assertNotIn(
+                "source_auto_commit",
+                [event.get("payload", {}).get("stage") for event in state.replay().events],
+            )
+
+    def test_prepare_execution_source_snapshot_commit_is_hookless_and_cleans_index(self) -> None:
+        from scripts.optim_plans_core import OptimPlansState, git_common_dir
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            base = git(repo, "rev-parse", "--verify", "HEAD")
+            hook_sentinel = raw_path / "hook-ran"
+            hook = git_common_dir(repo) / "hooks" / "pre-commit"
+            hook.write_text(f"#!/bin/sh\necho ran > {hook_sentinel}\nexit 1\n", encoding="utf-8")
+            hook.chmod(0o755)
+            (repo / "README.md").write_text("# staged\n", encoding="utf-8")
+            git(repo, "add", "README.md")
+            (repo / "src").mkdir()
+            (repo / "src" / "app.txt").write_text("untracked\n", encoding="utf-8")
+            state = OptimPlansState.initialize(repo, topic="Hookless Snapshot", plan_hash="abc123")
+            manifest_path = raw_path / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "plan_hash": "abc123",
+                        "source_base": base,
+                        "integration_destination": "main",
+                        "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            question = state.prepare_execution(manifest_path)
+            state.record_answer(question["nonce"], "approve")
+            state.prepare_execution(manifest_path)
+
+            self.assertFalse(hook_sentinel.exists())
+            self.assertEqual(git(repo, "rev-list", "--count", f"{base}..HEAD"), "1")
+            self.assertEqual(git(repo, "diff", "--cached", "--name-only"), "")
+            self.assertEqual(git(repo, "status", "--porcelain=v1", "--untracked-files=all"), "")
 
     def test_path_scopes_reject_escaping_symlink(self) -> None:
         from scripts.optim_plans_core import ContractError, resolve_path_scopes
