@@ -908,6 +908,27 @@ def cmd_status(args: argparse.Namespace) -> None:
             payload["next_action"] = "approve retry_approval_nonce then run retry_command, or finish with finish_approval_nonce"
         else:
             payload.setdefault("next_action", "finish with finish_approval_nonce")
+    elif replayed.status == "blocked":
+        blocked = next(
+            (
+                event.get("payload", {})
+                for event in reversed(replayed.events)
+                if event["type"] in {"execution_blocked", "batch_execution_blocked"}
+            ),
+            {},
+        )
+        if isinstance(blocked.get("batch_id"), str):
+            payload["blocked_batch_id"] = blocked["batch_id"]
+            payload["blocked_item_ids"] = blocked.get("item_ids", [])
+        elif isinstance(blocked.get("item_id"), str):
+            payload["blocked_item_id"] = blocked["item_id"]
+        payload["blocked_reason"] = blocked.get("reason", "retry policy blocked execution")
+        payload["blocked_evidence"] = blocked.get("evidence", "")
+        approval = state.request_finish_approval()
+        payload["events"] = len(state.replay().events)
+        payload["finish_approval_nonce"] = approval["nonce"]
+        payload["finish_choices"] = [option["id"] for option in approval["options"]]
+        payload["next_action"] = "finish with finish_approval_nonce"
     elif replayed.status == "awaiting_integration":
         approval = state.request_finish_approval()
         payload["events"] = len(state.replay().events)

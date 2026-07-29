@@ -335,6 +335,23 @@ class ExecutionTests(unittest.TestCase):
         state.append_event("awaiting_integration", {"final_checkpoint": checkpoint})
         return checkpoint
 
+    def _block_item_with_worker_failures(
+        self,
+        state,
+        run_worktree: Path,
+        *,
+        path: str = "src/done.txt",
+        evidence: str = "worker failed visibly",
+    ) -> Path:
+        target = run_worktree / path
+        for _ in range(3):
+            state.begin_item("TASK-001")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("failed attempt\n", encoding="utf-8")
+            state.record_worker_failure("TASK-001", evidence=evidence)
+        self.assertEqual(state.replay().status, "blocked")
+        return target
+
     def _add_passing_full_proof_files(self, repo: Path) -> None:
         (repo / "scripts").mkdir()
         (repo / "hooks").mkdir()
@@ -922,7 +939,7 @@ class ExecutionTests(unittest.TestCase):
             statuses = state._item_statuses(events, state._execution_manifest_record(events)["manifest"])
             self.assertEqual({statuses[item_id] for item_id in assignment["item_ids"]}, {"failed"})
 
-    def test_host_advance_reports_resume_phases_and_failure_enters_retry(self) -> None:
+    def test_host_advance_reports_resume_phases_and_failure_auto_retries(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
             state, _run_worktree = self._start_host_execution(
@@ -951,11 +968,15 @@ class ExecutionTests(unittest.TestCase):
             )
 
             events = state.replay().events
-            self.assertEqual(state.replay().status, "awaiting_retry_decision")
+            self.assertEqual(state.replay().status, "executing")
             self.assertIn("worker_failed", [event["type"] for event in events])
+            self.assertIn("retry_restored", [event["type"] for event in events])
             self.assertNotIn("checkpoint_created", [event["type"] for event in events])
             failure = next(event["payload"] for event in events if event["type"] == "worker_failed")
             self.assertEqual(failure["agent_handle"], "agent-fail")
+            retried = state.advance_item("TASK-001")
+            self.assertEqual(retried["phase"], "assigned")
+            self.assertEqual(retried["attempt"], 2)
 
     def test_host_failure_can_record_lost_handle_after_spawn_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -977,7 +998,25 @@ class ExecutionTests(unittest.TestCase):
             failure = next(event["payload"] for event in state.replay().events if event["type"] == "worker_failed")
             self.assertTrue(failure["agent_handle_lost"])
             self.assertEqual(failure["launch_nonce"], authorized["launch_nonce"])
-            self.assertEqual(state.replay().status, "awaiting_retry_decision")
+            self.assertEqual(state.replay().status, "executing")
+            self.assertIn("retry_restored", [event["type"] for event in state.replay().events])
+
+    def test_host_retry_item_returns_assignment_after_manual_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_execution(
+                repo,
+                verification_argv=[sys.executable, "-c", "pass"],
+            )
+            state.assign_item("TASK-001")
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/host.txt").write_text("bad\n", encoding="utf-8")
+            state.record_attempt_failure("audit_failed", "TASK-001", evidence="manual audit failure")
+
+            retried = state.retry_item("TASK-001", None)
+
+            self.assertEqual(retried["phase"], "assigned")
+            self.assertEqual(retried["attempt"], 2)
 
     def test_run_item_launches_manifest_adapter_and_verifier_before_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1563,13 +1602,14 @@ class ExecutionTests(unittest.TestCase):
             event_types = [event["type"] for event in events]
             self.assertIn("worker_completed", event_types)
             self.assertIn("verification_failed", event_types)
-            self.assertIn("awaiting_retry_decision", event_types)
+            self.assertIn("retry_restored", event_types)
+            self.assertIn("execution_blocked", event_types)
             self.assertNotIn("item_verified", event_types)
             self.assertNotIn("checkpoint_created", event_types)
             self.assertFalse(any(event.get("payload", {}).get("stage") in {"execution_retry", "finish_run"} for event in events))
             self.assertTrue((run_worktree / "src/app.txt").exists())
 
-    def test_verifier_failures_preserve_worktree_without_checkpoint(self) -> None:
+    def test_verifier_failures_auto_retry_until_blocked_without_checkpoint(self) -> None:
         cases = [
             ("nonzero", [sys.executable, "-c", "import sys; sys.stderr.write('x' * 10000); sys.exit(7)"], 5),
             ("missing", ["/definitely/missing/optim-plans-verifier"], 5),
@@ -1604,7 +1644,8 @@ class ExecutionTests(unittest.TestCase):
 
                 event_types = [event["type"] for event in state.replay().events]
                 self.assertIn("verification_failed", event_types)
-                self.assertIn("awaiting_retry_decision", event_types)
+                self.assertIn("retry_restored", event_types)
+                self.assertIn("execution_blocked", event_types)
                 self.assertNotIn("checkpoint_created", event_types)
                 self.assertFalse(any(event.get("payload", {}).get("stage") in {"execution_retry", "finish_run"} for event in state.replay().events))
                 self.assertTrue((run_worktree / "src/app.txt").exists())
@@ -2114,10 +2155,7 @@ class ExecutionTests(unittest.TestCase):
             state, run_worktree = self._start_execution(
                 repo, [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}]
             )
-            state.begin_item("TASK-001")
-            (run_worktree / "src").mkdir()
-            (run_worktree / "src/done.txt").write_text("failed attempt\n", encoding="utf-8")
-            state.record_worker_failure("TASK-001", evidence="worker failed")
+            self._block_item_with_worker_failures(state, run_worktree, evidence="worker failed")
             nonce = state.request_finish_approval()["nonce"]
             state.record_answer(nonce, "discarded")
 
@@ -2201,10 +2239,7 @@ class ExecutionTests(unittest.TestCase):
                 state, run_worktree = self._start_execution(
                     repo, [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}]
                 )
-                state.begin_item("TASK-001")
-                (run_worktree / "src").mkdir()
-                (run_worktree / "src/done.txt").write_text("failed attempt\n", encoding="utf-8")
-                state.record_worker_failure("TASK-001", evidence="worker failed visibly")
+                self._block_item_with_worker_failures(state, run_worktree)
                 nonce = state.request_finish_approval()["nonce"]
                 state.record_answer(nonce, outcome)
 
@@ -2212,7 +2247,7 @@ class ExecutionTests(unittest.TestCase):
 
                 self.assertEqual(state.replay().status, expected_status)
                 self.assertEqual(finished["outcome"], outcome)
-                self.assertEqual(finished["failure_event_type"], "worker_failed")
+                self.assertEqual(finished["failure_event_type"], "execution_blocked")
                 self.assertEqual(finished["failure_item_id"], "TASK-001")
                 self.assertIn("worker failed visibly", finished["failure_evidence"])
                 self.assertTrue(run_worktree.exists())
@@ -2904,7 +2939,7 @@ class ExecutionTests(unittest.TestCase):
             self._checkpoint_after_summary_choice(state)
             self.assertEqual(state.begin_item("TASK-002")["item_id"], "TASK-002")
 
-    def test_failed_attempt_blocks_dependents_until_single_use_retry_restore(self) -> None:
+    def test_failed_attempt_blocks_dependents_until_auto_retry_restore(self) -> None:
         from scripts.optim_plans_core import ContractError
 
         with tempfile.TemporaryDirectory() as raw:
@@ -2924,27 +2959,12 @@ class ExecutionTests(unittest.TestCase):
             dirty = run_worktree / "src/task.txt"
             dirty.write_text("bad attempt\n", encoding="utf-8")
             state.record_worker_failure("TASK-001", evidence="worker failed")
-            self.assertTrue(dirty.exists())
+            self.assertEqual(state.replay().status, "executing")
+            self.assertFalse(dirty.exists())
             with self.assertRaises(ContractError):
                 state.begin_item("TASK-002")
             with self.assertRaises(ContractError):
-                state.restore_retry("TASK-001", "missing")
-
-            restored = state.restore_retry("TASK-001", None)
-            self.assertTrue(restored["auto_approved"])
-            self.assertFalse(dirty.exists())
-
-            state.begin_item("TASK-001")
-            (run_worktree / "src").mkdir(exist_ok=True)
-            dirty.write_text("second bad attempt\n", encoding="utf-8")
-            state.record_worker_failure("TASK-001", evidence="worker failed again")
-            with self.assertRaises(ContractError):
                 state.restore_retry("TASK-001", None)
-
-            retry = state.request_retry("TASK-001")
-            state.record_answer(retry["nonce"], "approve")
-            state.restore_retry("TASK-001", retry["nonce"])
-            self.assertFalse(dirty.exists())
 
             state.begin_item("TASK-001")
             (run_worktree / "src").mkdir(exist_ok=True)
@@ -2963,7 +2983,7 @@ class ExecutionTests(unittest.TestCase):
             (run_worktree / "src").mkdir()
             target = run_worktree / "src/task.txt"
             target.write_text("first failure\n", encoding="utf-8")
-            state.record_worker_failure("TASK-001", evidence="first failure")
+            state.record_attempt_failure("audit_failed", "TASK-001", evidence="first failure")
             first_finish = state.request_finish_approval()
             state.record_answer(first_finish["nonce"], "failed")
             first = state.request_retry("TASK-001")
@@ -2973,7 +2993,7 @@ class ExecutionTests(unittest.TestCase):
             state.begin_item("TASK-001")
             (run_worktree / "src").mkdir(exist_ok=True)
             target.write_text("second failure\n", encoding="utf-8")
-            state.record_worker_failure("TASK-001", evidence="second failure")
+            state.record_attempt_failure("audit_failed", "TASK-001", evidence="second failure")
             second = state.request_retry("TASK-001")
             second_finish = state.request_finish_approval()
 
@@ -3008,7 +3028,7 @@ class ExecutionTests(unittest.TestCase):
             state.begin_item("TASK-001")
             (run_worktree / "src").mkdir()
             (run_worktree / "src/task.txt").write_text("failed\n", encoding="utf-8")
-            state.record_worker_failure("TASK-001", evidence="worker failed")
+            state.record_attempt_failure("audit_failed", "TASK-001", evidence="manual audit failure")
             retry = state.request_retry("TASK-001")
             state.record_answer(retry["nonce"], "approve")
 

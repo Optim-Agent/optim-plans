@@ -542,7 +542,7 @@ The implemented guardrails include:
 - executing-validating (ameliorating) ring before controller verification, with bounded safe-audit validator feedback injection for validator-driven retries;
 - host `spawn_agent` / `wait_agent` orchestration for Codex executor/validator delegation, or current Claude CLI adapter `run-item` foreground standalone `--agent` launch with `shell=False`, synchronous wait, and stdout JSON after adapter CLI smoke;
 - controller verification and Git audits for path allowlists and protected Git metadata;
-- `awaiting_retry_decision` with bounded evidence, automatic first retry restore, and explicit retry approval for later retries;
+- automatic restore/retry for ordinary executor, validator, and verification failures until success or `blocked` (three equivalent failures or five total failures since the latest checkpoint/base);
 - automatic checked-out fast-forward `run_finished` / `integrated` after every item, final audit, and full local proof pass;
 - `awaiting_integration` with bounded evidence when auto-integration is unsafe or post-fast-forward proof fails;
 - manual recovery `finish-run` outcomes, with `integrated` running the full local proof before terminal success;
