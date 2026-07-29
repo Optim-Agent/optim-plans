@@ -609,7 +609,7 @@ Implemented:
 - one controller-owned run worktree and run branch;
 - serial item execution with checkpoint commits;
 - validator worker loop before controller verification;
-- current Claude CLI adapter `run-item` foreground standalone `--agent` launch with `shell=False`, synchronous wait, and stdout JSON envelope;
+- adapter-only argv launch with `shell=False`: current Claude CLI adapter `run-item` foreground standalone `--agent`, synchronous wait, and stdout JSON envelope;
 - controller verification and Git audits for path allowlists and protected Git metadata, while preserving known ignored audit noise (`.xsw/`, `.pytest_cache/`, `__pycache__/`, `*.pyc`);
 - automatic first retry restore and explicit retry approval for later retries;
 - automatic checked-out fast-forward `run_finished` / `integrated` after clean final audits and full local proof;
