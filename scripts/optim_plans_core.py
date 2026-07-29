@@ -33,6 +33,8 @@ SMOKE_TESTED_WORKERS_CONFIG_KEY = "smoke_tested_workers"
 WORKER_LAUNCH_FILES_CONFIG_KEY = "worker_launch_files"
 EXECUTION_SUMMARY_CONFIG_KEY = "execution_summary"
 EXECUTION_SUMMARY_FILE = "EXECUTION_SUMMARY.md"
+LANGUAGE_CONFIG_KEY = "language"
+LANGUAGE_SELECTION_STAGE = "language-selection"
 HOST_EXECUTOR_PROMPT_PROTOCOL = "optim-plans-host-executor-v1"
 HOST_EXECUTOR_RESULT_SCHEMA = "optim-plans-worker-result-v1"
 HOST_VALIDATOR_PROMPT_PROTOCOL = "optim-plans-host-validator-v1"
@@ -264,6 +266,117 @@ def save_optim_plans_config_value(repo: Path, key: str, value: Any) -> None:
     config = read_optim_plans_config(repo)
     config.update({"schema": 1, key: value})
     write_json_atomic(optim_plans_config_path(repo), config)
+
+
+_LANGUAGE_TAG_RE = re.compile(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*")
+
+
+def normalize_language_tag(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if value != value.strip():
+        return None
+    tag = value
+    if tag.lower() in {"auto", "other"} or not _LANGUAGE_TAG_RE.fullmatch(tag):
+        return None
+    parts = tag.split("-")
+    if len(parts) > 8:
+        return None
+    normalized = [parts[0].lower()]
+    for part in parts[1:]:
+        if len(part) == 4 and part.isalpha():
+            normalized.append(part.title())
+        elif (len(part) == 2 and part.isalpha()) or (len(part) == 3 and part.isdigit()):
+            normalized.append(part.upper())
+        else:
+            normalized.append(part.lower())
+    return "-".join(normalized)
+
+
+def read_config_language(repo: Path) -> str | None:
+    return normalize_language_tag(read_optim_plans_config(repo).get(LANGUAGE_CONFIG_KEY))
+
+
+def language_renders_chinese(language: str | None) -> bool:
+    normalized = normalize_language_tag(language)
+    return bool(normalized and normalized.split("-", 1)[0] == "zh")
+
+
+def _text(language: str | None, english: str, chinese: str) -> str:
+    return chinese if language_renders_chinese(language) else english
+
+
+def recommended_language_option(request_text: str) -> str:
+    body = re.sub(r"`[^`]*`", " ", request_text)
+    body = re.sub(r"\b[\w./-]+\.(?:py|md|json|txt|ya?ml|toml|ini|cfg|sh)\b", " ", body)
+    chinese = len(re.findall(r"[\u3400-\u9fff]", body))
+    english = len(re.findall(r"[A-Za-z]+", body))
+    return "zh-hans" if chinese and chinese / max(chinese + english, 1) > 0.6 else "en"
+
+
+def _language_selection_options(language: str | None, recommended: str) -> list[dict[str, Any]]:
+    language_options = [
+        {
+            "id": "zh-hans",
+            "label": _text(language, "Simplified Chinese", "简体中文"),
+            "reason": _text(language, "render controller text and artifacts in Chinese", "控制器文本和产物使用中文"),
+            "language_value": "zh-Hans",
+        },
+        {
+            "id": "en",
+            "label": "English",
+            "reason": _text(language, "render controller text and artifacts in English", "控制器文本和产物使用英文"),
+            "language_value": "en",
+        },
+        {
+            "id": "zh-hant",
+            "label": _text(language, "Traditional Chinese", "繁体中文"),
+            "reason": _text(language, "render controller text and artifacts in Chinese", "控制器文本和产物使用中文"),
+            "language_value": "zh-Hant",
+        },
+    ]
+    ordered = [option for option in language_options if option["id"] == recommended]
+    ordered.extend(option for option in language_options if option["id"] != recommended)
+    ordered.extend(
+        [
+            {
+                "id": "other",
+                "label": _text(language, "Other", "其他"),
+                "reason": _text(language, "provide a supported language choice to continue", "提供可支持的语言选择后继续"),
+            },
+            {
+                "id": "auto",
+                "label": _text(language, "Auto-complete", "自动完成"),
+                "reason": _text(language, "use the recommended language", "使用推荐语言"),
+            },
+        ]
+    )
+    return ordered
+
+
+def language_selection_question_payload(request_text: str, *, expected_seq: int | None = None) -> dict[str, Any]:
+    recommended = recommended_language_option(request_text)
+    language = "zh-Hans" if recommended == "zh-hans" else "en"
+    payload: dict[str, Any] = {
+        "nonce": uuid.uuid4().hex,
+        "prompt": _text(language, "Choose the optim-plans language.", "选择 optim-plans 输出语言。"),
+        "options": _language_selection_options(language, recommended),
+        "recommended_option_id": recommended,
+        "free_form": {"option_id": "other", "required": False},
+        "stage": LANGUAGE_SELECTION_STAGE,
+    }
+    if expected_seq is not None:
+        payload["expected_seq"] = expected_seq
+    return payload
+
+
+def language_value_for_choice(question: dict[str, Any], choice: str) -> str | None:
+    if choice == "auto":
+        choice = str(question.get("recommended_option_id", ""))
+    for option in question.get("options", []):
+        if option.get("id") == choice:
+            return normalize_language_tag(option.get("language_value"))
+    return None
 
 
 def _default_worker_launch_files(repo: Path) -> dict[str, Path]:
@@ -947,7 +1060,14 @@ class OptimPlansState:
     artifact_dir: Path
 
     @classmethod
-    def initialize(cls, repo: Path | str, *, topic: str, plan_hash: str) -> "OptimPlansState":
+    def initialize(
+        cls,
+        repo: Path | str,
+        *,
+        topic: str,
+        plan_hash: str,
+        request_text: str | None = None,
+    ) -> "OptimPlansState":
         repo = Path(repo).absolute()
         common = git_common_dir(repo)
         root = common / "optim-plans"
@@ -986,6 +1106,8 @@ class OptimPlansState:
             "plan_hash": plan_hash,
             "artifact_dir": str(artifact_dir.relative_to(repo)),
         }
+        if request_text is not None:
+            payload["request_text"] = request_text
         write_json_atomic(state.run_file, payload)
         state.events_file.parent.mkdir(parents=True, exist_ok=True)
         state.events_file.touch(mode=0o600)
@@ -1034,6 +1156,57 @@ class OptimPlansState:
         with self.controller_lock():
             return self._append_event_locked(event_type, payload)
 
+    def _run_language_request_text(self, *, force: bool = False) -> str | None:
+        try:
+            run = parse_json_strict(self.run_file.read_text(encoding="utf-8"), source=str(self.run_file))
+        except OSError:
+            return None
+        request_text = run.get("request_text")
+        if isinstance(request_text, str):
+            return request_text
+        topic = run.get("topic")
+        return topic if force and isinstance(topic, str) else None
+
+    def _pending_language_selection(self, events: list[dict[str, Any]]) -> dict[str, Any] | None:
+        answered = {
+            event.get("payload", {}).get("nonce")
+            for event in events
+            if event["type"] == "answer_recorded"
+        }
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if (
+                event["type"] == "pending_question"
+                and payload.get("stage") == LANGUAGE_SELECTION_STAGE
+                and payload.get("nonce") not in answered
+            ):
+                return payload
+        return None
+
+    def _language_selection_question_payload_locked(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        force: bool = False,
+    ) -> dict[str, Any] | None:
+        pending = self._pending_language_selection(events)
+        if pending is not None:
+            return pending
+        if read_config_language(self.repo) is not None:
+            return None
+        request_text = self._run_language_request_text(force=force)
+        if request_text is None:
+            return None
+        payload = language_selection_question_payload(request_text, expected_seq=len(events) + 1)
+        return self._append_event_locked("pending_question", payload)["payload"]
+
+    def ensure_language_selection(self, *, force: bool = False) -> dict[str, Any] | None:
+        with self.controller_lock():
+            return self._language_selection_question_payload_locked(self.replay().events, force=force)
+
+    def _controller_language(self) -> str:
+        return read_config_language(self.repo) or "en"
+
     def _append_event_locked(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         replayed = self.replay()
         event = {
@@ -1077,6 +1250,16 @@ class OptimPlansState:
             choices = {option["id"] for option in found["options"]}
             if choice not in choices:
                 raise ContractError(f"invalid answer choice {choice!r}")
+            if found.get("stage") == LANGUAGE_SELECTION_STAGE:
+                language = language_value_for_choice(found, choice)
+                if language is None and choice != "other":
+                    raise ContractError(f"invalid language choice {choice!r}")
+                if language is not None:
+                    existing_language = read_config_language(self.repo)
+                    if existing_language is None:
+                        save_optim_plans_config_value(self.repo, LANGUAGE_CONFIG_KEY, language)
+                    elif existing_language != language:
+                        raise ContractError("language-selection retry conflicts with persisted language")
             if found.get("stage") == "execution_summary" and choice == "always-skip-summary":
                 save_optim_plans_config_value(self.repo, EXECUTION_SUMMARY_CONFIG_KEY, {"mode": "always-skip"})
             event = self._append_event_locked("answer_recorded", {"nonce": nonce, "choice": choice})
@@ -1256,6 +1439,9 @@ class OptimPlansState:
         return status
 
     def _finish_question_payload_locked(self, events: list[dict[str, Any]]) -> dict[str, Any]:
+        language_gate = self._language_selection_question_payload_locked(events)
+        if language_gate is not None:
+            return language_gate
         for event in reversed(events):
             payload = event.get("payload", {})
             if event["type"] == "pending_question" and payload.get("stage") == "finish_run":
@@ -1274,16 +1460,41 @@ class OptimPlansState:
                 ):
                     return payload
                 break
+        language = self._controller_language()
         payload = {
             "nonce": uuid.uuid4().hex,
-            "prompt": "Approve finish outcome?",
+            "prompt": _text(language, "Approve finish outcome?", "确认完成结果？"),
             "options": [
-                {"id": "integrated", "label": "Integrated", "reason": "local destination ref contains final checkpoint"},
-                {"id": "pr-opened", "label": "PR opened", "reason": "remote ref and PR URL contain final checkpoint"},
-                {"id": "kept", "label": "Keep", "reason": "preserve run worktree and branch"},
-                {"id": "discarded", "label": "Discard", "reason": "remove validated controller-owned worktree and branch"},
-                {"id": "failed", "label": "Failed", "reason": "preserve failure evidence"},
-                {"id": "aborted", "label": "Aborted", "reason": "preserve abort evidence"},
+                {
+                    "id": "integrated",
+                    "label": _text(language, "Integrated", "已集成"),
+                    "reason": _text(language, "local destination ref contains final checkpoint", "本地目标引用包含最终检查点"),
+                },
+                {
+                    "id": "pr-opened",
+                    "label": _text(language, "PR opened", "已打开 PR"),
+                    "reason": _text(language, "remote ref and PR URL contain final checkpoint", "远端引用和 PR URL 包含最终检查点"),
+                },
+                {
+                    "id": "kept",
+                    "label": _text(language, "Keep", "保留"),
+                    "reason": _text(language, "preserve run worktree and branch", "保留运行工作树和分支"),
+                },
+                {
+                    "id": "discarded",
+                    "label": _text(language, "Discard", "丢弃"),
+                    "reason": _text(language, "remove validated controller-owned worktree and branch", "移除已验证的控制器工作树和分支"),
+                },
+                {
+                    "id": "failed",
+                    "label": _text(language, "Failed", "失败"),
+                    "reason": _text(language, "preserve failure evidence", "保留失败证据"),
+                },
+                {
+                    "id": "aborted",
+                    "label": _text(language, "Aborted", "已中止"),
+                    "reason": _text(language, "preserve abort evidence", "保留中止证据"),
+                },
             ],
             "recommended_option_id": "kept",
             "free_form": {"option_id": "other", "required": False},
@@ -1298,6 +1509,9 @@ class OptimPlansState:
         item_id: str,
         failed_base_commit: str,
     ) -> dict[str, Any]:
+        language_gate = self._language_selection_question_payload_locked(events)
+        if language_gate is not None:
+            return language_gate
         consumed_nonces = {
             event.get("payload", {}).get("approval_nonce")
             for event in events
@@ -1313,13 +1527,26 @@ class OptimPlansState:
                 and payload.get("nonce") not in consumed_nonces
             ):
                 return payload
+        language = self._controller_language()
         payload = {
             "nonce": uuid.uuid4().hex,
-            "prompt": f"Approve retry restore for {item_id}?",
+            "prompt": _text(language, f"Approve retry restore for {item_id}?", f"确认为 {item_id} 恢复重试？"),
             "options": [
-                {"id": "approve", "label": "Approve retry", "reason": "restore failed run worktree once"},
-                {"id": "stop", "label": "Stop", "reason": "preserve failed attempt"},
-                {"id": "other", "label": "Other", "reason": "free-form answer"},
+                {
+                    "id": "approve",
+                    "label": _text(language, "Approve retry", "批准重试"),
+                    "reason": _text(language, "restore failed run worktree once", "恢复失败的运行工作树一次"),
+                },
+                {
+                    "id": "stop",
+                    "label": _text(language, "Stop", "停止"),
+                    "reason": _text(language, "preserve failed attempt", "保留失败尝试"),
+                },
+                {
+                    "id": "other",
+                    "label": _text(language, "Other", "其他"),
+                    "reason": _text(language, "free-form answer", "自由回答"),
+                },
             ],
             "recommended_option_id": "approve",
             "free_form": {"option_id": "other", "required": False},
@@ -1337,6 +1564,9 @@ class OptimPlansState:
         item_ids: list[str],
         failed_base_commit: str,
     ) -> dict[str, Any]:
+        language_gate = self._language_selection_question_payload_locked(events)
+        if language_gate is not None:
+            return language_gate
         consumed_nonces = {
             event.get("payload", {}).get("approval_nonce")
             for event in events
@@ -1353,13 +1583,26 @@ class OptimPlansState:
                 and payload.get("nonce") not in consumed_nonces
             ):
                 return payload
+        language = self._controller_language()
         payload = {
             "nonce": uuid.uuid4().hex,
-            "prompt": f"Approve retry restore for {batch_id}?",
+            "prompt": _text(language, f"Approve retry restore for {batch_id}?", f"确认为 {batch_id} 恢复重试？"),
             "options": [
-                {"id": "approve", "label": "Approve retry", "reason": "restore failed batch worktree once"},
-                {"id": "stop", "label": "Stop", "reason": "preserve failed batch attempt"},
-                {"id": "other", "label": "Other", "reason": "free-form answer"},
+                {
+                    "id": "approve",
+                    "label": _text(language, "Approve retry", "批准重试"),
+                    "reason": _text(language, "restore failed batch worktree once", "恢复失败的批量工作树一次"),
+                },
+                {
+                    "id": "stop",
+                    "label": _text(language, "Stop", "停止"),
+                    "reason": _text(language, "preserve failed batch attempt", "保留失败的批量尝试"),
+                },
+                {
+                    "id": "other",
+                    "label": _text(language, "Other", "其他"),
+                    "reason": _text(language, "free-form answer", "自由回答"),
+                },
             ],
             "recommended_option_id": "approve",
             "free_form": {"option_id": "other", "required": False},
@@ -1411,6 +1654,9 @@ class OptimPlansState:
     def _execution_summary_question_payload_locked(self, events: list[dict[str, Any]]) -> dict[str, Any] | None:
         if self._execution_summary_decision(events) is not None:
             return None
+        language_gate = self._language_selection_question_payload_locked(events)
+        if language_gate is not None:
+            return language_gate
         answered = {
             event.get("payload", {}).get("nonce")
             for event in events
@@ -1424,24 +1670,25 @@ class OptimPlansState:
                 and payload.get("nonce") not in answered
             ):
                 return payload
+        language = self._controller_language()
         payload = {
             "nonce": uuid.uuid4().hex,
-            "prompt": "Generate execution summary artifact?",
+            "prompt": _text(language, "Generate execution summary artifact?", "生成执行摘要产物？"),
             "options": [
                 {
                     "id": "generate-summary",
-                    "label": "Generate summary",
-                    "reason": "write EXECUTION_SUMMARY.md from controller events",
+                    "label": _text(language, "Generate summary", "生成摘要"),
+                    "reason": _text(language, "write EXECUTION_SUMMARY.md from controller events", "根据控制器事件写入执行摘要"),
                 },
                 {
                     "id": "skip-summary",
-                    "label": "Skip summary",
-                    "reason": "do not write a public execution summary for this run",
+                    "label": _text(language, "Skip summary", "跳过摘要"),
+                    "reason": _text(language, "do not write a public execution summary for this run", "本次运行不写公开执行摘要"),
                 },
                 {
                     "id": "always-skip-summary",
-                    "label": "Always skip summary",
-                    "reason": "skip this artifact for this and future runs in this repo",
+                    "label": _text(language, "Always skip summary", "总是跳过摘要"),
+                    "reason": _text(language, "skip this artifact for this and future runs in this repo", "本仓库当前和后续运行都跳过此产物"),
                 },
             ],
             "recommended_option_id": "generate-summary",
@@ -1464,6 +1711,9 @@ class OptimPlansState:
         with self.controller_lock():
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
+            language_gate = self._language_selection_question_payload_locked(replayed.events)
+            if language_gate is not None:
+                return language_gate
             existing = [
                 event.get("payload", {})
                 for event in replayed.events
@@ -1487,13 +1737,26 @@ class OptimPlansState:
                     question["approval_source_nonce"] = source_nonce
                 return question
 
+            language = self._controller_language()
             payload = {
                 "nonce": uuid.uuid4().hex,
-                "prompt": "Approve execution?",
+                "prompt": _text(language, "Approve execution?", "确认执行？"),
                 "options": [
-                    {"id": "approve", "label": "Approve execution", "reason": "launch exactly this manifest"},
-                    {"id": "stop", "label": "Stop", "reason": "do not launch execution"},
-                    {"id": "other", "label": "Other", "reason": "free-form answer"},
+                    {
+                        "id": "approve",
+                        "label": _text(language, "Approve execution", "批准执行"),
+                        "reason": _text(language, "launch exactly this manifest", "严格按此清单启动"),
+                    },
+                    {
+                        "id": "stop",
+                        "label": _text(language, "Stop", "停止"),
+                        "reason": _text(language, "do not launch execution", "不启动执行"),
+                    },
+                    {
+                        "id": "other",
+                        "label": _text(language, "Other", "其他"),
+                        "reason": _text(language, "free-form answer", "自由回答"),
+                    },
                 ],
                 "recommended_option_id": "approve",
                 "free_form": {"option_id": "other", "required": False},
@@ -6075,6 +6338,7 @@ class OptimPlansState:
             final_commit=final_commit,
             agent_config=agent_config,
             final_audit=self._execution_summary_final_audit(events),
+            language=self._controller_language(),
         )
         path = self.artifact_dir / EXECUTION_SUMMARY_FILE
         path.write_text(text, encoding="utf-8")
@@ -6216,50 +6480,63 @@ def render_plan(
     version: int,
     repo_evidence: list[str] | None = None,
     resolved_decisions: list[str] | None = None,
+    language: str | None = None,
 ) -> str:
     lines = [
         f"# PLAN_v{version}",
         "",
-        f"Goal: {goal}",
+        f"{_text(language, 'Goal', '目标')}: {goal}",
         "",
-        "| ID | Depends on | Verification | Evidence | Acceptance | Allowed paths | Summary |",
+        _text(
+            language,
+            "| ID | Depends on | Verification | Evidence | Acceptance | Allowed paths | Summary |",
+            "| ID | 依赖 | 验证 | 证据 | 验收 | 允许路径 | 摘要 |",
+        ),
         "|---|---|---|---|---|---|---|",
     ]
     for item in items:
-        depends = ", ".join(item.depends_on) if item.depends_on else "none"
-        allowed_paths = ", ".join(item.allowed_paths) if item.allowed_paths else "none"
-        acceptance = item.acceptance or "not recorded"
+        depends = ", ".join(item.depends_on) if item.depends_on else _text(language, "none", "无")
+        allowed_paths = ", ".join(item.allowed_paths) if item.allowed_paths else _text(language, "none", "无")
+        acceptance = item.acceptance or _text(language, "not recorded", "未记录")
         lines.append(
             f"| {item.id} | {depends} | {item.verification} | {item.evidence} | "
             f"{acceptance} | {allowed_paths} | {item.summary} |"
         )
-    lines.extend(["", "## Verifier Checklist", ""])
+    lines.extend(["", _text(language, "## Verifier Checklist", "## 验证清单"), ""])
     for item in items:
         criterion_id = item.verifier_criterion_id or f"VC-{item.id}"
         covered_ids = ", ".join(item.verifier_covered_item_ids or [item.id])
-        pass_condition = item.verifier_pass_condition or item.acceptance or "not recorded"
+        pass_condition = item.verifier_pass_condition or item.acceptance or _text(language, "not recorded", "未记录")
         metric = (
-            f"Metric threshold: {item.verifier_metric_threshold}"
+            f"{_text(language, 'Metric threshold', '指标阈值')}: {item.verifier_metric_threshold}"
             if item.verifier_metric_threshold
-            else f"Non-quantification: {item.verifier_non_quantification or 'not recorded'}"
+            else f"{_text(language, 'Non-quantification', '非量化说明')}: {item.verifier_non_quantification or _text(language, 'not recorded', '未记录')}"
         )
         lines.append(
-            f"- [ ] {criterion_id} | Covered: {covered_ids} | Pass: {pass_condition} | "
-            f"Evidence: {item.evidence} | {metric}"
+            f"- [ ] {criterion_id} | {_text(language, 'Covered', '覆盖')}: {covered_ids} | "
+            f"{_text(language, 'Pass', '通过条件')}: {pass_condition} | "
+            f"{_text(language, 'Evidence', '证据')}: {item.evidence} | {metric}"
         )
-    lines.extend(["", "## Repo evidence", ""])
-    lines.extend(f"- {evidence}" for evidence in (repo_evidence or ["Not recorded."]))
-    lines.extend(["", "## Resolved decisions", ""])
-    lines.extend(f"- {decision}" for decision in (resolved_decisions or ["Not recorded."]))
-    lines.extend(["", "## Revision ledger", "", "- Initial version; no prior findings."])
+    lines.extend(["", _text(language, "## Repo evidence", "## 仓库证据"), ""])
+    lines.extend(f"- {evidence}" for evidence in (repo_evidence or [_text(language, "Not recorded.", "未记录。")]))
+    lines.extend(["", _text(language, "## Resolved decisions", "## 已解决决策"), ""])
+    lines.extend(f"- {decision}" for decision in (resolved_decisions or [_text(language, "Not recorded.", "未记录。")]))
+    lines.extend(
+        [
+            "",
+            _text(language, "## Revision ledger", "## 修订记录"),
+            "",
+            _text(language, "- Initial version; no prior findings.", "- 初始版本；没有既有发现。"),
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
-def render_comments(mode: str, version: int, findings: list[dict[str, str]]) -> str:
+def render_comments(mode: str, version: int, findings: list[dict[str, str]], *, language: str | None = None) -> str:
     title = f"PLAN_v{version}_{mode}_comments"
     lines = [f"# {title}", ""]
     for finding in findings:
-        lines.append(f"- {finding.get('id', 'F-???')}: {finding.get('fix', 'No fix recorded')}")
+        lines.append(f"- {finding.get('id', 'F-???')}: {finding.get('fix', _text(language, 'No fix recorded', '未记录修复'))}")
     return "\n".join(lines) + "\n"
 
 
@@ -6271,25 +6548,30 @@ def render_execution_summary(
     final_commit: str = "unknown",
     agent_config: str = "unknown",
     final_audit: str = "unknown",
+    language: str | None = None,
 ) -> str:
     lines = [
         "# EXECUTION_SUMMARY",
         "",
-        f"Base commit: {base_commit}",
-        f"Final commit: {final_commit}",
-        f"Agent config: {agent_config}",
-        f"Final audit: {final_audit}",
+        f"{_text(language, 'Base commit', '基线提交')}: {base_commit}",
+        f"{_text(language, 'Final commit', '最终提交')}: {final_commit}",
+        f"{_text(language, 'Agent config', '智能体配置')}: {agent_config}",
+        f"{_text(language, 'Final audit', '最终审计')}: {final_audit}",
         "",
-        "Changed files and commits are recorded per item below.",
+        _text(language, "Changed files and commits are recorded per item below.", "下方按条目记录变更文件和提交。"),
         "",
-        "| ID | Status | Evidence | Attempts | Changed files | Commits | Retry decisions | Limitations | Explanation |",
+        _text(
+            language,
+            "| ID | Status | Evidence | Attempts | Changed files | Commits | Retry decisions | Limitations | Explanation |",
+            "| ID | 状态 | 证据 | 尝试次数 | 变更文件 | 提交 | 重试决策 | 限制 | 说明 |",
+        ),
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for item in items:
         result = results.get(item.id, {})
-        status = result.get("status", "missing")
+        status = result.get("status", _text(language, "missing", "缺失"))
         evidence = result.get("evidence") or item.evidence
-        explanation = result.get("explanation", "No validated result recorded")
+        explanation = result.get("explanation", _text(language, "No validated result recorded", "未记录已验证结果"))
         attempts = result.get("attempts", 0)
         limitations = result.get("limitations", "")
         changed_files = ", ".join(result.get("changed_files", []))
@@ -6390,13 +6672,20 @@ class QuestionLedger:
         alternatives: list[tuple[str, str, str]] | None = None,
         allow_auto_complete: bool = True,
         allow_other: bool = True,
+        language: str | None = None,
     ) -> Question:
         options = [Option(*recommended)]
         options.extend(Option(*item) for item in (alternatives or []))
         if allow_other:
-            options.append(Option("other", "Other", "free-form answer"))
+            options.append(Option("other", _text(language, "Other", "其他"), _text(language, "free-form answer", "自由回答")))
         if allow_auto_complete:
-            options.append(Option("auto", "Auto-complete", "use recommended answers until the next gate"))
+            options.append(
+                Option(
+                    "auto",
+                    _text(language, "Auto-complete", "自动完成"),
+                    _text(language, "use recommended answers until the next gate", "在下一个门禁前使用推荐答案"),
+                )
+            )
         question = Question(uuid.uuid4().hex, prompt, options)
         self.pending[question.nonce] = question
         return question
@@ -6430,6 +6719,7 @@ GENERIC_QUESTION_RESERVED_NAMES = {
     "generate-summary",
     "skip-summary",
     "always-skip-summary",
+    LANGUAGE_SELECTION_STAGE,
     "other",
     "auto",
     "skip-refinement-execute",

@@ -163,12 +163,19 @@ class SkillContractTests(unittest.TestCase):
 
     def test_language_policy_matches_request_language_scope(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
+        self.assertIn("`.git/optim-plans/config.json` top-level `language` field", text)
+        self.assertIn("Run controller `init` with the original request in `--request-text`", text)
+        self.assertIn("the controller's `language-selection` question", text)
+        self.assertIn("`zh-hans`, `en`, `zh-hant`, `other`, `auto`", text)
+        self.assertIn("`language_value` metadata (`zh-Hans`, `en`, `zh-Hant`)", text)
         self.assertIn("more than 60% of the user's planning request's natural-language body", text)
-        self.assertIn("use that language for questioning, review summaries, criticizer questions, answer choices", text)
+        self.assertIn("Use the selected language for questioning, review summaries, criticizer questions, answer choices", text)
         self.assertIn("optim-plans Markdown under `docs/optim-plans/`", text)
         self.assertIn("`> 60%` threshold: ignore command prefixes, option IDs, file paths, and code spans", text)
-        self.assertIn("localize visible option descriptions/reasons and agent-written choice prose", text)
+        self.assertIn("localize visible prompt text, option labels, option descriptions/reasons", text)
         self.assertIn("controller-backed questions", text)
+        self.assertIn("Valid unsupported BCP47-style tags fall back to English renderers", text)
+        self.assertIn("primary subtag is exactly `zh`", text)
         self.assertIn("Always write commit messages in English", text)
 
     def test_plan_request_levels_are_documented(self) -> None:

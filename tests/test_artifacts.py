@@ -91,6 +91,16 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn("Changed files", report)
         self.assertIn("Commits", report)
 
+        zh_plan = render_plan("Goal", items, version=2, language="zh-Hant")
+        self.assertIn("## 验证清单", zh_plan)
+        self.assertIn("目标: Goal", zh_plan)
+        zh_report = render_execution_summary(items, {}, language="zh-CN")
+        self.assertIn("基线提交", zh_report)
+        self.assertIn("| ID | 状态 | 证据", zh_report)
+        fallback_report = render_execution_summary(items, {}, language="fr-CA")
+        self.assertIn("Base commit", fallback_report)
+        self.assertNotIn("基线提交", fallback_report)
+
 
 if __name__ == "__main__":
     unittest.main()

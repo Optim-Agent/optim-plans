@@ -261,13 +261,16 @@ claude plugin list
 claude plugin details optim-plans@optim-plans-dev
 ```
 
-Restart is required for updated plugin code to apply. `.git/optim-plans/config.json` is not an install artifact; it is created per target repo when worker/model choices or execution prep need persisted config. Delegated worker choices persist under `refinement_worker.choice`, `executor_worker.choice`, and `validator_worker.choice`.
+Restart is required for updated plugin code to apply. `.git/optim-plans/config.json` is not an install artifact; it is created per target repo when worker/model choices, language choice, or execution prep need persisted config. Delegated worker choices persist under `refinement_worker.choice`, `executor_worker.choice`, and `validator_worker.choice`.
+
+`config.language` is a top-level normalized BCP47-style string. `init --request-text` stores the original request in `run.json`; when `config.language` is missing or invalid, `init` returns the first `language-selection` question and later controller question surfaces return that same unanswered question until it is answered. Language option IDs stay `zh-hans`, `en`, `zh-hant`, `other`, `auto`; `zh-hans`, `en`, and `zh-hant` carry `language_value` metadata. Valid unsupported tags use English renderers, and only a primary subtag of exactly `zh` renders Chinese. Commit messages remain English.
 
 To permanently skip execution summaries for one repo, edit `.git/optim-plans/config.json`:
 
 ```json
 {
   "schema": 1,
+  "language": "en",
   "execution_summary": {
     "mode": "always-skip"
   },
@@ -452,7 +455,7 @@ AI:  This is open-ended plugin design. I will inspect the directory, research
 ### Use the controller directly
 
 ```bash
-python3 scripts/optim_plans.py init --repo <repo> --topic "<topic>"
+python3 scripts/optim_plans.py init --repo <repo> --topic "<topic>" --request-text "<original request>"
 python3 scripts/optim_plans.py ask --repo <repo> --prompt "Choose reviewer" --plan-level small-plan
 python3 scripts/optim_plans.py answer --repo <repo> --nonce <nonce> --choice <option-id>
 python3 scripts/optim_plans.py answer --repo <repo> --nonce <nonce> --choice codex-manual --model <model> --effort <effort>

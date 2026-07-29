@@ -31,8 +31,15 @@ def controller_json(*args: str, env: dict[str, str] | None = None) -> dict[str, 
     return json.loads(result.stdout)
 
 
-def init_controller(repo: Path, topic: str) -> None:
-    controller_json("init", "--repo", str(repo), "--topic", topic)
+def answer_language_if_needed(repo: Path, payload: dict[str, Any]) -> None:
+    if payload.get("stage") == "language-selection":
+        answer_choice(repo, payload["nonce"], payload["recommended_option_id"])
+
+
+def init_controller(repo: Path, topic: str) -> dict[str, Any]:
+    payload = controller_json("init", "--repo", str(repo), "--topic", topic)
+    answer_language_if_needed(repo, payload)
+    return payload
 
 
 def ask_agent_choice(repo: Path, prompt: str = "Choose agent", role: str = "refinement") -> dict[str, Any]:
@@ -100,13 +107,31 @@ class E2ETests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
             init = subprocess.run(
-                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "E2E Plan"],
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/optim_plans.py"),
+                    "init",
+                    "--repo",
+                    str(repo),
+                    "--topic",
+                    "E2E Plan",
+                    "--request-text",
+                    "Please plan the controller flow in English.",
+                ],
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=True,
             )
             payload = json.loads(init.stdout)
+            self.assertEqual(payload["stage"], "language-selection")
+            self.assertEqual(payload["recommended_option_id"], "en")
+            self.assertEqual([option["id"] for option in payload["options"]], ["en", "zh-hans", "zh-hant", "other", "auto"])
+            self.assertEqual(payload["options"][0]["language_value"], "en")
+            blocked = controller_json("ask", "--repo", str(repo), "--prompt", "Choose reviewer")
+            self.assertEqual(blocked["stage"], "language-selection")
+            self.assertEqual(blocked["nonce"], payload["nonce"])
+            answer_choice(repo, payload["nonce"], "en")
             artifact_dir = repo / payload["artifact_dir"]
             self.assertTrue(artifact_dir.is_dir())
             self.assertFalse((artifact_dir / "BRAINSTORM.md").exists())
@@ -164,13 +189,7 @@ class E2ETests(unittest.TestCase):
     def test_cli_ask_emits_plan_level_and_rejects_unknown_level(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
-            subprocess.run(
-                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "Plan Level"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
+            init_controller(repo, "Plan Level")
             question = subprocess.run(
                 [
                     sys.executable,
@@ -277,7 +296,7 @@ class E2ETests(unittest.TestCase):
             path = config_path(repo)
             self.assertEqual(
                 json.loads(path.read_text(encoding="utf-8")),
-                {"schema": 1, "refinement_worker": {"choice": "foreground"}},
+                {"schema": 1, "language": "en", "refinement_worker": {"choice": "foreground"}},
             )
             self.assertEqual(ask_agent_choice(repo)["choice"], "foreground")
 
@@ -296,7 +315,7 @@ class E2ETests(unittest.TestCase):
             repo = make_repo(Path(raw))
             init_controller(repo, "Incomplete Config")
             path = config_path(repo)
-            path.write_text(json.dumps({"schema": 1, "refinement_worker": []}), encoding="utf-8")
+            path.write_text(json.dumps({"schema": 1, "language": "en", "refinement_worker": []}), encoding="utf-8")
 
             self.assertIn("options", ask_agent_choice(repo))
 
@@ -304,7 +323,7 @@ class E2ETests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
             init_controller(repo, "Legacy Agent Choice")
-            config_path(repo).write_text(json.dumps({"schema": 1, "agent_choice": {"choice": "foreground"}}), encoding="utf-8")
+            config_path(repo).write_text(json.dumps({"schema": 1, "language": "en", "agent_choice": {"choice": "foreground"}}), encoding="utf-8")
 
             self.assertIn("options", ask_agent_choice(repo))
 
@@ -460,13 +479,7 @@ class E2ETests(unittest.TestCase):
     def test_cli_ask_background_model_stage_offers_model_effort_choices(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
-            subprocess.run(
-                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "Model Choice"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
+            init_controller(repo, "Model Choice")
             question = subprocess.run(
                 [
                     sys.executable,
@@ -571,7 +584,7 @@ class E2ETests(unittest.TestCase):
             path = config_path(repo)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
-                json.dumps({"schema": 1, "refinement_worker": {"platform": other, "mode": "default"}}),
+                json.dumps({"schema": 1, "language": "en", "refinement_worker": {"platform": other, "mode": "default"}}),
                 encoding="utf-8",
             )
 
@@ -678,9 +691,10 @@ class E2ETests(unittest.TestCase):
             raw_path = Path(raw)
             repo = make_repo(raw_path)
             init = controller_json("init", "--repo", str(repo), "--topic", "Executor Required")
+            answer_language_if_needed(repo, init)
             platform = host_agent(os.environ)
             config_path(repo).write_text(
-                json.dumps({"schema": 1, "refinement_worker": {"platform": platform, "mode": "default"}}),
+                json.dumps({"schema": 1, "language": "en", "refinement_worker": {"platform": platform, "mode": "default"}}),
                 encoding="utf-8",
             )
             sentinel = raw_path / "smoked"
@@ -731,9 +745,10 @@ class E2ETests(unittest.TestCase):
             raw_path = Path(raw)
             repo = make_repo(raw_path)
             init = controller_json("init", "--repo", str(repo), "--topic", "Validator Required")
+            answer_language_if_needed(repo, init)
             platform = host_agent(os.environ)
             config_path(repo).write_text(
-                json.dumps({"schema": 1, "executor_worker": {"platform": platform, "mode": "default"}}),
+                json.dumps({"schema": 1, "language": "en", "executor_worker": {"platform": platform, "mode": "default"}}),
                 encoding="utf-8",
             )
             manifest_path = raw_path / "manifest.json"
@@ -772,7 +787,7 @@ class E2ETests(unittest.TestCase):
             init_controller(repo, "Legacy Validator Not Required")
             platform = host_agent(os.environ)
             config_path(repo).write_text(
-                json.dumps({"schema": 1, "executor_worker": {"platform": platform, "mode": "default"}}),
+                json.dumps({"schema": 1, "language": "en", "executor_worker": {"platform": platform, "mode": "default"}}),
                 encoding="utf-8",
             )
             worker = make_executable(
@@ -881,6 +896,7 @@ class E2ETests(unittest.TestCase):
                 json.dumps(
                     {
                         "schema": 1,
+                        "language": "en",
                         "executor_worker": {
                             "platform": platform,
                             "mode": "manual",
@@ -903,13 +919,7 @@ class E2ETests(unittest.TestCase):
     def test_cli_ask_mini_plan_uses_same_refinement_mode_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
-            subprocess.run(
-                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "Mini Plan"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
+            init_controller(repo, "Mini Plan")
             question = subprocess.run(
                 [
                     sys.executable,
@@ -1001,14 +1011,8 @@ class E2ETests(unittest.TestCase):
                 "    'evidence': 'worker done',\n"
                 "}))\n",
             )
-            init = subprocess.run(
-                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "Run Item"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            run_id = json.loads(init.stdout)["run_id"]
+            init = init_controller(repo, "Run Item")
+            run_id = init["run_id"]
             manifest = {
                 "plan_hash": "abc123",
                 "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
@@ -1107,14 +1111,8 @@ class E2ETests(unittest.TestCase):
             repo = make_repo(raw_path)
             add_passing_full_proof_files(repo)
             run_worktree = raw_path / "host-run-worktree"
-            init = subprocess.run(
-                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "Host CLI"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            run_id = json.loads(init.stdout)["run_id"]
+            init = init_controller(repo, "Host CLI")
+            run_id = init["run_id"]
             manifest = {
                 "plan_hash": "abc123",
                 "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
@@ -1213,7 +1211,7 @@ class E2ETests(unittest.TestCase):
             repo = make_repo(raw_path)
             add_passing_full_proof_files(repo)
             run_worktree = raw_path / "batch-run-worktree"
-            init = controller_json("init", "--repo", str(repo), "--topic", "Host Batch CLI")
+            init = init_controller(repo, "Host Batch CLI")
             manifest = {
                 "plan_hash": "abc123",
                 "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
@@ -1309,13 +1307,7 @@ class E2ETests(unittest.TestCase):
     def test_cli_execution_manifest_approval_and_start_flow(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
-            subprocess.run(
-                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "Execution Flow"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
+            init_controller(repo, "Execution Flow")
             manifest = {
                 "plan_hash": "abc123",
                 "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
@@ -1635,14 +1627,8 @@ class E2ETests(unittest.TestCase):
                 "    'evidence': 'worker done',\n"
                 "}))\n",
             )
-            init = subprocess.run(
-                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "init", "--repo", str(repo), "--topic", "Lifecycle"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            run_id = json.loads(init.stdout)["run_id"]
+            init = init_controller(repo, "Lifecycle")
+            run_id = init["run_id"]
             manifest = {
                 "plan_hash": "abc123",
                 "source_base": git(repo, "rev-parse", "--verify", "HEAD"),

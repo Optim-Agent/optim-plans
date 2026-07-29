@@ -20,7 +20,11 @@ Treat the user's prompt as a planning target, not write authorization. After any
 
 ## Language Policy
 
-When more than 60% of the user's planning request's natural-language body is written in one language, use that language for questioning, review summaries, criticizer questions, answer choices, and optim-plans Markdown under `docs/optim-plans/`. Count only natural-language prose for the `> 60%` threshold: ignore command prefixes, option IDs, file paths, and code spans. Keep stable option IDs and exact controller-required protocol labels unchanged, but localize visible option descriptions/reasons and agent-written choice prose when rendering controller-backed questions. Always write commit messages in English.
+Persist language in the target repo's `.git/optim-plans/config.json` top-level `language` field as a normalized BCP47-style string. Run controller `init` with the original request in `--request-text`; it is stored in `run.json`. If `config.language` is missing or invalid, the first visible response is the controller's `language-selection` question, and every later controller-backed question surface must return that unanswered question until it is answered.
+
+The `language-selection` option IDs and order are stable: `zh-hans`, `en`, `zh-hant`, `other`, `auto`. The `zh-hans`, `en`, and `zh-hant` options carry `language_value` metadata (`zh-Hans`, `en`, `zh-Hant`). Recommend Chinese (`zh-hans`) when more than 60% of the user's planning request's natural-language body is non-English Chinese; otherwise recommend English (`en`). Count only natural-language prose for the `> 60%` threshold: ignore command prefixes, option IDs, file paths, and code spans.
+
+Use the selected language for questioning, review summaries, criticizer questions, answer choices, and optim-plans Markdown under `docs/optim-plans/`. Keep stable option IDs, stages, nonces, protocol labels, artifact protocol names, and exact controller-required protocol labels unchanged, but localize visible prompt text, option labels, option descriptions/reasons, and agent-written choice prose when rendering controller-backed questions. Valid unsupported BCP47-style tags fall back to English renderers; only language tags whose primary subtag is exactly `zh` render Chinese. Always write commit messages in English.
 
 ## Plan Request Levels
 

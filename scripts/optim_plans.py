@@ -22,8 +22,10 @@ try:
         host_agent,
         host_executor_prompt_hash,
         json_text,
+        language_renders_chinese,
         latest_preserved_run,
         plan_level,
+        read_config_language,
         read_optim_plans_config,
         save_optim_plans_config_value,
         sha256_text,
@@ -42,8 +44,10 @@ except ImportError:  # pragma: no cover - package import path
         host_agent,
         host_executor_prompt_hash,
         json_text,
+        language_renders_chinese,
         latest_preserved_run,
         plan_level,
+        read_config_language,
         read_optim_plans_config,
         save_optim_plans_config_value,
         sha256_text,
@@ -60,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     init = sub.add_parser("init")
     init.add_argument("--repo", required=True)
     init.add_argument("--topic", required=True)
+    init.add_argument("--request-text")
 
     ask = sub.add_parser("ask")
     ask.add_argument("--repo", required=True)
@@ -277,6 +282,22 @@ def _host_agent(env: dict[str, str]) -> str:
     return host_agent(env)
 
 
+def _language(repo: Path) -> str:
+    return read_config_language(repo) or "en"
+
+
+def _t(language: str | None, english: str, chinese: str) -> str:
+    return chinese if language_renders_chinese(language) else english
+
+
+def _language_gate(state: OptimPlansState) -> bool:
+    question = state.ensure_language_selection(force=True)
+    if question is None:
+        return False
+    print_json(question)
+    return True
+
+
 def _save_config(repo: Path, key: str, value: dict[str, Any]) -> None:
     existing = read_optim_plans_config(repo).get(key)
     merged = dict(existing) if isinstance(existing, dict) else {}
@@ -321,11 +342,11 @@ def _manifest_requests_validator(manifest_path: Path) -> bool:
 
 
 def _background_model_options(
-    *, env: dict[str, str] | None = None, role: str = "refinement"
+    *, env: dict[str, str] | None = None, role: str = "refinement", language: str | None = None
 ) -> tuple[tuple[str, str, str], list[tuple[str, str, str]]]:
     env = env or os.environ.copy()
-    codex_reason = "use detected Codex defaults for model and effort"
-    claude_reason = "use detected Claude defaults for model and effort"
+    codex_reason = _t(language, "use detected Codex defaults for model and effort", "使用检测到的 Codex 默认模型和推理强度")
+    claude_reason = _t(language, "use detected Claude defaults for model and effort", "使用检测到的 Claude 默认模型和推理强度")
     try:
         from agent_adapters import detect_agents
     except ImportError:  # pragma: no cover - package import path
@@ -334,31 +355,71 @@ def _background_model_options(
     codex = agents.get("codex")
     claude = agents.get("claude")
     if codex and codex.available:
-        codex_reason = f"use Codex model {codex.configured_model or 'default'} with effort {codex.configured_effort or 'default'}"
+        codex_reason = _t(
+            language,
+            f"use Codex model {codex.configured_model or 'default'} with effort {codex.configured_effort or 'default'}",
+            f"使用 Codex 模型 {codex.configured_model or 'default'}，推理强度 {codex.configured_effort or 'default'}",
+        )
     if claude and claude.available:
-        claude_reason = f"use Claude model {claude.configured_model or 'default'} with effort {claude.configured_effort or 'default'}"
+        claude_reason = _t(
+            language,
+            f"use Claude model {claude.configured_model or 'default'} with effort {claude.configured_effort or 'default'}",
+            f"使用 Claude 模型 {claude.configured_model or 'default'}，推理强度 {claude.configured_effort or 'default'}",
+        )
     if role == "executor":
         codex_options = [
-            ("codex-default", "Codex host multi-agent defaults", codex_reason),
-            ("codex-manual", "Codex host multi-agent manual", "choose explicit model and effort for Codex host spawning"),
-            ("codex-cli-default", "Codex CLI fallback defaults", "use Codex CLI subprocess execution with detected defaults"),
-            ("codex-cli-manual", "Codex CLI fallback manual", "use Codex CLI subprocess execution with explicit model and effort"),
+            ("codex-default", _t(language, "Codex host multi-agent defaults", "Codex 主机多智能体默认值"), codex_reason),
+            (
+                "codex-manual",
+                _t(language, "Codex host multi-agent manual", "Codex 主机多智能体手动配置"),
+                _t(language, "choose explicit model and effort for Codex host spawning", "为 Codex 主机派生选择明确模型和推理强度"),
+            ),
+            (
+                "codex-cli-default",
+                _t(language, "Codex CLI fallback defaults", "Codex CLI 回退默认值"),
+                _t(language, "use Codex CLI subprocess execution with detected defaults", "使用检测到的默认值运行 Codex CLI 子进程"),
+            ),
+            (
+                "codex-cli-manual",
+                _t(language, "Codex CLI fallback manual", "Codex CLI 回退手动配置"),
+                _t(language, "use Codex CLI subprocess execution with explicit model and effort", "使用明确模型和推理强度运行 Codex CLI 子进程"),
+            ),
         ]
     elif role == "validator":
         codex_options = [
-            ("codex-default", "Codex host validator defaults", codex_reason),
-            ("codex-manual", "Codex host validator manual", "choose explicit model and effort for Codex host validation"),
-            ("codex-cli-default", "Codex validator CLI fallback defaults", "use Codex CLI subprocess validation with detected defaults"),
-            ("codex-cli-manual", "Codex validator CLI fallback manual", "use Codex CLI subprocess validation with explicit model and effort"),
+            ("codex-default", _t(language, "Codex host validator defaults", "Codex 主机验证器默认值"), codex_reason),
+            (
+                "codex-manual",
+                _t(language, "Codex host validator manual", "Codex 主机验证器手动配置"),
+                _t(language, "choose explicit model and effort for Codex host validation", "为 Codex 主机验证选择明确模型和推理强度"),
+            ),
+            (
+                "codex-cli-default",
+                _t(language, "Codex validator CLI fallback defaults", "Codex 验证器 CLI 回退默认值"),
+                _t(language, "use Codex CLI subprocess validation with detected defaults", "使用检测到的默认值运行 Codex CLI 子进程验证"),
+            ),
+            (
+                "codex-cli-manual",
+                _t(language, "Codex validator CLI fallback manual", "Codex 验证器 CLI 回退手动配置"),
+                _t(language, "use Codex CLI subprocess validation with explicit model and effort", "使用明确模型和推理强度运行 Codex CLI 子进程验证"),
+            ),
         ]
     else:
         codex_options = [
-            ("codex-default", "Codex detected defaults", codex_reason),
-            ("codex-manual", "Codex manual model/effort", "choose explicit --model and reasoning effort for Codex"),
+            ("codex-default", _t(language, "Codex detected defaults", "Codex 检测默认值"), codex_reason),
+            (
+                "codex-manual",
+                _t(language, "Codex manual model/effort", "Codex 手动模型/推理强度"),
+                _t(language, "choose explicit --model and reasoning effort for Codex", "为 Codex 选择明确的 --model 和推理强度"),
+            ),
         ]
     claude_options = [
-        ("claude-default", "Claude detected defaults", claude_reason),
-        ("claude-manual", "Claude manual model/effort", "choose explicit model and reasoning effort for Claude"),
+        ("claude-default", _t(language, "Claude detected defaults", "Claude 检测默认值"), claude_reason),
+        (
+            "claude-manual",
+            _t(language, "Claude manual model/effort", "Claude 手动模型/推理强度"),
+            _t(language, "choose explicit model and reasoning effort for Claude", "为 Claude 选择明确模型和推理强度"),
+        ),
     ]
     ordered = claude_options if _host_agent(env) == "claude" else codex_options
     return ordered[0], ordered[1:]
@@ -395,9 +456,12 @@ def _record_default(state: OptimPlansState, payload: dict[str, Any], choice: str
 
 
 def _worker_question(state: OptimPlansState, *, prompt: str, level: Any, key: str, reuse: bool = True) -> None:
+    if _language_gate(state):
+        return
     role = "executor" if key == "executor_worker" else "validator" if key == "validator_worker" else "refinement"
-    recommended, alternatives = _background_model_options(role=role)
-    question = QuestionLedger().ask(prompt, recommended=recommended, alternatives=alternatives)
+    language = _language(state.repo)
+    recommended, alternatives = _background_model_options(role=role, language=language)
+    question = QuestionLedger().ask(prompt, recommended=recommended, alternatives=alternatives, language=language)
     payload = question.to_json(expected_seq=len(state.replay().events) + 1)
     payload.update({"plan_level": level.to_json(), "stage": "background-model", "config_key": key})
     stored = _worker_preference(state.repo, key) if reuse else None
@@ -416,27 +480,35 @@ def _option_tuple(raw: list[str]) -> tuple[str, str, str]:
 
 
 def cmd_init(args: argparse.Namespace) -> None:
-    state = OptimPlansState.initialize(Path(args.repo), topic=args.topic, plan_hash=sha256_text(args.topic))
+    request_text = args.request_text if args.request_text is not None else args.topic
+    state = OptimPlansState.initialize(Path(args.repo), topic=args.topic, plan_hash=sha256_text(args.topic), request_text=request_text)
     state.append_event("initialized", {"topic": args.topic})
-    print_json({"run_id": state.run_id, "artifact_dir": str(state.artifact_dir.relative_to(state.repo))})
+    payload = {"run_id": state.run_id, "artifact_dir": str(state.artifact_dir.relative_to(state.repo))}
+    question = state.ensure_language_selection()
+    if question is not None:
+        payload.update(question)
+    print_json(payload)
 
 
 def cmd_ask(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
+    if _language_gate(state):
+        return
     level = plan_level(args.plan_level)
     ledger = QuestionLedger()
+    language = _language(state.repo)
     generic = args.decision_id is not None or args.recommended_option is not None or bool(args.alternative_option)
     foreground = (
         "foreground",
-        "Current foreground session",
-        "continue reviewing, questioning, or criticizing in this session",
+        _t(language, "Current foreground session", "当前前台会话"),
+        _t(language, "continue reviewing, questioning, or criticizing in this session", "在当前会话继续审查、提问或质疑"),
     )
-    reviewer = ("reviewer", "Reviewer", "fresh read-only reviewer session")
-    criticizer = ("criticizer", "Criticizer", "fresh read-only criticizer session")
+    reviewer = ("reviewer", _t(language, "Reviewer", "审查者"), _t(language, "fresh read-only reviewer session", "新的只读审查会话"))
+    criticizer = ("criticizer", _t(language, "Criticizer", "质疑者"), _t(language, "fresh read-only criticizer session", "新的只读质疑会话"))
     jump = (
         "skip-refinement-execute",
-        "Jump to executor",
-        "skip refinement; use this choice as direct execution launch approval",
+        _t(language, "Jump to executor", "跳到执行器"),
+        _t(language, "skip refinement; use this choice as direct execution launch approval", "跳过精炼；将此选择作为直接执行启动批准"),
     )
     if generic:
         if args.recommended_option is None or args.decision_id is None:
@@ -444,14 +516,21 @@ def cmd_ask(args: argparse.Namespace) -> None:
         recommended = _option_tuple(args.recommended_option)
         alternatives = [_option_tuple(option) for option in args.alternative_option]
         validate_generic_question(args.stage, args.decision_id, [recommended[0], *(option[0] for option in alternatives)])
-        question = ledger.ask(args.prompt, recommended=recommended, alternatives=alternatives)
+        question = ledger.ask(args.prompt, recommended=recommended, alternatives=alternatives, language=language)
     elif args.stage == "agent-choice":
-        delegated_label = "Delegated validator run" if args.role == "validator" else "Delegated foreground run"
-        delegated = ("background", delegated_label, "choose a standalone sub-agent with visible output")
+        delegated_label = _t(language, "Delegated validator run", "委托验证器运行") if args.role == "validator" else _t(
+            language, "Delegated foreground run", "委托前台运行"
+        )
+        delegated = (
+            "background",
+            delegated_label,
+            _t(language, "choose a standalone sub-agent with visible output", "选择有可见输出的独立子智能体"),
+        )
         question = ledger.ask(
             args.prompt,
             recommended=delegated,
             alternatives=[foreground],
+            language=language,
         )
     elif args.stage == "background-model":
         _worker_question(
@@ -467,6 +546,7 @@ def cmd_ask(args: argparse.Namespace) -> None:
             recommended=reviewer,
             alternatives=[criticizer, jump],
             allow_other=False,
+            language=language,
         )
     if args.stage not in {"default", "agent-choice", "background-model"} and not generic:
         raise ContractError("custom question stage requires --decision-id and --recommended-option")
@@ -535,16 +615,22 @@ def cmd_answer(args: argparse.Namespace) -> None:
         config_key = pending.get("config_key", "refinement_worker")
         _save_config(state.repo, config_key, {"choice": choice})
         if config_key == "executor_worker" and _agent_choice_preference(state.repo, "validator_worker") is None:
+            language = _language(state.repo)
             question = QuestionLedger().ask(
-                "Choose validator worker",
-                recommended=("background", "Delegated validator run", "run the validator in a fresh read-only worker"),
+                _t(language, "Choose validator worker", "选择验证器 worker"),
+                recommended=(
+                    "background",
+                    _t(language, "Delegated validator run", "委托验证器运行"),
+                    _t(language, "run the validator in a fresh read-only worker", "在新的只读 worker 中运行验证器"),
+                ),
                 alternatives=[
                     (
                         "foreground",
-                        "Current foreground session",
-                        "run validator recovery or review steps in this session",
+                        _t(language, "Current foreground session", "当前前台会话"),
+                        _t(language, "run validator recovery or review steps in this session", "在当前会话运行验证器恢复或审查步骤"),
                     )
                 ],
+                language=language,
             )
             follow_up = question.to_json(expected_seq=len(state.replay().events) + 1)
             follow_up.update({"plan_level": plan_level("plan").to_json(), "stage": "agent-choice", "config_key": "validator_worker"})
@@ -558,7 +644,11 @@ def cmd_answer(args: argparse.Namespace) -> None:
 
 def cmd_worker_config(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
+    if _language_gate(state):
+        return
     key = _worker_config_key(args.role)
+    language = _language(state.repo)
+    role_label = _t(language, args.role, {"reviewer": "审查者", "criticizer": "质疑者", "executor": "执行器", "validator": "验证器"}[args.role])
     if args.role == "validator" and _agent_choice_preference(state.repo, key) == "foreground":
         print_json(
             {
@@ -572,7 +662,12 @@ def cmd_worker_config(args: argparse.Namespace) -> None:
         return
     preference = _worker_preference(state.repo, key)
     if preference is None:
-        _worker_question(state, prompt=f"Choose {args.role} model and effort", level=plan_level("plan"), key=key)
+        _worker_question(
+            state,
+            prompt=_t(language, f"Choose {args.role} model and effort", f"选择{role_label}模型和推理强度"),
+            level=plan_level("plan"),
+            key=key,
+        )
         return
     try:
         from agent_adapters import AgentInfo, build_claude_command, build_codex_command, detect_agents
@@ -583,7 +678,7 @@ def cmd_worker_config(args: argparse.Namespace) -> None:
     if detected is None or not detected.available:
         _worker_question(
             state,
-            prompt=f"Choose {args.role} model and effort",
+            prompt=_t(language, f"Choose {args.role} model and effort", f"选择{role_label}模型和推理强度"),
             level=plan_level("plan"),
             key=key,
             reuse=False,
@@ -827,10 +922,12 @@ def cmd_previous_run(args: argparse.Namespace) -> None:
 
 def cmd_prepare_execution(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
+    if _language_gate(state):
+        return
     if _worker_preference(state.repo, "executor_worker") is None:
         _worker_question(
             state,
-            prompt="Choose executor model and effort",
+            prompt=_t(_language(state.repo), "Choose executor model and effort", "选择执行器模型和推理强度"),
             level=plan_level("plan"),
             key="executor_worker",
         )
@@ -842,7 +939,7 @@ def cmd_prepare_execution(args: argparse.Namespace) -> None:
     ):
         _worker_question(
             state,
-            prompt="Choose validator model and effort",
+            prompt=_t(_language(state.repo), "Choose validator model and effort", "选择验证器模型和推理强度"),
             level=plan_level("plan"),
             key="validator_worker",
         )
