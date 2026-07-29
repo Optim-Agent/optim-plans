@@ -71,6 +71,8 @@ def codex() -> bool:
 
 
 def pre_tool_output(decision: str, reason: str | None = None) -> dict[str, Any]:
+    if decision == "allow":
+        return {}
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",

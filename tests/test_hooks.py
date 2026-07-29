@@ -34,6 +34,9 @@ class HookTests(unittest.TestCase):
         self.assertIn("permissionDecisionReason", specific)
         return specific["permissionDecision"]
 
+    def assert_allowed(self, out: dict) -> None:
+        self.assertEqual(out, {})
+
     def owned_env(self, tmp: Path, *, scopes: str = "src") -> dict[str, str]:
         state = tmp / "state.json"
         state.write_text(json.dumps({"run_id": "r1", "worker_nonce": "n1"}), encoding="utf-8")
@@ -86,13 +89,13 @@ class HookTests(unittest.TestCase):
             fail_closed = self.run_hook({"event": "PreToolUse", "tool": "Write", "path": "src/file.py"}, no_scopes)
             self.assertEqual(self.permission_decision(fail_closed), "deny")
             allowed = self.run_hook({"event": "PreToolUse", "tool": "Write", "path": "src/file.py"}, env)
-            self.assertEqual(self.permission_decision(allowed), "allow")
+            self.assert_allowed(allowed)
 
     def test_codex_pre_tool_use_emits_decision_schema(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             env = {**self.owned_env(Path(raw)), "PLUGIN_DATA": raw}
             allowed = self.run_hook({"event": "PreToolUse", "tool": "Shell", "command": "pwd"}, env)
-            self.assertEqual(self.permission_decision(allowed), "allow")
+            self.assert_allowed(allowed)
             blocked = self.run_hook({"event": "PreToolUse", "tool": "Shell", "command": "git reset --hard"}, env)
             self.assertEqual(self.permission_decision(blocked), "deny")
 
@@ -101,7 +104,7 @@ class HookTests(unittest.TestCase):
             {"event": "PreToolUse", "tool": "Shell", "command": "pwd"},
             {"OPTIM_PLANS_PLUGIN_ROOT": str(ROOT)},
         )
-        self.assertEqual(self.permission_decision(out), "allow")
+        self.assert_allowed(out)
 
     def test_raw_codex_and_claude_pre_tool_use_envelopes_are_normalized(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -129,7 +132,7 @@ class HookTests(unittest.TestCase):
                 {"hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_input": {"path": "src/file.py"}},
                 env,
             )
-            self.assertEqual(self.permission_decision(edit), "allow")
+            self.assert_allowed(edit)
 
     def test_controller_polling_is_denied_during_active_wait(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -185,7 +188,7 @@ class HookTests(unittest.TestCase):
                     "command": f"python3 scripts/optim_plans.py complete-item --repo {repo_arg} --item-id TASK-001 --assignment-nonce n1 --agent-handle agent-1 --evidence done",
                 }
             )
-            self.assertEqual(self.permission_decision(complete), "allow")
+            self.assert_allowed(complete)
             fail = self.run_hook(
                 {
                     "event": "PreToolUse",
@@ -193,9 +196,9 @@ class HookTests(unittest.TestCase):
                     "command": f"python3 scripts/optim_plans.py fail-validator --repo {repo_arg} --item-id TASK-001 --validator-nonce v1 --agent-handle agent-1 --reason unknown --evidence done",
                 }
             )
-            self.assertEqual(self.permission_decision(fail), "allow")
+            self.assert_allowed(fail)
             non_controller = self.run_hook({"event": "PreToolUse", "tool": "Shell", "command": "python3 scripts/other.py status --repo /tmp/x"})
-            self.assertEqual(self.permission_decision(non_controller), "allow")
+            self.assert_allowed(non_controller)
 
             done_repo = self.repo_with_events(
                 Path(raw),
@@ -215,7 +218,7 @@ class HookTests(unittest.TestCase):
                     "command": f"python3 scripts/optim_plans.py advance-item --repo {shlex.quote(str(done_repo))} --item-id TASK-001",
                 }
             )
-            self.assertEqual(self.permission_decision(done), "allow")
+            self.assert_allowed(done)
 
     def test_codex_session_start_uses_additional_context_schema(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
