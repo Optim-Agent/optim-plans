@@ -340,6 +340,12 @@ class SkillContractTests(unittest.TestCase):
             "authorize-batch-spawn",
             "register-agent",
             "register-batch-agent",
+            "authorize-validator-spawn",
+            "register-validator",
+            "complete-validator",
+            "authorize-batch-validator-spawn",
+            "register-batch-validator",
+            "complete-batch-validator",
             "complete-item",
             "complete-batch",
             "advance-item",
@@ -365,9 +371,19 @@ class SkillContractTests(unittest.TestCase):
             "`smoke_tested_workers`",
             "`codex` host -> Codex sub-agent",
             "`claude` host -> Claude sub-agent",
+            "current Claude executors",
+            "`run-item` starts the `optim-plans-executor` with `--agent` as a foreground standalone subagent",
+            "waits synchronously for the adapter process",
+            "stdout JSON envelope",
+            "current Claude executor manifests",
+            "`run-item` synchronous wait/stdout",
+            "The legacy `background` choice does not mean current Claude host/background execution",
             "foreground standalone agent",
+            "not Codex-style `wait_agent`",
             "not `--bg`",
             "not a hidden background subagent",
+            "not host/background mode",
+            "not background notification/outputFile wait",
             "one controller-owned run worktree and run branch",
             "serial topological order",
             "verified checkpoint commit",
@@ -405,7 +421,14 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("advance-batch", readme)
         self.assertIn("spawn_agent", readme)
         self.assertIn("wait_agent", readme)
+        self.assertIn("Codex host-multi-agent executor/validator path", readme)
         self.assertIn("run-item", readme)
+        self.assertIn("current Claude executor path: foreground standalone --agent", readme)
+        self.assertIn("synchronous run-item wait/stdout", readme)
+        self.assertIn("no host wait_agent, --bg, hidden background subagent, host/background mode, or notification/outputFile wait", readme)
+        self.assertIn("Current Claude executors use the CLI adapter path", readme)
+        self.assertIn("waits synchronously, and reads stdout JSON", readme)
+        self.assertIn("They do not use host `spawn_agent` / `wait_agent`, `--bg`, hidden background subagents, host/background mode, or notification/outputFile waits", readme)
         self.assertIn("retry-batch", readme)
         self.assertIn("all-or-nothing", readme)
         self.assertIn("session resume", readme)
@@ -418,6 +441,21 @@ class SkillContractTests(unittest.TestCase):
         self.assertNotIn("python3 scripts/optim_plans.py run-worker", readme)
         self.assertIn("Repository-integrity detection and integration gating", readme)
         self.assertIn("does not provide host confinement", readme)
+
+    def test_skill_distinguishes_codex_host_and_claude_adapter_execution(self) -> None:
+        text = SKILL.read_text(encoding="utf-8")
+        for expected in (
+            "Current Codex executor/validator delegation uses host-multi-agent mode",
+            "host `spawn_agent`",
+            "host `wait_agent`",
+            "Current Claude executor delegation uses the CLI adapter path",
+            "`run-item` launches the `optim-plans-executor` with `--agent` as a foreground standalone subagent",
+            "waits synchronously, and reads stdout JSON",
+            "not Codex-style `wait_agent`",
+            "host/background mode",
+            "notification/outputFile wait",
+        ):
+            self.assertIn(expected, text)
 
     def test_readme_documents_review_and_plan_method(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

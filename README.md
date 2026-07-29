@@ -353,7 +353,7 @@ You can edit this template by hand:
 - `refinement_worker.choice`, `executor_worker.choice`, and `validator_worker.choice` are `background` or `foreground`. Set `executor_worker.choice` to `background`: foreground executor execution is unsupported.
 - `platform` is `codex` or `claude`, and must match the current host platform; otherwise the stored preference is ignored.
 - `mode` is `default` or `manual`. `manual` requires non-empty `model` and `effort` values.
-- `execution_mode` applies only to a Codex executor: use `host-multi-agent` by default or `cli-adapter` as a fallback. Claude executors use the CLI adapter path.
+- `execution_mode` applies only to a Codex executor: use `host-multi-agent` by default or `cli-adapter` as a fallback. Current Claude executors use the CLI adapter path: `run-item` launches the `optim-plans-executor` with `--agent` as a foreground standalone subagent, waits synchronously, and reads stdout JSON. They do not use host `spawn_agent` / `wait_agent`, `--bg`, hidden background subagents, host/background mode, or notification/outputFile waits.
 
 `worker_launch_files` and `smoke_tested_workers` are controller-managed internal state. Leave them out of manual configuration.
 
@@ -470,7 +470,7 @@ python3 scripts/optim_plans.py prepare-execution --repo <repo> --manifest <manif
 python3 scripts/optim_plans.py answer --repo <repo> --nonce <approval-nonce> --choice approve
 python3 scripts/optim_plans.py start-execution --repo <repo> --approval-nonce <approval-nonce>
 
-# Codex host-multi-agent executor path:
+# Codex host-multi-agent executor/validator path:
 python3 scripts/optim_plans.py assign-item --repo <repo> --item-id TASK-001
 python3 scripts/optim_plans.py authorize-spawn --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --launch-block '<json>'
 # call host spawn_agent with the approved launch block, then:
@@ -480,7 +480,9 @@ python3 scripts/optim_plans.py complete-item --repo <repo> --item-id TASK-001 --
 python3 scripts/optim_plans.py advance-item --repo <repo> --item-id TASK-001
 # if advance-item returns a host validator launch block:
 python3 scripts/optim_plans.py authorize-validator-spawn --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --launch-block '<json>'
+# call host spawn_agent with the approved validator launch block, then:
 python3 scripts/optim_plans.py register-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
+# call host wait_agent, then:
 python3 scripts/optim_plans.py complete-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --agent-handle <handle> --result '<json>'
 python3 scripts/optim_plans.py fail-validator --repo <repo> --item-id TASK-001 --reason interrupted --validator-nonce <nonce> --evidence "<summary>"
 
@@ -493,7 +495,8 @@ python3 scripts/optim_plans.py advance-batch --repo <repo> --batch-id <batch-id>
 # batch validation/checkpoint is all-or-nothing; recovery uses retry-batch, not retry-item.
 python3 scripts/optim_plans.py retry-batch --repo <repo> --batch-id <batch-id> --approval-nonce <nonce>
 
-# CLI adapter fallback:
+# CLI adapter fallback (current Claude executor path: foreground standalone --agent,
+# synchronous run-item wait/stdout; no host wait_agent, --bg, hidden background subagent, host/background mode, or notification/outputFile wait):
 python3 scripts/optim_plans.py run-item --repo <repo> --item-id TASK-001
 python3 scripts/optim_plans.py status --repo <repo>
 # if no active pointer exists, rediscover the latest preserved run:
@@ -537,7 +540,7 @@ The implemented guardrails include:
 - one controller-owned run worktree and run branch for the cumulative run;
 - serial item execution with checkpoint commits in stable DAG order;
 - executing-validating (ameliorating) ring before controller verification, with bounded safe-audit validator feedback injection for validator-driven retries;
-- host `spawn_agent` / `wait_agent` orchestration for Codex executor delegation, or adapter-only argv launch with `shell=False` after adapter CLI smoke;
+- host `spawn_agent` / `wait_agent` orchestration for Codex executor/validator delegation, or current Claude CLI adapter `run-item` foreground standalone `--agent` launch with `shell=False`, synchronous wait, and stdout JSON after adapter CLI smoke;
 - controller verification and Git audits for path allowlists and protected Git metadata;
 - `awaiting_retry_decision` with bounded evidence, automatic first retry restore, and explicit retry approval for later retries;
 - automatic checked-out fast-forward `run_finished` / `integrated` after every item, final audit, and full local proof pass;
@@ -606,7 +609,7 @@ Implemented:
 - one controller-owned run worktree and run branch;
 - serial item execution with checkpoint commits;
 - validator worker loop before controller verification;
-- adapter-only argv launch with `shell=False`, using worker stdout for the result JSON envelope;
+- current Claude CLI adapter `run-item` foreground standalone `--agent` launch with `shell=False`, synchronous wait, and stdout JSON envelope;
 - controller verification and Git audits for path allowlists and protected Git metadata, while preserving known ignored audit noise (`.xsw/`, `.pytest_cache/`, `__pycache__/`, `*.pyc`);
 - automatic first retry restore and explicit retry approval for later retries;
 - automatic checked-out fast-forward `run_finished` / `integrated` after clean final audits and full local proof;
