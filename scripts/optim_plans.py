@@ -913,6 +913,9 @@ def cmd_status(args: argparse.Namespace) -> None:
         payload["events"] = len(state.replay().events)
         payload["finish_approval_nonce"] = approval["nonce"]
         payload["finish_choices"] = [option["id"] for option in approval["options"]]
+    active_wait = state.active_registered_wait()
+    if active_wait is not None:
+        payload.update(active_wait)
     print_json(payload)
 
 

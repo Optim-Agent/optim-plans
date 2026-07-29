@@ -423,6 +423,10 @@ class ExecutionTests(unittest.TestCase):
                 launch_block=assignment["launch_block"],
             )
             self.assertEqual(registered["agent_handle"], "agent-123")
+            self.assertIn("wait_agent", registered["next_action"])
+            self.assertIn("complete-item", registered["next_action"])
+            self.assertIn("fail-item", registered["next_action"])
+            self.assertEqual(state.assign_item("TASK-001")["next_action"], registered["next_action"])
             with self.assertRaisesRegex(ContractError, "stale or already used"):
                 state.register_agent(
                     "TASK-001",
@@ -522,13 +526,45 @@ class ExecutionTests(unittest.TestCase):
                 validator_assignment["validator_nonce"],
                 validator_assignment["validator_launch_block"],
             )
-            state.register_validator_agent(
+            registered_validator = state.register_validator_agent(
                 "TASK-001",
                 validator_nonce=validator_assignment["validator_nonce"],
                 launch_nonce=validator_auth["launch_nonce"],
                 agent_handle="validator-agent",
                 launch_block=validator_assignment["validator_launch_block"],
             )
+            replayed_validator = state.advance_item("TASK-001")
+            self.assertEqual(replayed_validator["next_action"], registered_validator["next_action"])
+            self.assertIn("complete-validator", registered_validator["next_action"])
+            self.assertIn("fail-validator", registered_validator["next_action"])
+            for key in (
+                "run_id",
+                "item_id",
+                "attempt",
+                "nonce",
+                "validator_config_hash",
+                "validator_prompt_hash",
+                "delta_fingerprint",
+                "status",
+                "evidence",
+                "feedback_for_executor",
+                "checked_items",
+            ):
+                self.assertIn(f'"{key}"', registered_validator["next_action"])
+            self.assertIn(f'"nonce":"{validator_assignment["validator_nonce"]}"', registered_validator["next_action"])
+            self.assertIn("status is pass or fail", registered_validator["next_action"])
+            status = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/optim_plans.py"), "status", "--repo", str(repo)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            status_payload = json.loads(status.stdout)
+            self.assertEqual(status_payload["active_wait"]["role"], "validator")
+            self.assertEqual(status_payload["active_wait"]["target_kind"], "item")
+            self.assertEqual(status_payload["active_wait"]["agent_handle"], "validator-agent")
+            self.assertEqual(status_payload["next_action"], registered_validator["next_action"])
             result = {
                 "run_id": state.run_id,
                 "item_id": "TASK-001",
@@ -640,13 +676,17 @@ class ExecutionTests(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, "active batch"):
                 state.assign_item("TASK-001")
             authorized = state.authorize_batch_spawn(assignment["batch_id"], assignment["assignment_nonce"], assignment["launch_block"])
-            state.register_batch_agent(
+            registered_batch = state.register_batch_agent(
                 assignment["batch_id"],
                 assignment_nonce=assignment["assignment_nonce"],
                 launch_nonce=authorized["launch_nonce"],
                 agent_handle="batch-agent-1",
                 launch_block=assignment["launch_block"],
             )
+            self.assertIn("complete-batch", registered_batch["next_action"])
+            self.assertIn("fail-batch", registered_batch["next_action"])
+            self.assertEqual(state.assign_batch(["TASK-001", "TASK-002", "TASK-003"])["next_action"], registered_batch["next_action"])
+            self.assertEqual(state.advance_batch(assignment["batch_id"])["next_action"], registered_batch["next_action"])
             for index in range(1, 4):
                 target = run_worktree / f"src/{index}.txt"
                 target.parent.mkdir(exist_ok=True)
@@ -704,13 +744,34 @@ class ExecutionTests(unittest.TestCase):
                 validator_assignment["validator_nonce"],
                 validator_assignment["validator_launch_block"],
             )
-            state.register_batch_validator_agent(
+            registered_validator = state.register_batch_validator_agent(
                 assignment["batch_id"],
                 validator_nonce=validator_assignment["validator_nonce"],
                 launch_nonce=validator_auth["launch_nonce"],
                 agent_handle="validator-agent",
                 launch_block=validator_assignment["validator_launch_block"],
             )
+            self.assertEqual(state.advance_batch(assignment["batch_id"])["next_action"], registered_validator["next_action"])
+            self.assertIn("complete-batch-validator", registered_validator["next_action"])
+            self.assertIn("fail-batch-validator", registered_validator["next_action"])
+            for key in (
+                "run_id",
+                "batch_id",
+                "item_ids",
+                "attempt",
+                "assignment_nonce",
+                "nonce",
+                "validator_config_hash",
+                "validator_prompt_hash",
+                "delta_fingerprint",
+                "status",
+                "evidence",
+                "feedback_for_executor",
+                "checked_items",
+            ):
+                self.assertIn(f'"{key}"', registered_validator["next_action"])
+            self.assertIn(f'"nonce":"{validator_assignment["validator_nonce"]}"', registered_validator["next_action"])
+            self.assertIn("status is pass or fail", registered_validator["next_action"])
             return assignment, validator_assignment
 
         with tempfile.TemporaryDirectory() as raw:
@@ -861,14 +922,16 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(state.advance_item("TASK-001")["phase"], "assigned")
             authorized = state.authorize_spawn("TASK-001", assignment["assignment_nonce"], assignment["launch_block"])
             self.assertEqual(state.advance_item("TASK-001")["phase"], "spawn_authorized")
-            state.register_agent(
+            registered = state.register_agent(
                 "TASK-001",
                 assignment_nonce=assignment["assignment_nonce"],
                 launch_nonce=authorized["launch_nonce"],
                 agent_handle="agent-fail",
                 launch_block=assignment["launch_block"],
             )
-            self.assertEqual(state.advance_item("TASK-001")["phase"], "agent_registered")
+            replayed = state.advance_item("TASK-001")
+            self.assertEqual(replayed["phase"], "agent_registered")
+            self.assertEqual(replayed["next_action"], registered["next_action"])
             state.fail_host_item(
                 "TASK-001",
                 assignment_nonce=assignment["assignment_nonce"],

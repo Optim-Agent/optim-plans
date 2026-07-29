@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import signal
 import stat
 import subprocess
@@ -2545,6 +2546,226 @@ class OptimPlansState:
                 return None
         return None
 
+    def _controller_command(self, command: str, *args: str) -> str:
+        return shlex.join(["python3", "scripts/optim_plans.py", command, "--repo", str(self.repo), *args])
+
+    def _wait_next_action(self, kind: str, payload: dict[str, Any], *, checked_items: list[str] | None = None) -> str:
+        handle = payload["agent_handle"]
+        if kind == "executor_item":
+            complete = self._controller_command(
+                "complete-item",
+                "--item-id",
+                payload["item_id"],
+                "--assignment-nonce",
+                payload["assignment_nonce"],
+                "--agent-handle",
+                handle,
+                "--evidence",
+                "<evidence>",
+            )
+            fail = self._controller_command(
+                "fail-item",
+                "--item-id",
+                payload["item_id"],
+                "--assignment-nonce",
+                payload["assignment_nonce"],
+                "--agent-handle",
+                handle,
+                "--evidence",
+                "<evidence>",
+            )
+            return f"use host wait_agent on registered handle {handle}, then run {complete}; on failure run {fail}"
+        if kind == "executor_batch":
+            complete = self._controller_command(
+                "complete-batch",
+                "--batch-id",
+                payload["batch_id"],
+                "--assignment-nonce",
+                payload["assignment_nonce"],
+                "--agent-handle",
+                handle,
+                "--evidence",
+                "<evidence>",
+            )
+            fail = self._controller_command(
+                "fail-batch",
+                "--batch-id",
+                payload["batch_id"],
+                "--assignment-nonce",
+                payload["assignment_nonce"],
+                "--agent-handle",
+                handle,
+                "--evidence",
+                "<evidence>",
+            )
+            return f"use host wait_agent on registered handle {handle}, then run {complete}; on failure run {fail}"
+        if kind == "validator_item":
+            result = json_text(
+                {
+                    "run_id": self.run_id,
+                    "item_id": payload["item_id"],
+                    "attempt": payload["attempt"],
+                    "nonce": payload["validator_nonce"],
+                    "validator_config_hash": payload["validator_config_hash"],
+                    "validator_prompt_hash": payload["validator_prompt_hash"],
+                    "delta_fingerprint": payload["delta_fingerprint"],
+                    "status": "pass",
+                    "evidence": "<evidence>",
+                    "feedback_for_executor": "",
+                    "checked_items": checked_items or [],
+                }
+            )
+            complete = self._controller_command(
+                "complete-validator",
+                "--item-id",
+                payload["item_id"],
+                "--validator-nonce",
+                payload["validator_nonce"],
+                "--agent-handle",
+                handle,
+                "--result",
+                result,
+            )
+            fail = self._controller_command(
+                "fail-validator",
+                "--item-id",
+                payload["item_id"],
+                "--validator-nonce",
+                payload["validator_nonce"],
+                "--agent-handle",
+                handle,
+                "--reason",
+                "unknown",
+                "--evidence",
+                "<evidence>",
+            )
+            return (
+                f"use host wait_agent on registered handle {handle}, then run {complete} "
+                f"(result nonce is validator_nonce; status is pass or fail); on agent failure run {fail}"
+            )
+        if kind == "validator_batch":
+            result = json_text(
+                {
+                    "run_id": self.run_id,
+                    "batch_id": payload["batch_id"],
+                    "item_ids": list(payload["item_ids"]),
+                    "attempt": payload["attempt"],
+                    "assignment_nonce": payload["assignment_nonce"],
+                    "nonce": payload["validator_nonce"],
+                    "validator_config_hash": payload["validator_config_hash"],
+                    "validator_prompt_hash": payload["validator_prompt_hash"],
+                    "delta_fingerprint": payload["delta_fingerprint"],
+                    "status": "pass",
+                    "evidence": "<evidence>",
+                    "feedback_for_executor": "",
+                    "checked_items": checked_items or [],
+                }
+            )
+            complete = self._controller_command(
+                "complete-batch-validator",
+                "--batch-id",
+                payload["batch_id"],
+                "--validator-nonce",
+                payload["validator_nonce"],
+                "--agent-handle",
+                handle,
+                "--result",
+                result,
+            )
+            fail = self._controller_command(
+                "fail-batch-validator",
+                "--batch-id",
+                payload["batch_id"],
+                "--validator-nonce",
+                payload["validator_nonce"],
+                "--agent-handle",
+                handle,
+                "--reason",
+                "unknown",
+                "--evidence",
+                "<evidence>",
+            )
+            return (
+                f"use host wait_agent on registered handle {handle}, then run {complete} "
+                f"(result nonce is validator_nonce; status is pass or fail); on agent failure run {fail}"
+            )
+        raise AssertionError(f"unknown wait kind {kind}")
+
+    def _active_wait_payload(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        active = {
+            "command": "host wait_agent",
+            "agent_handle": payload["agent_handle"],
+            "attempt": payload["attempt"],
+            "role": "validator" if kind.startswith("validator") else "executor",
+            "target_kind": "batch" if kind.endswith("batch") else "item",
+        }
+        if kind.endswith("batch"):
+            active.update({"batch_id": payload["batch_id"], "item_ids": list(payload["item_ids"])})
+        else:
+            active["item_id"] = payload["item_id"]
+        if kind.startswith("validator"):
+            active["validator_nonce"] = payload["validator_nonce"]
+            if "assignment_nonce" in payload:
+                active["assignment_nonce"] = payload["assignment_nonce"]
+        else:
+            active["assignment_nonce"] = payload["assignment_nonce"]
+        return active
+
+    def _is_active_wait_finished(self, kind: str, wait: dict[str, Any], event_type: str, payload: dict[str, Any]) -> bool:
+        if kind == "executor_item":
+            return payload.get("item_id") == wait.get("item_id") and event_type in {"worker_completed", "worker_failed", "retry_restored", "checkpoint_created"}
+        if kind == "executor_batch":
+            return payload.get("batch_id") == wait.get("batch_id") and event_type in {"batch_completed", "batch_worker_failed", "batch_retry_restored", "batch_checkpoint_created"}
+        if kind == "validator_item":
+            return payload.get("item_id") == wait.get("item_id") and event_type in {
+                "validator_result_recorded",
+                "validator_protocol_rejected",
+                "validator_failed",
+                "retry_restored",
+                "checkpoint_created",
+            }
+        return payload.get("batch_id") == wait.get("batch_id") and event_type in {
+            "batch_validator_result_recorded",
+            "batch_validator_protocol_rejected",
+            "batch_validator_failed",
+            "batch_retry_restored",
+            "batch_checkpoint_created",
+        }
+
+    def _latest_active_wait(self, events: list[dict[str, Any]]) -> tuple[str, dict[str, Any]] | None:
+        active: tuple[str, dict[str, Any]] | None = None
+        for event in events:
+            event_type = event["type"]
+            payload = event.get("payload", {})
+            if event_type == "host_agent_registered":
+                active = ("executor_item", payload)
+            elif event_type == "batch_agent_registered":
+                active = ("executor_batch", payload)
+            elif event_type == "validator_agent_registered":
+                active = ("validator_item", payload)
+            elif event_type == "batch_validator_agent_registered":
+                active = ("validator_batch", payload)
+            elif active is not None and self._is_active_wait_finished(active[0], active[1], event_type, payload):
+                active = None
+        return active
+
+    def active_registered_wait(self) -> dict[str, Any] | None:
+        replayed = self.replay()
+        active = self._latest_active_wait(replayed.events)
+        if active is None:
+            return None
+        kind, payload = active
+        record = self._execution_manifest_record(replayed.events)
+        checked_items = None
+        if kind == "validator_item":
+            checked_items = self._item_validator_check_ids(self._manifest_item(record["manifest"], payload["item_id"]))
+        elif kind == "validator_batch":
+            checked_items = self._batch_validator_check_ids(self._batch_items(record["manifest"], list(payload["item_ids"])))
+        return {
+            "active_wait": self._active_wait_payload(kind, payload),
+            "next_action": self._wait_next_action(kind, payload, checked_items=checked_items),
+        }
+
     def _prior_context(
         self,
         events: list[dict[str, Any]],
@@ -2861,17 +3082,23 @@ class OptimPlansState:
             check_ids=check_ids,
         )
         phase = "validator_assigned"
-        if self._latest_validator_host_registration(events, validator_nonce=assignment["validator_nonce"]) is not None:
+        next_action = None
+        registration = self._latest_validator_host_registration(events, validator_nonce=assignment["validator_nonce"])
+        if registration is not None:
             phase = "validator_agent_registered"
+            next_action = self._wait_next_action("validator_item", registration, checked_items=check_ids)
         elif self._latest_validator_host_authorization(events, validator_nonce=assignment["validator_nonce"]) is not None:
             phase = "validator_spawn_authorized"
-        return {
+        response = {
             **assignment,
             "phase": phase,
             "validator": validator_config,
             "validator_launch_block": launch_block,
             "validator_launch_block_hash": stable_json_hash(launch_block),
         }
+        if next_action is not None:
+            response["next_action"] = next_action
+        return response
 
     def _assign_validator_locked(
         self,
@@ -2940,17 +3167,23 @@ class OptimPlansState:
             check_ids=check_ids,
         )
         phase = "validator_assigned"
-        if self._latest_batch_validator_host_registration(events, validator_nonce=assignment["validator_nonce"]) is not None:
+        next_action = None
+        registration = self._latest_batch_validator_host_registration(events, validator_nonce=assignment["validator_nonce"])
+        if registration is not None:
             phase = "validator_agent_registered"
+            next_action = self._wait_next_action("validator_batch", registration, checked_items=check_ids)
         elif self._latest_batch_validator_host_authorization(events, validator_nonce=assignment["validator_nonce"]) is not None:
             phase = "validator_spawn_authorized"
-        return {
+        response = {
             **assignment,
             "phase": phase,
             "validator": validator_config,
             "validator_launch_block": launch_block,
             "validator_launch_block_hash": stable_json_hash(launch_block),
         }
+        if next_action is not None:
+            response["next_action"] = next_action
+        return response
 
     def _assign_batch_validator_locked(
         self,
@@ -3044,9 +3277,12 @@ class OptimPlansState:
         launch_block = self._host_launch_block(item_id=item["id"], start=start, worker_config=worker_config)
         statuses = self._item_statuses(events, manifest)
         phase = statuses[item["id"]]
+        next_action = None
         if phase == "in_progress":
-            if self._latest_host_registration(events, assignment_nonce=start["assignment_nonce"]) is not None:
+            registration = self._latest_host_registration(events, assignment_nonce=start["assignment_nonce"])
+            if registration is not None:
                 phase = "agent_registered"
+                next_action = self._wait_next_action("executor_item", registration)
             elif self._latest_host_authorization(events, assignment_nonce=start["assignment_nonce"]) is not None:
                 phase = "spawn_authorized"
             else:
@@ -3055,7 +3291,7 @@ class OptimPlansState:
             phase = "worker_completed"
         elif phase == "verified":
             phase = "checkpointed"
-        return {
+        response = {
             **start,
             "phase": phase,
             "worker": worker_config,
@@ -3063,6 +3299,9 @@ class OptimPlansState:
             "launch_block": launch_block,
             "launch_block_hash": stable_json_hash(launch_block),
         }
+        if next_action is not None:
+            response["next_action"] = next_action
+        return response
 
     def assign_item(self, item_id: str) -> dict[str, Any]:
         with self.controller_lock():
@@ -3183,9 +3422,12 @@ class OptimPlansState:
         statuses = self._item_statuses(events, manifest)
         phases = {statuses[item_id] for item_id in item_ids}
         phase = phases.pop() if len(phases) == 1 else "mixed"
+        next_action = None
         if phase == "in_progress":
-            if self._latest_batch_host_registration(events, assignment_nonce=start["assignment_nonce"]) is not None:
+            registration = self._latest_batch_host_registration(events, assignment_nonce=start["assignment_nonce"])
+            if registration is not None:
                 phase = "agent_registered"
+                next_action = self._wait_next_action("executor_batch", registration)
             elif self._latest_batch_host_authorization(events, assignment_nonce=start["assignment_nonce"]) is not None:
                 phase = "spawn_authorized"
             else:
@@ -3194,7 +3436,7 @@ class OptimPlansState:
             phase = "worker_completed"
         elif phase == "verified":
             phase = "checkpointed"
-        return {
+        response = {
             **start,
             "phase": phase,
             "worker": worker_config,
@@ -3202,6 +3444,9 @@ class OptimPlansState:
             "launch_block": launch_block,
             "launch_block_hash": stable_json_hash(launch_block),
         }
+        if next_action is not None:
+            response["next_action"] = next_action
+        return response
 
     def _begin_batch_locked(
         self,
@@ -3406,7 +3651,8 @@ class OptimPlansState:
                 "worker_config_hash": stable_json_hash(worker_config),
                 "launch_block_hash": stable_json_hash(launch_block),
             }
-            return self._append_event_locked("batch_agent_registered", payload)["payload"]
+            registered = self._append_event_locked("batch_agent_registered", payload)["payload"]
+            return {**registered, "next_action": self._wait_next_action("executor_batch", registered)}
 
     def _require_registered_batch_agent_locked(
         self,
@@ -3643,7 +3889,11 @@ class OptimPlansState:
                 "delta_fingerprint": assignment["delta_fingerprint"],
                 "launch_block_hash": stable_json_hash(launch_block),
             }
-            return self._append_event_locked("validator_agent_registered", payload)["payload"]
+            registered = self._append_event_locked("validator_agent_registered", payload)["payload"]
+            return {
+                **registered,
+                "next_action": self._wait_next_action("validator_item", registered, checked_items=self._item_validator_check_ids(item)),
+            }
 
     def _require_batch_validator_assignment_locked(
         self,
@@ -3767,7 +4017,15 @@ class OptimPlansState:
                 "delta_fingerprint": assignment["delta_fingerprint"],
                 "launch_block_hash": stable_json_hash(launch_block),
             }
-            return self._append_event_locked("batch_validator_agent_registered", payload)["payload"]
+            registered = self._append_event_locked("batch_validator_agent_registered", payload)["payload"]
+            return {
+                **registered,
+                "next_action": self._wait_next_action(
+                    "validator_batch",
+                    registered,
+                    checked_items=self._batch_validator_check_ids(self._batch_items(record["manifest"], list(assignment["item_ids"]))),
+                ),
+            }
 
     def _reject_validator_result_locked(
         self,
@@ -4506,7 +4764,8 @@ class OptimPlansState:
                 "worker_config_hash": stable_json_hash(worker_config),
                 "launch_block_hash": stable_json_hash(launch_block),
             }
-            return self._append_event_locked("host_agent_registered", payload)["payload"]
+            registered = self._append_event_locked("host_agent_registered", payload)["payload"]
+            return {**registered, "next_action": self._wait_next_action("executor_item", registered)}
 
     def _require_registered_host_agent_locked(
         self,

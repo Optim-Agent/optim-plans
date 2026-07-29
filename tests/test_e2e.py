@@ -1157,7 +1157,7 @@ class E2ETests(unittest.TestCase):
                 "--launch-block",
                 launch_block,
             )
-            controller_json(
+            registered = controller_json(
                 "register-agent",
                 "--repo",
                 str(repo),
@@ -1172,6 +1172,11 @@ class E2ETests(unittest.TestCase):
                 "--launch-block",
                 launch_block,
             )
+            status = controller_json("status", "--repo", str(repo))
+            self.assertEqual(status["active_wait"]["role"], "executor")
+            self.assertEqual(status["active_wait"]["target_kind"], "item")
+            self.assertEqual(status["active_wait"]["agent_handle"], "agent-cli")
+            self.assertEqual(status["next_action"], registered["next_action"])
             (run_worktree / "src").mkdir()
             (run_worktree / "src/host-cli.txt").write_text("ok\n", encoding="utf-8")
             controller_json(
