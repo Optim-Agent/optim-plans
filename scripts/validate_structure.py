@@ -33,7 +33,7 @@ def main() -> int:
     if "hooks" in manifest:
         raise AssertionError("Codex manifest must not use unsupported hooks field")
 
-    expected_version = "0.2.0"
+    expected_version = "0.2.1"
     claude_manifest = load_json(".claude-plugin/plugin.json")
     claude_marketplace = load_json(".claude-plugin/marketplace.json")
     versions = {
@@ -48,6 +48,8 @@ def main() -> int:
         if version != expected_version:
             raise AssertionError(f"{path} version must be {expected_version}")
     changelog = require("CHANGELOG.md").read_text(encoding="utf-8")
+    if "## 0.2.1 - 2026-07-31" not in changelog:
+        raise AssertionError("CHANGELOG.md missing 0.2.1 entry")
     if "## 0.2.0 - 2026-07-28" not in changelog:
         raise AssertionError("CHANGELOG.md missing 0.2.0 entry")
     if "## 0.1.2 - 2026-07-27" not in changelog:
@@ -62,6 +64,7 @@ def main() -> int:
         "skills/analyze-and-plan/agents/openai.yaml",
         "skills/review-and-plan/SKILL.md",
         "skills/review-and-plan/agents/openai.yaml",
+        "skills/search-and-plan/SKILL.md",
         "skills/mini-plan/SKILL.md",
         "skills/small-plan/SKILL.md",
         "skills/plan/SKILL.md",

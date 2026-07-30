@@ -1,6 +1,6 @@
 {
   "name": "optim-plans",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Human-in-the-loop planning, refinement, and verified execution controller.",
   "author": {
     "name": "optim-plans contributors"

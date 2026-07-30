@@ -30,7 +30,7 @@ class StructureTests(unittest.TestCase):
             )
             self.assertNotEqual(ignored.returncode, 0, f"{relative} must not be ignored")
 
-        expected_version = "0.2.0"
+        expected_version = "0.2.1"
         codex_manifest = json.loads((ROOT / ".codex-plugin/plugin.json").read_text())
         self.assertEqual(codex_manifest["name"], "optim-plans")
         self.assertEqual(codex_manifest["version"], expected_version)
@@ -49,6 +49,7 @@ class StructureTests(unittest.TestCase):
         self.assertEqual(len(claude_entries), 1)
         self.assertEqual(claude_entries[0]["version"], expected_version)
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn("## 0.2.1 - 2026-07-31", changelog)
         self.assertIn("## 0.2.0 - 2026-07-28", changelog)
         self.assertIn("## 0.1.2 - 2026-07-27", changelog)
 

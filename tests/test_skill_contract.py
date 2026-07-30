@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills/optim-plans/SKILL.md"
 ANALYZE_SKILL = ROOT / "skills/analyze-and-plan/SKILL.md"
 RESUME_SKILL = ROOT / "skills/resume-previous-plan/SKILL.md"
+SEARCH_SKILL = ROOT / "skills/search-and-plan/SKILL.md"
 
 
 def skill_description(path: Path) -> str:
@@ -479,6 +480,62 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("generic Python CLI project", example)
         self.assertIn("OPP-003", example)
         self.assertIn("start/resume/terminate", example)
+
+    def test_search_and_plan_contract(self) -> None:
+        self.assertTrue(SEARCH_SKILL.is_file())
+        text = SEARCH_SKILL.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\n"))
+        self.assertIn("name: search-and-plan", text)
+        self.assertIn("../optim-plans/SKILL.md", text)
+        for expected in (
+            "Inspect the target Git repo read-only before asking product questions",
+            "Initialize or resume the optim-plans controller before external research",
+            "Perform read-only initial research",
+            "Ask the first evidence-informed question as a controller-backed optim-plans choice prompt",
+            "submit/record that answer through the controller before writing refs",
+            "docs/optim-plans/YYYY-MM-DD-topic/refs/search-and-plan/<topic>/",
+            "Ask any later product questions only after refs are persisted",
+            "`PLAN_v1.md`, refinement, immutable execution approval, execution, validation, controller verification, and integration gates",
+            "`mini-plan`, `small-plan`, `plan`, `big-plan`, and `huge-plan` routing",
+            "Prefer `agent-reach` when available",
+            "if missing, give one sentence of install guidance",
+            "do not install `agent-reach` or any other tool before execution approval",
+            "continue with fallback search/repo evidence",
+            "Record attempted queries, attempted backends, backend failures with reasons, why sources were insufficient",
+            "continue from repository evidence",
+            "Backend failure fallback is valid only when the failure reason is recorded",
+            "Do not write pre-execution `./refs/` files",
+            "Do not require a strict source manifest before planning",
+            "3-7 high-signal source pack",
+            "Every adoptable idea must be presented as an evidence-backed optim-plans choice prompt",
+            "recorded through the controller before it can be included in any plan",
+        ):
+            self.assertIn(expected, text)
+        for section in (
+            "## Sources",
+            "## Findings",
+            "## Adoptable ideas",
+            "## Risks/not-applicable points",
+            "## Evidence gaps",
+            "## Candidate user decisions",
+        ):
+            self.assertIn(f"`{section}`", text)
+
+    def test_readme_documents_search_and_plan_method(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for expected in (
+            "$optim-plans:search-and-plan",
+            "first evidence-informed controller-backed choice",
+            "REF_ANALYSIS.md",
+            "3-7 source pack",
+            "docs/optim-plans/YYYY-MM-DD-topic/refs/search-and-plan/<topic>/",
+            "prefers `agent-reach`",
+            "does not install tools before execution approval",
+            "records backend failures/evidence gaps",
+            "Adoptable ideas must be accepted through evidence-backed optim-plans choice prompts",
+            "skills/search-and-plan/SKILL.md",
+        ):
+            self.assertIn(expected, readme)
 
     def test_eval_pressure_cases_exist(self) -> None:
         cases = ROOT / "evals/pressure_cases.json"

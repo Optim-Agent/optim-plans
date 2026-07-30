@@ -220,6 +220,12 @@ AI:  Recorded OPP-003 as accepted scope. I will pass that opportunity ID into
 
 </details>
 
+## Search and Plan
+
+Use `$optim-plans:search-and-plan` when outside references should shape a repo-change plan. It inspects the repo, initializes or resumes the controller, does read-only research, asks and records the first evidence-informed controller-backed choice, then writes `REF_ANALYSIS.md` and a 3-7 source pack under `docs/optim-plans/YYYY-MM-DD-topic/refs/search-and-plan/<topic>/` before later product questions.
+
+The skill prefers `agent-reach` when available; if it is missing, it gives one sentence of install guidance, does not install tools before execution approval, records backend failures/evidence gaps, and continues from fallback search plus repository evidence. Adoptable ideas must be accepted through evidence-backed optim-plans choice prompts before entering `PLAN_v1.md`.
+
 ## Diagnose before planning
 
 ```text
@@ -574,7 +580,8 @@ Start with the skill:
 -> [`skills/optim-plans/references/planning.md`](skills/optim-plans/references/planning.md): brainstorming and `PLAN_v1.md` contract<br>
 -> [`skills/optim-plans/references/refinement.md`](skills/optim-plans/references/refinement.md): reviewer/criticizer loop contract<br>
 -> [`skills/optim-plans/references/execution.md`](skills/optim-plans/references/execution.md): execution gate and verification contract<br>
--> [`skills/optim-plans/references/artifacts.md`](skills/optim-plans/references/artifacts.md): public Markdown and machine-state layout
+-> [`skills/optim-plans/references/artifacts.md`](skills/optim-plans/references/artifacts.md): public Markdown and machine-state layout<br>
+-> [`skills/search-and-plan/SKILL.md`](skills/search-and-plan/SKILL.md): external research before controller-backed planning
 
 ## Verification
 

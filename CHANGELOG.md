@@ -8,6 +8,17 @@ first, ISO dates, and grouped change types.
 
 ## Unreleased
 
+## 0.2.1 - 2026-07-31
+
+### Added
+
+- Added the `search-and-plan` skill for controller-backed research before
+  optim-plans planning.
+
+### Changed
+
+- Bumped Claude and Codex plugin metadata to `0.2.1`.
+
 ## 0.2.0 - 2026-07-28
 
 ### Added
