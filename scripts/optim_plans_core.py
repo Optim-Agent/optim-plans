@@ -45,6 +45,23 @@ ITEM_RETRYABLE_FAILURE_EVENTS = {"worker_failed", "verification_failed", "valida
 BATCH_RETRYABLE_FAILURE_EVENTS = {"batch_worker_failed", "batch_verification_failed", "batch_validator_result_recorded"}
 RETRYABLE_FAILURE_EVENTS = ITEM_RETRYABLE_FAILURE_EVENTS | BATCH_RETRYABLE_FAILURE_EVENTS
 IGNORED_AUDIT_NOISE_PATTERNS = [".xsw/", ".pytest_cache/", "__pycache__/", "*.pyc"]
+PLAN_CONTEXT_REQUIRED_SECTIONS = (
+    "Requirements",
+    "Acceptance Criteria",
+    "Implementation Items",
+    "Verifier Checklist",
+    "Non-Goals",
+    "Constraints",
+)
+PLAN_CONTEXT_CRITICAL_SECTIONS = (
+    "Requirements",
+    "Acceptance Criteria",
+    "Implementation Items",
+    "Verifier Checklist",
+)
+PLAN_CONTEXT_SECTION_CHAR_LIMIT = 6000
+PLAN_CONTEXT_TOTAL_CHAR_LIMIT = 24000
+PLAN_CONTEXT_FILE_RE = re.compile(r"^PLAN_v([0-9]+)\.md$")
 HOST_EXECUTOR_PROMPT_CONTRACT = {
     "instructions": [
         "Modify only the assigned run worktree.",
@@ -92,6 +109,8 @@ LIFECYCLE_EVENT_TYPES = {
     "batch_validator_protocol_rejected",
     "validator_failed",
     "batch_validator_failed",
+    "context_integrity_recovery",
+    "batch_context_integrity_recovery",
     "verification_failed",
     "batch_verification_failed",
     "audit_failed",
@@ -596,6 +615,140 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _empty_plan_context_sections() -> dict[str, dict[str, Any]]:
+    return {
+        section: {
+            "present": False,
+            "status": "missing",
+            "content": "",
+            "source_chars": 0,
+            "included_chars": 0,
+            "truncated": False,
+        }
+        for section in PLAN_CONTEXT_REQUIRED_SECTIONS
+    }
+
+
+def _plan_context_base(
+    artifact_dir: Path,
+    *,
+    section_char_limit: int,
+    total_char_limit: int,
+) -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "source_path": None,
+        "source_hash": None,
+        "source_version": None,
+        "artifact_dir": str(artifact_dir),
+        "limits": {"section_chars": section_char_limit, "total_chars": total_char_limit},
+        "required_sections": list(PLAN_CONTEXT_REQUIRED_SECTIONS),
+        "critical_sections": list(PLAN_CONTEXT_CRITICAL_SECTIONS),
+        "truncated": False,
+        "truncation": {
+            "whole": False,
+            "sections": [],
+            "audit_breaking": False,
+            "audit_breaking_critical_sections": [],
+        },
+        "sections": _empty_plan_context_sections(),
+    }
+
+
+def _highest_plan_path(artifact_dir: Path) -> tuple[int, Path] | None:
+    if not artifact_dir.is_dir():
+        return None
+    best: tuple[int, Path] | None = None
+    for path in artifact_dir.iterdir():
+        match = PLAN_CONTEXT_FILE_RE.fullmatch(path.name)
+        if match is None or not path.is_file():
+            continue
+        candidate = (int(match.group(1)), path)
+        if best is None or candidate[0] > best[0]:
+            best = candidate
+    return best
+
+
+def _markdown_h2_sections(text: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines(keepends=True):
+        match = re.match(r"^##\s+(.+?)\s*#*\s*$", line)
+        if match is not None:
+            current = match.group(1).strip()
+            sections.setdefault(current, [])
+            continue
+        if current is not None:
+            sections[current].append(line)
+    return {name: "".join(lines).strip("\n") for name, lines in sections.items()}
+
+
+def plan_context(
+    artifact_dir: Path | str,
+    *,
+    section_char_limit: int = PLAN_CONTEXT_SECTION_CHAR_LIMIT,
+    total_char_limit: int = PLAN_CONTEXT_TOTAL_CHAR_LIMIT,
+) -> dict[str, Any]:
+    artifact = Path(artifact_dir)
+    context = _plan_context_base(artifact, section_char_limit=section_char_limit, total_char_limit=total_char_limit)
+    selected = _highest_plan_path(artifact)
+    if selected is None:
+        context["unavailable_reason"] = "no PLAN_vN.md found"
+        return context
+    version, path = selected
+    context.update({"source_path": str(path), "source_version": version})
+    try:
+        text = path.read_text(encoding="utf-8")
+        source_hash = _hash_file(path)
+    except (OSError, UnicodeError) as exc:
+        context["unavailable_reason"] = str(exc)
+        return context
+
+    context.update({"status": "available", "source_hash": source_hash, "source_chars": len(text)})
+    raw_sections = _markdown_h2_sections(text)
+    remaining = total_char_limit
+    truncated_sections: list[str] = []
+    critical_truncated: list[str] = []
+    whole_truncated = False
+    sections: dict[str, dict[str, Any]] = {}
+    for name in PLAN_CONTEXT_REQUIRED_SECTIONS:
+        if name not in raw_sections:
+            sections[name] = context["sections"][name]
+            continue
+        raw = raw_sections[name]
+        source_chars = len(raw)
+        content = raw[:section_char_limit]
+        truncated = source_chars > len(content)
+        if len(content) > remaining:
+            content = content[: max(0, remaining)]
+            truncated = True
+            whole_truncated = True
+        remaining -= len(content)
+        if truncated:
+            truncated_sections.append(name)
+            if name in PLAN_CONTEXT_CRITICAL_SECTIONS:
+                critical_truncated.append(name)
+        status = "empty" if source_chars == 0 else "truncated" if truncated else "available"
+        sections[name] = {
+            "present": True,
+            "status": status,
+            "content": content,
+            "source_chars": source_chars,
+            "included_chars": len(content),
+            "truncated": truncated,
+        }
+    context["sections"] = sections
+    context["truncated"] = bool(truncated_sections or whole_truncated)
+    context["included_chars"] = sum(section["included_chars"] for section in sections.values())
+    context["truncation"] = {
+        "whole": whole_truncated,
+        "sections": truncated_sections,
+        "audit_breaking": bool(critical_truncated),
+        "audit_breaking_critical_sections": critical_truncated,
+    }
+    return context
+
+
 def _path_signature(path: Path) -> dict[str, Any]:
     if not path.exists() and not path.is_symlink():
         return {"type": "missing"}
@@ -983,6 +1136,7 @@ def run_process_group(
 class ReplayState:
     events: list[dict[str, Any]]
     status: str
+    status_details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1026,6 +1180,8 @@ def lifecycle_status(events: list[dict[str, Any]]) -> str:
             status = "awaiting_integration"
         elif event_type == "awaiting_retry_decision":
             status = "awaiting_retry_decision"
+        elif event_type in {"context_integrity_recovery", "batch_context_integrity_recovery"}:
+            status = "context_integrity_recovery"
         elif event_type in {"execution_blocked", "batch_execution_blocked"}:
             status = "blocked"
         elif event_type in {
@@ -1074,6 +1230,40 @@ def lifecycle_status(events: list[dict[str, Any]]) -> str:
         }:
             status = "executing"
     return status
+
+
+def _context_integrity_projection(payload: dict[str, Any]) -> dict[str, Any]:
+    context = payload.get("plan_context")
+    context = context if isinstance(context, dict) else {}
+    return {
+        "status": payload.get("status"),
+        "reason": payload.get("reason"),
+        "item_id": payload.get("item_id"),
+        "batch_id": payload.get("batch_id"),
+        "item_ids": payload.get("item_ids", []),
+        "source_path": context.get("source_path"),
+        "source_hash": context.get("source_hash"),
+        "truncated": context.get("truncated", False),
+        "truncation": context.get("truncation", {}),
+    }
+
+
+def _context_integrity_summary(payload: dict[str, Any]) -> str:
+    projected = _context_integrity_projection(payload)
+    return (
+        f"reason={projected['reason']}; status={projected['status']}; "
+        f"source_path={projected['source_path']}; source_hash={projected['source_hash']}; "
+        f"truncation={json_text(projected['truncation'])}"
+    )
+
+
+def lifecycle_status_details(events: list[dict[str, Any]]) -> dict[str, Any]:
+    if lifecycle_status(events) != "context_integrity_recovery":
+        return {}
+    for event in reversed(events):
+        if event["type"] in {"context_integrity_recovery", "batch_context_integrity_recovery"}:
+            return {"context_integrity_recovery": _context_integrity_projection(event.get("payload", {}))}
+    return {}
 
 
 def latest_preserved_run(repo: Path | str) -> dict[str, Any]:
@@ -1300,6 +1490,9 @@ class OptimPlansState:
     def _controller_language(self) -> str:
         return read_config_language(self.repo) or "en"
 
+    def _plan_context(self) -> dict[str, Any]:
+        return plan_context(self.artifact_dir)
+
     def _append_event_locked(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         replayed = self.replay()
         event = {
@@ -1311,7 +1504,10 @@ class OptimPlansState:
         }
         append_json_line(self.events_file, event)
         events = [*replayed.events, event]
-        write_json_atomic(self.runtime_file, {"status": lifecycle_status(events), "last_seq": event["seq"]})
+        write_json_atomic(
+            self.runtime_file,
+            {"status": lifecycle_status(events), "status_details": lifecycle_status_details(events), "last_seq": event["seq"]},
+        )
         if event_type in {
             "checkpoint_created",
             "batch_checkpoint_created",
@@ -2004,7 +2200,7 @@ class OptimPlansState:
             replayed = self.replay()
             self._require_lifecycle_locked(
                 replayed.events,
-                {"awaiting_retry_decision", "awaiting_integration", "blocked", "legacy_active"},
+                {"context_integrity_recovery", "awaiting_retry_decision", "awaiting_integration", "blocked", "legacy_active"},
                 "finish approval",
             )
             return self._finish_question_payload_locked(replayed.events)
@@ -2928,6 +3124,7 @@ class OptimPlansState:
             "allowed_paths": list(start["allowed_paths"]),
             "ignored_audit_noise": ignored_audit_noise_policy(),
             "worker": worker_config,
+            "plan_context": start.get("plan_context") or self._plan_context(),
         }
         block.update(
             self._prior_context(
@@ -2965,6 +3162,7 @@ class OptimPlansState:
             "allowed_paths": list(start["allowed_paths"]),
             "ignored_audit_noise": ignored_audit_noise_policy(),
             "worker": worker_config,
+            "plan_context": start.get("plan_context") or self._plan_context(),
         }
         block.update(
             self._prior_context(
@@ -3337,6 +3535,7 @@ class OptimPlansState:
                 "validator_result_recorded",
                 "validator_protocol_rejected",
                 "validator_failed",
+                "context_integrity_recovery",
                 "retry_restored",
                 "checkpoint_created",
             }
@@ -3344,6 +3543,7 @@ class OptimPlansState:
             "batch_validator_result_recorded",
             "batch_validator_protocol_rejected",
             "batch_validator_failed",
+            "batch_context_integrity_recovery",
             "batch_retry_restored",
             "batch_checkpoint_created",
         }
@@ -3510,6 +3710,79 @@ class OptimPlansState:
                 return None
         return None
 
+    def _assignment_plan_context(self, assignment: dict[str, Any]) -> dict[str, Any]:
+        raw = assignment.get("plan_context")
+        return raw if isinstance(raw, dict) else self._plan_context()
+
+    def _plan_context_integrity_issue(self, context: dict[str, Any]) -> dict[str, Any] | None:
+        if context.get("status") != "available":
+            reason = str(context.get("unavailable_reason") or "plan_context unavailable")
+            return {"reason": "plan_context_unavailable", "evidence": f"plan_context unavailable: {reason}"}
+        critical = context.get("truncation", {}).get("audit_breaking_critical_sections", [])
+        critical = [section for section in critical if isinstance(section, str)]
+        if critical:
+            return {
+                "reason": "plan_context_audit_breaking_truncation",
+                "evidence": f"plan_context critical sections truncated: {', '.join(critical)}",
+            }
+        return None
+
+    def _record_context_integrity_recovery_locked(
+        self,
+        item_id: str,
+        *,
+        assignment: dict[str, Any],
+        start: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        context = self._assignment_plan_context(assignment)
+        issue = self._plan_context_integrity_issue(context)
+        if issue is None:
+            return None
+        payload = {
+            "item_id": item_id,
+            "attempt": assignment["attempt"],
+            "validator_nonce": assignment["validator_nonce"],
+            "validator_config_hash": assignment["validator_config_hash"],
+            "validator_prompt_hash": assignment["validator_prompt_hash"],
+            "delta_fingerprint": assignment["delta_fingerprint"],
+            "base_commit": start["base_commit"],
+            "run_worktree": start["run_worktree"],
+            "status": "recovery_required",
+            "reason": issue["reason"],
+            "evidence": bounded_evidence(issue["evidence"]),
+            "plan_context": context,
+        }
+        return self._append_event_locked("context_integrity_recovery", payload)["payload"]
+
+    def _record_batch_context_integrity_recovery_locked(
+        self,
+        batch_id: str,
+        *,
+        assignment: dict[str, Any],
+        start: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        context = self._assignment_plan_context(assignment)
+        issue = self._plan_context_integrity_issue(context)
+        if issue is None:
+            return None
+        payload = {
+            "batch_id": batch_id,
+            "item_ids": list(assignment["item_ids"]),
+            "attempt": assignment["attempt"],
+            "assignment_nonce": assignment["assignment_nonce"],
+            "validator_nonce": assignment["validator_nonce"],
+            "validator_config_hash": assignment["validator_config_hash"],
+            "validator_prompt_hash": assignment["validator_prompt_hash"],
+            "delta_fingerprint": assignment["delta_fingerprint"],
+            "base_commit": start["base_commit"],
+            "run_worktree": start["run_worktree"],
+            "status": "recovery_required",
+            "reason": issue["reason"],
+            "evidence": bounded_evidence(issue["evidence"]),
+            "plan_context": context,
+        }
+        return self._append_event_locked("batch_context_integrity_recovery", payload)["payload"]
+
     def _latest_validator_assignment(self, events: list[dict[str, Any]], item_id: str) -> dict[str, Any] | None:
         for event in reversed(events):
             payload = event.get("payload", {})
@@ -3517,7 +3790,14 @@ class OptimPlansState:
                 continue
             if event["type"] == "validator_assigned":
                 return payload
-            if event["type"] in {"validator_result_recorded", "validator_protocol_rejected", "validator_failed", "retry_restored", "checkpoint_created"}:
+            if event["type"] in {
+                "validator_result_recorded",
+                "validator_protocol_rejected",
+                "validator_failed",
+                "context_integrity_recovery",
+                "retry_restored",
+                "checkpoint_created",
+            }:
                 return None
         return None
 
@@ -3532,6 +3812,7 @@ class OptimPlansState:
                 "batch_validator_result_recorded",
                 "batch_validator_protocol_rejected",
                 "batch_validator_failed",
+                "batch_context_integrity_recovery",
                 "batch_retry_restored",
                 "batch_checkpoint_created",
             }:
@@ -3666,6 +3947,7 @@ class OptimPlansState:
             "validator_prompt_hash": assignment["validator_prompt_hash"],
             "validator": validator_config,
             "validator_prompt": validator_prompt,
+            "plan_context": assignment.get("plan_context") or self._plan_context(),
         }
         block.update(
             self._prior_context(
@@ -3703,6 +3985,7 @@ class OptimPlansState:
             "validator_prompt_hash": assignment["validator_prompt_hash"],
             "validator": validator_config,
             "validator_prompt": validator_prompt,
+            "plan_context": assignment.get("plan_context") or self._plan_context(),
         }
         block.update(
             self._prior_context(
@@ -3791,6 +4074,7 @@ class OptimPlansState:
             "validator_config_hash": stable_json_hash(validator_config),
             "validator_prompt_hash": prompt_hash,
             "delta_fingerprint": delta["delta_fingerprint"],
+            "plan_context": start.get("plan_context") or self._plan_context(),
         }
         payload = self._append_event_locked("validator_assigned", assignment)["payload"]
         return self._validator_assignment_response_locked(
@@ -3877,6 +4161,7 @@ class OptimPlansState:
             "validator_config_hash": stable_json_hash(validator_config),
             "validator_prompt_hash": prompt_hash,
             "delta_fingerprint": delta["delta_fingerprint"],
+            "plan_context": start.get("plan_context") or self._plan_context(),
         }
         payload = self._append_event_locked("batch_validator_assigned", assignment)["payload"]
         return self._batch_validator_assignment_response_locked(
@@ -4015,6 +4300,7 @@ class OptimPlansState:
                 "allowed_paths": self._item_allowed_paths(item),
                 "assignment_nonce": uuid.uuid4().hex,
                 "worker_config_hash": worker_config_hash,
+                "plan_context": self._plan_context(),
             }
             payload = self._append_event_locked("item_started", start)["payload"]
             return self._host_assignment_response_locked(
@@ -4131,6 +4417,7 @@ class OptimPlansState:
             "allowed_paths": self._batch_allowed_paths(items),
             "assignment_nonce": uuid.uuid4().hex,
             "worker_config_hash": worker_config_hash,
+            "plan_context": self._plan_context(),
         }
         payload = self._append_event_locked("batch_started", start)["payload"]
         return self._batch_assignment_response_locked(
@@ -4931,6 +5218,9 @@ class OptimPlansState:
                     raise ContractError("registered validator agent handle does not match active assignment")
             else:
                 registration = None
+            recovery = self._record_context_integrity_recovery_locked(item_id, assignment=assignment, start=start)
+            if recovery is not None:
+                return recovery
             try:
                 current = self._item_delta_locked(
                     replayed.events,
@@ -4987,6 +5277,9 @@ class OptimPlansState:
                     raise ContractError("registered validator agent handle does not match active assignment")
             else:
                 registration = None
+            recovery = self._record_batch_context_integrity_recovery_locked(batch_id, assignment=assignment, start=start)
+            if recovery is not None:
+                return recovery
             try:
                 current = self._batch_delta_locked(
                     replayed.events,
@@ -5066,6 +5359,9 @@ class OptimPlansState:
                 if authorization is None:
                     raise ContractError("unknown or stale validator launch nonce")
                 extra.update({"launch_nonce": launch_nonce, "agent_handle_lost": True})
+            recovery = self._record_context_integrity_recovery_locked(item_id, assignment=assignment, start=start)
+            if recovery is not None:
+                return recovery
             return self._record_attempt_failure_locked(
                 "validator_failed",
                 item_id,
@@ -5122,6 +5418,9 @@ class OptimPlansState:
                 if authorization is None:
                     raise ContractError("unknown or stale validator launch nonce")
                 extra.update({"launch_nonce": launch_nonce, "agent_handle_lost": True})
+            recovery = self._record_batch_context_integrity_recovery_locked(batch_id, assignment=assignment, start=start)
+            if recovery is not None:
+                return recovery
             # record["manifest"] is read above to keep the manifest event validated before failure recording.
             _ = record
             return self._record_batch_attempt_failure_locked(
@@ -5187,6 +5486,9 @@ class OptimPlansState:
             self._reject_item_command_if_batch_member(replayed.events, item_id, "complete-validator")
             assignment = self._require_validator_assignment_locked(replayed.events, record["manifest"], item, validator_nonce)
             start = self._latest_item_start(replayed.events, item_id)
+            recovery = self._record_context_integrity_recovery_locked(item_id, assignment=assignment, start=start)
+            if recovery is not None:
+                return recovery
             self._reject_validator_result_locked(item_id, evidence=evidence, assignment=assignment, start=start)
             return {"item_id": item_id, "validator_nonce": validator_nonce, "status": "rejected"}
 
@@ -5196,6 +5498,9 @@ class OptimPlansState:
             record = self._execution_manifest_record(replayed.events)
             assignment = self._require_batch_validator_assignment_locked(replayed.events, record["manifest"], batch_id, validator_nonce)
             start = self._latest_batch_start(replayed.events, batch_id)
+            recovery = self._record_batch_context_integrity_recovery_locked(batch_id, assignment=assignment, start=start)
+            if recovery is not None:
+                return recovery
             self._reject_batch_validator_result_locked(batch_id, evidence=evidence, assignment=assignment, start=start)
             return {"batch_id": batch_id, "validator_nonce": validator_nonce, "status": "rejected"}
 
@@ -5217,6 +5522,7 @@ class OptimPlansState:
             "delta_fingerprint": assignment["delta_fingerprint"],
             "checked_items": self._item_validator_check_ids(self._manifest_item(self._execution_manifest_record(self.replay().events)["manifest"], item_id)),
             "validator_prompt": self._execution_manifest_record(self.replay().events)["manifest"]["validator_prompt"],
+            "plan_context": assignment["validator_launch_block"]["plan_context"],
         }
         write_json_atomic(state_path, validator_state)
         env = os.environ.copy()
@@ -5232,6 +5538,7 @@ class OptimPlansState:
                 "OPTIM_PLANS_DELTA_FINGERPRINT": assignment["delta_fingerprint"],
                 "OPTIM_PLANS_VALIDATOR_STATE_PATH": str(state_path),
                 "OPTIM_PLANS_CHECK_IDS": json_text(validator_state["checked_items"]),
+                "OPTIM_PLANS_PLAN_CONTEXT": json_text(validator_state["plan_context"]),
             }
         )
         validator = run_process_group(
@@ -5503,6 +5810,7 @@ class OptimPlansState:
             "delta_fingerprint": assignment["delta_fingerprint"],
             "checked_items": checked_items,
             "validator_prompt": self._execution_manifest_record(self.replay().events)["manifest"]["validator_prompt"],
+            "plan_context": assignment["validator_launch_block"]["plan_context"],
             "prior_context": assignment["validator_launch_block"].get("prior_context", ""),
         }
         write_json_atomic(state_path, validator_state)
@@ -5521,6 +5829,7 @@ class OptimPlansState:
                 "OPTIM_PLANS_DELTA_FINGERPRINT": assignment["delta_fingerprint"],
                 "OPTIM_PLANS_VALIDATOR_STATE_PATH": str(state_path),
                 "OPTIM_PLANS_CHECK_IDS": json_text(checked_items),
+                "OPTIM_PLANS_PLAN_CONTEXT": json_text(validator_state["plan_context"]),
             }
         )
         if validator_state["prior_context"]:
@@ -5911,7 +6220,11 @@ class OptimPlansState:
             run_worktree = Path(started["run_worktree"])
             worker_nonce = uuid.uuid4().hex
             state_path = self.run_dir / "worker-states" / f"{item_id}-{started['attempt']}.json"
-            worker_state: dict[str, Any] = {"run_id": self.run_id, "worker_nonce": worker_nonce}
+            worker_state: dict[str, Any] = {
+                "run_id": self.run_id,
+                "worker_nonce": worker_nonce,
+                "plan_context": started["plan_context"],
+            }
             feedback = self._latest_validator_feedback(self.replay().events, item_id)
             if feedback is not None:
                 worker_state["validator_feedback"] = feedback
@@ -5928,6 +6241,7 @@ class OptimPlansState:
                     "OPTIM_PLANS_STATE_PATH": str(state_path),
                     "OPTIM_PLANS_IDS": item_id,
                     "OPTIM_PLANS_SCOPES": os.pathsep.join(started["allowed_paths"]),
+                    "OPTIM_PLANS_PLAN_CONTEXT": json_text(worker_state["plan_context"]),
                 }
             )
             if feedback is not None:
@@ -6008,7 +6322,14 @@ class OptimPlansState:
                 batch_status = "validating"
             elif event["type"] == "batch_validator_result_recorded":
                 batch_status = "validated" if payload.get("status") == "pass" else "failed"
-            elif event["type"] in {"batch_worker_failed", "batch_validator_protocol_rejected", "batch_validator_failed", "batch_verification_failed", "batch_audit_failed"}:
+            elif event["type"] in {
+                "batch_worker_failed",
+                "batch_validator_protocol_rejected",
+                "batch_validator_failed",
+                "batch_context_integrity_recovery",
+                "batch_verification_failed",
+                "batch_audit_failed",
+            }:
                 batch_status = "failed"
             elif event["type"] == "batch_execution_blocked":
                 batch_status = "blocked"
@@ -6034,7 +6355,14 @@ class OptimPlansState:
                 statuses[item_id] = "validating"
             elif event["type"] == "validator_result_recorded":
                 statuses[item_id] = "validated" if payload.get("status") == "pass" else "failed"
-            elif event["type"] in {"worker_failed", "validator_protocol_rejected", "validator_failed", "verification_failed", "audit_failed"}:
+            elif event["type"] in {
+                "worker_failed",
+                "validator_protocol_rejected",
+                "validator_failed",
+                "context_integrity_recovery",
+                "verification_failed",
+                "audit_failed",
+            }:
                 statuses[item_id] = "failed"
             elif event["type"] == "execution_blocked":
                 statuses[item_id] = "blocked"
@@ -6172,6 +6500,7 @@ class OptimPlansState:
                 "run_worktree": str(run_worktree),
                 "run_branch": started["run_branch"],
                 "allowed_paths": self._item_allowed_paths(item),
+                "plan_context": self._plan_context(),
             }
             return self._append_event_locked("item_started", payload)["payload"]
 
@@ -6922,6 +7251,8 @@ class OptimPlansState:
                 "batch_validator_protocol_rejected",
                 "validator_failed",
                 "batch_validator_failed",
+                "context_integrity_recovery",
+                "batch_context_integrity_recovery",
                 "verification_failed",
                 "batch_verification_failed",
                 "audit_failed",
@@ -6932,13 +7263,26 @@ class OptimPlansState:
                 payload = event.get("payload", {})
                 if event["type"] in {"validator_result_recorded", "batch_validator_result_recorded"} and payload.get("status") != "fail":
                     continue
-                return {
+                failure = {
                     "failure_event_type": event["type"],
                     "failure_event_seq": event["seq"],
                     "failure_item_id": payload.get("item_id"),
                     "failure_batch_id": payload.get("batch_id"),
                     "failure_evidence": payload.get("evidence", ""),
                 }
+                if event["type"] in {"context_integrity_recovery", "batch_context_integrity_recovery"}:
+                    projected = _context_integrity_projection(payload)
+                    failure.update(
+                        {
+                            "failure_reason": projected["reason"],
+                            "failure_status": projected["status"],
+                            "plan_context_source_path": projected["source_path"],
+                            "plan_context_source_hash": projected["source_hash"],
+                            "plan_context_truncated": projected["truncated"],
+                            "plan_context_truncation": projected["truncation"],
+                        }
+                    )
+                return failure
         return None
 
     def _require_finish_approval(self, events: list[dict[str, Any]], approval_nonce: str, outcome: str) -> None:
@@ -7119,6 +7463,7 @@ class OptimPlansState:
                 "retry_decisions": [],
                 "limitations": "",
                 "explanation": "",
+                "context_integrity": {},
             }
             for item in manifest["items"]
         }
@@ -7146,11 +7491,16 @@ class OptimPlansState:
                         "batch_worker_failed",
                         "batch_validator_protocol_rejected",
                         "batch_validator_failed",
+                        "batch_context_integrity_recovery",
                         "batch_verification_failed",
                         "batch_audit_failed",
                     }:
                         result["status"] = "failed"
                         result["limitations"] = payload.get("evidence", "")
+                        if event_type == "batch_context_integrity_recovery":
+                            result["status"] = "context_integrity_recovery"
+                            result["limitations"] = _context_integrity_summary(payload)
+                            result["context_integrity"] = _context_integrity_projection(payload)
                     elif event_type == "batch_execution_blocked":
                         result["status"] = "blocked"
                         result["limitations"] = payload.get("evidence", "")
@@ -7187,9 +7537,20 @@ class OptimPlansState:
                 result["evidence"] = payload.get("evidence", "")
                 if payload.get("feedback_for_executor"):
                     result["limitations"] = payload["feedback_for_executor"]
-            elif event_type in {"worker_failed", "validator_protocol_rejected", "validator_failed", "verification_failed", "audit_failed"}:
+            elif event_type in {
+                "worker_failed",
+                "validator_protocol_rejected",
+                "validator_failed",
+                "context_integrity_recovery",
+                "verification_failed",
+                "audit_failed",
+            }:
                 result["status"] = "failed"
                 result["limitations"] = payload.get("evidence", "")
+                if event_type == "context_integrity_recovery":
+                    result["status"] = "context_integrity_recovery"
+                    result["limitations"] = _context_integrity_summary(payload)
+                    result["context_integrity"] = _context_integrity_projection(payload)
             elif event_type == "execution_blocked":
                 result["status"] = "blocked"
                 result["limitations"] = payload.get("evidence", "")
@@ -7279,7 +7640,7 @@ class OptimPlansState:
             replayed = self.replay()
             status = self._require_lifecycle_locked(
                 replayed.events,
-                {"awaiting_integration", "awaiting_retry_decision", "blocked", "legacy_active"},
+                {"context_integrity_recovery", "awaiting_integration", "awaiting_retry_decision", "blocked", "legacy_active"},
                 "finish-run",
             )
             if any(event["type"] == "run_finished" for event in replayed.events):
@@ -7365,7 +7726,7 @@ class OptimPlansState:
             if not isinstance(event.get("type"), str):
                 raise ContractError(f"event type missing at line {line_number}")
             events.append(event)
-        return ReplayState(events, lifecycle_status(events))
+        return ReplayState(events, lifecycle_status(events), lifecycle_status_details(events))
 
 
 @dataclass(frozen=True)

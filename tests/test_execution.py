@@ -54,6 +54,22 @@ class ExecutionTests(unittest.TestCase):
             "result_schema": HOST_VALIDATOR_RESULT_SCHEMA,
         }
 
+    def _foreground_validator(self) -> dict[str, object]:
+        from scripts.optim_plans_core import (
+            HOST_VALIDATOR_PROMPT_PROTOCOL,
+            HOST_VALIDATOR_RESULT_SCHEMA,
+            host_agent,
+            validator_prompt_hash,
+        )
+
+        return {
+            "mode": "foreground",
+            "platform": host_agent(),
+            "prompt_protocol": HOST_VALIDATOR_PROMPT_PROTOCOL,
+            "prompt_hash": validator_prompt_hash(),
+            "result_schema": HOST_VALIDATOR_RESULT_SCHEMA,
+        }
+
     def _validator_prompt(self) -> dict[str, object]:
         from scripts.optim_plans_core import HOST_VALIDATOR_PROMPT_PROTOCOL, VALIDATOR_PROMPT_CONTRACT, validator_prompt_hash
 
@@ -123,10 +139,13 @@ class ExecutionTests(unittest.TestCase):
         verification_argv: list[str],
         allowed_paths: list[str] | None = None,
         validator_retry_limit: int = 1,
+        write_plan: bool = True,
     ):
         from scripts.optim_plans_core import EXECUTION_PROTOCOL, EXECUTION_SCHEMA_VERSION, OptimPlansState
 
         state = OptimPlansState.initialize(repo, topic="Validator Execution", plan_hash="abc123")
+        if write_plan:
+            self._write_full_plan(state)
         run_worktree = state.root / "run-worktrees" / state.run_id
         worker_argv = [str(worker), "exec", "-C", str(run_worktree)]
         validator_argv = [str(validator), "exec", "-C", str(run_worktree)]
@@ -203,6 +222,7 @@ class ExecutionTests(unittest.TestCase):
         verification_argv: list[str] | None = None,
         validator: bool = False,
         validator_retry_limit: int = 1,
+        write_plan: bool = True,
     ):
         from scripts.optim_plans_core import EXECUTION_PROTOCOL, EXECUTION_SCHEMA_VERSION, OptimPlansState
 
@@ -219,6 +239,8 @@ class ExecutionTests(unittest.TestCase):
             "items": items,
         }
         if validator:
+            if write_plan:
+                self._write_full_plan(state)
             manifest.update(
                 {
                     "schema_version": EXECUTION_SCHEMA_VERSION,
@@ -369,6 +391,103 @@ class ExecutionTests(unittest.TestCase):
         git(repo, "add", "scripts", "hooks", "tests")
         git(repo, "commit", "-m", "add proof harness")
 
+    def _write_full_plan(
+        self,
+        state,
+        *,
+        name: str = "PLAN_v2.md",
+        requirements: str = "- R-001: implement the assigned behavior.",
+        non_goals: str = "- no strict gate",
+    ) -> Path:
+        state.artifact_dir.mkdir(parents=True, exist_ok=True)
+        path = state.artifact_dir / name
+        path.write_text(
+            "# Plan\n\n"
+            "## Requirements\n"
+            f"{requirements}\n\n"
+            "## Acceptance Criteria\n"
+            "- AC-001: controller checks pass.\n\n"
+            "## Implementation Items\n"
+            "- I-001: update scoped files.\n\n"
+            "## Verifier Checklist\n"
+            "- [ ] V-001: run focused tests.\n\n"
+            "## Non-Goals\n"
+            f"{non_goals}\n\n"
+            "## Constraints\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _assert_available_plan_context(self, context: dict[str, object]) -> None:
+        self.assertEqual(context["status"], "available")
+        self.assertEqual(context["source_version"], 2)
+        self.assertTrue(str(context["source_path"]).endswith("PLAN_v2.md"))
+        self.assertIsInstance(context["source_hash"], str)
+        self.assertFalse(context["truncation"]["audit_breaking"])
+        self.assertEqual(context["sections"]["Requirements"]["status"], "available")
+        self.assertEqual(context["sections"]["Constraints"]["status"], "empty")
+
+    def test_plan_context_selects_highest_plan_and_discloses_gaps_and_truncation(self) -> None:
+        from scripts.optim_plans_core import plan_context
+
+        with tempfile.TemporaryDirectory() as raw:
+            artifact = Path(raw)
+            unavailable = plan_context(artifact)
+            self.assertEqual(unavailable["status"], "unavailable")
+            self.assertEqual(unavailable["sections"]["Requirements"]["status"], "missing")
+
+            (artifact / "PLAN_v2.md").write_text("# Plan\n\n## Requirements\nold\n", encoding="utf-8")
+            selected = artifact / "PLAN_v10.md"
+            selected.write_text(
+                "# Plan\n\n"
+                "## Requirements\n"
+                "new requirement text\n\n"
+                "## Acceptance Criteria\n"
+                "acceptance\n\n"
+                "## Implementation Items\n"
+                "implementation\n\n"
+                "## Verifier Checklist\n"
+                "verifier\n\n"
+                "## Constraints\n",
+                encoding="utf-8",
+            )
+
+            context = plan_context(artifact)
+            self.assertEqual(context["status"], "available")
+            self.assertEqual(context["source_version"], 10)
+            self.assertEqual(context["source_hash"], hashlib.sha256(selected.read_bytes()).hexdigest())
+            self.assertIn("new requirement", context["sections"]["Requirements"]["content"])
+            self.assertFalse(context["sections"]["Non-Goals"]["present"])
+            self.assertTrue(context["sections"]["Constraints"]["present"])
+            self.assertEqual(context["sections"]["Constraints"]["status"], "empty")
+
+            truncated = plan_context(artifact, section_char_limit=8, total_char_limit=1000)
+            self.assertTrue(truncated["truncated"])
+            self.assertTrue(truncated["truncation"]["audit_breaking"])
+            self.assertEqual(truncated["sections"]["Requirements"]["status"], "truncated")
+
+        with tempfile.TemporaryDirectory() as raw:
+            artifact = Path(raw)
+            (artifact / "PLAN_v1.md").write_text(
+                "# Plan\n\n"
+                "## Requirements\n"
+                "R\n\n"
+                "## Acceptance Criteria\n"
+                "AC\n\n"
+                "## Implementation Items\n"
+                "I\n\n"
+                "## Verifier Checklist\n"
+                "V\n\n"
+                "## Non-Goals\n"
+                "noncritical section is long\n\n"
+                "## Constraints\n",
+                encoding="utf-8",
+            )
+            general = plan_context(artifact, section_char_limit=12, total_char_limit=1000)
+            self.assertTrue(general["truncated"])
+            self.assertFalse(general["truncation"]["audit_breaking"])
+            self.assertEqual(general["sections"]["Non-Goals"]["status"], "truncated")
+
     def test_host_manifest_accepts_codex_block_without_smoke_and_run_item_rejects_it(self) -> None:
         from scripts.optim_plans_core import ContractError, OptimPlansState
 
@@ -498,6 +617,7 @@ class ExecutionTests(unittest.TestCase):
             repo = make_repo(Path(raw))
             self._add_passing_full_proof_files(repo)
             state = OptimPlansState.initialize(repo, topic="Host Validator", plan_hash="abc123")
+            self._write_full_plan(state)
             run_worktree = state.root / "run-worktrees" / state.run_id
             state.persist_execution_manifest(
                 {
@@ -531,6 +651,7 @@ class ExecutionTests(unittest.TestCase):
             state.start_execution(question["nonce"])
 
             assignment = state.assign_item("TASK-001")
+            self._assert_available_plan_context(assignment["launch_block"]["plan_context"])
             executor_auth = state.authorize_spawn("TASK-001", assignment["assignment_nonce"], assignment["launch_block"])
             state.register_agent(
                 "TASK-001",
@@ -547,8 +668,11 @@ class ExecutionTests(unittest.TestCase):
                 agent_handle="executor-agent",
                 evidence="executor done",
             )
+            self._write_full_plan(state, name="PLAN_v3.md", requirements="- mutated after executor completion.")
             validator_assignment = state.advance_item("TASK-001")
             self.assertEqual(validator_assignment["phase"], "validator_assigned")
+            self.assertEqual(validator_assignment["validator_launch_block"]["plan_context"], assignment["launch_block"]["plan_context"])
+            self._assert_available_plan_context(validator_assignment["validator_launch_block"]["plan_context"])
             validator_auth = state.authorize_validator_spawn(
                 "TASK-001",
                 validator_assignment["validator_nonce"],
@@ -748,6 +872,7 @@ class ExecutionTests(unittest.TestCase):
 
         def prepare_batch(state, run_worktree: Path):
             assignment = state.assign_batch()
+            self._assert_available_plan_context(assignment["launch_block"]["plan_context"])
             auth = state.authorize_batch_spawn(assignment["batch_id"], assignment["assignment_nonce"], assignment["launch_block"])
             state.register_batch_agent(
                 assignment["batch_id"],
@@ -766,7 +891,10 @@ class ExecutionTests(unittest.TestCase):
                 agent_handle="executor-agent",
                 evidence="executor done",
             )
+            self._write_full_plan(state, name="PLAN_v3.md", requirements="- mutated after executor completion.")
             validator_assignment = state.advance_batch(assignment["batch_id"])
+            self.assertEqual(validator_assignment["validator_launch_block"]["plan_context"], assignment["launch_block"]["plan_context"])
+            self._assert_available_plan_context(validator_assignment["validator_launch_block"]["plan_context"])
             validator_auth = state.authorize_batch_validator_spawn(
                 assignment["batch_id"],
                 validator_assignment["validator_nonce"],
@@ -1213,6 +1341,182 @@ class ExecutionTests(unittest.TestCase):
             )
             retry = next(event["payload"] for event in events if event["type"] == "retry_restored")
             self.assertTrue(retry["auto_validator_retry"])
+
+    def test_context_integrity_recovery_status_summary_and_retry_boundaries(self) -> None:
+        from scripts.optim_plans_core import ContractError, EXECUTION_PROTOCOL, EXECUTION_SCHEMA_VERSION, OptimPlansState
+
+        def foreground_assignment(repo: Path, *, plan: str | None):
+            state = OptimPlansState.initialize(repo, topic="Foreground Context", plan_hash="abc123")
+            if plan == "critical":
+                self._write_full_plan(state, requirements="R" * 7000)
+            elif plan == "general":
+                self._write_full_plan(state, non_goals="N" * 7000)
+            run_worktree = state.root / "run-worktrees" / state.run_id
+            state.persist_execution_manifest(
+                {
+                    "schema_version": EXECUTION_SCHEMA_VERSION,
+                    "protocol_version": EXECUTION_PROTOCOL,
+                    "plan_hash": "abc123",
+                    "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                    "integration_destination": "main",
+                    "run_worktree_path": str(run_worktree),
+                    "worker": self._host_worker(),
+                    "validator_worker": self._foreground_validator(),
+                    "validator_prompt": self._validator_prompt(),
+                    "validator_retry_limit": 1,
+                    "verification_argv": [sys.executable, "-c", "pass"],
+                    "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"], "validator": {"check_ids": ["VC-TASK-001"]}}],
+                }
+            )
+            question = state.request_execution_approval()
+            state.record_answer(question["nonce"], "approve")
+            state.start_execution(question["nonce"])
+            assignment = state.assign_item("TASK-001")
+            auth = state.authorize_spawn("TASK-001", assignment["assignment_nonce"], assignment["launch_block"])
+            state.register_agent(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                launch_nonce=auth["launch_nonce"],
+                agent_handle="executor-agent",
+                launch_block=assignment["launch_block"],
+            )
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/app.txt").write_text("ok\n", encoding="utf-8")
+            state.complete_host_item(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                agent_handle="executor-agent",
+                evidence="done",
+            )
+            return state, state.advance_item("TASK-001")
+
+        for label, plan, reason in (
+            ("unavailable", None, "plan_context_unavailable"),
+            ("critical", "critical", "plan_context_audit_breaking_truncation"),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as raw:
+                repo = make_repo(Path(raw))
+                state, assignment = foreground_assignment(repo, plan=plan)
+                result = {
+                    "run_id": state.run_id,
+                    "item_id": "TASK-001",
+                    "attempt": assignment["attempt"],
+                    "nonce": assignment["validator_nonce"],
+                    "validator_config_hash": assignment["validator_config_hash"],
+                    "validator_prompt_hash": assignment["validator_prompt_hash"],
+                    "delta_fingerprint": assignment["delta_fingerprint"],
+                    "status": "pass",
+                    "evidence": "validator passed",
+                    "feedback_for_executor": "",
+                    "checked_items": ["VC-TASK-001"],
+                }
+                recovery = state.record_validator_result("TASK-001", validator_nonce=assignment["validator_nonce"], result=result)
+                replayed = state.replay()
+                details = replayed.status_details["context_integrity_recovery"]
+                summary = state._execution_summary_results(
+                    replayed.events,
+                    state._execution_manifest_record(replayed.events)["manifest"],
+                )["TASK-001"]
+                runtime = json.loads(state.runtime_file.read_text(encoding="utf-8"))
+                event_types = [event["type"] for event in replayed.events]
+
+                self.assertEqual(recovery["status"], "recovery_required")
+                self.assertEqual(recovery["reason"], reason)
+                self.assertEqual(replayed.status, "context_integrity_recovery")
+                self.assertEqual(runtime["status"], "context_integrity_recovery")
+                self.assertEqual(runtime["status_details"]["context_integrity_recovery"], details)
+                self.assertEqual(details["status"], "recovery_required")
+                self.assertEqual(details["reason"], reason)
+                self.assertEqual(details["source_path"], recovery["plan_context"]["source_path"])
+                self.assertEqual(details["source_hash"], recovery["plan_context"]["source_hash"])
+                self.assertEqual(details["truncation"], recovery["plan_context"]["truncation"])
+                self.assertEqual(summary["status"], "context_integrity_recovery")
+                self.assertEqual(summary["context_integrity"], details)
+                self.assertIn("source_path=", summary["limitations"])
+                self.assertIn("source_hash=", summary["limitations"])
+                self.assertNotIn("awaiting_retry_decision", event_types)
+                self.assertNotIn("retry_restored", event_types)
+                self.assertNotIn("checkpoint_created", event_types)
+                with self.assertRaisesRegex(ContractError, "lifecycle is context_integrity_recovery"):
+                    state.request_retry("TASK-001")
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, assignment = foreground_assignment(repo, plan="general")
+            result = {
+                "run_id": state.run_id,
+                "item_id": "TASK-001",
+                "attempt": assignment["attempt"],
+                "nonce": assignment["validator_nonce"],
+                "validator_config_hash": assignment["validator_config_hash"],
+                "validator_prompt_hash": assignment["validator_prompt_hash"],
+                "delta_fingerprint": assignment["delta_fingerprint"],
+                "status": "pass",
+                "evidence": "validator passed",
+                "feedback_for_executor": "",
+                "checked_items": ["VC-TASK-001"],
+            }
+            recorded = state.record_validator_result("TASK-001", validator_nonce=assignment["validator_nonce"], result=result)
+            self.assertEqual(recorded["status"], "pass")
+            self.assertTrue(assignment["validator_launch_block"]["plan_context"]["truncated"])
+            self.assertFalse(assignment["validator_launch_block"]["plan_context"]["truncation"]["audit_breaking"])
+            self.assertNotIn("context_integrity_recovery", [event["type"] for event in state.replay().events])
+
+    def test_batch_context_integrity_recovery_does_not_retry_or_checkpoint(self) -> None:
+        from scripts.optim_plans_core import ContractError
+
+        items = [
+            {"id": "TASK-001", "allowed_paths": ["src/1.txt"], "validator": {"check_ids": ["VC-1"]}},
+            {"id": "TASK-002", "allowed_paths": ["src/2.txt"], "validator": {"check_ids": ["VC-2"]}},
+            {"id": "TASK-003", "allowed_paths": ["src/3.txt"], "validator": {"check_ids": ["VC-3"]}},
+        ]
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_batch_execution(repo, items, validator=True, write_plan=False)
+            assignment = state.assign_batch()
+            auth = state.authorize_batch_spawn(assignment["batch_id"], assignment["assignment_nonce"], assignment["launch_block"])
+            state.register_batch_agent(
+                assignment["batch_id"],
+                assignment_nonce=assignment["assignment_nonce"],
+                launch_nonce=auth["launch_nonce"],
+                agent_handle="executor-agent",
+                launch_block=assignment["launch_block"],
+            )
+            for index in range(1, 4):
+                target = run_worktree / f"src/{index}.txt"
+                target.parent.mkdir(exist_ok=True)
+                target.write_text(f"{index}\n", encoding="utf-8")
+            state.complete_host_batch(
+                assignment["batch_id"],
+                assignment_nonce=assignment["assignment_nonce"],
+                agent_handle="executor-agent",
+                evidence="done",
+            )
+            validator_assignment = state.advance_batch(assignment["batch_id"])
+            recovery = state.fail_batch_validator(
+                assignment["batch_id"],
+                reason="process",
+                validator_nonce=validator_assignment["validator_nonce"],
+                evidence="validator crashed",
+            )
+            replayed = state.replay()
+            event_types = [event["type"] for event in replayed.events]
+            summary = state._execution_summary_results(
+                replayed.events,
+                state._execution_manifest_record(replayed.events)["manifest"],
+            )
+
+            self.assertEqual(recovery["status"], "recovery_required")
+            self.assertEqual(recovery["reason"], "plan_context_unavailable")
+            self.assertEqual(replayed.status, "context_integrity_recovery")
+            self.assertEqual(replayed.status_details["context_integrity_recovery"]["batch_id"], assignment["batch_id"])
+            for item_id in assignment["item_ids"]:
+                self.assertEqual(summary[item_id]["status"], "context_integrity_recovery")
+            self.assertNotIn("awaiting_retry_decision", event_types)
+            self.assertNotIn("batch_retry_restored", event_types)
+            self.assertNotIn("batch_checkpoint_created", event_types)
+            with self.assertRaisesRegex(ContractError, "lifecycle is context_integrity_recovery"):
+                state.request_batch_retry(assignment["batch_id"])
 
     def test_validator_protocol_rejection_does_not_auto_retry(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
