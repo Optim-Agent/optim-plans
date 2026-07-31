@@ -512,7 +512,7 @@ python3 scripts/optim_plans.py answer --repo <repo> --nonce <finish-nonce> --cho
 python3 scripts/optim_plans.py finish-run --repo <repo> --outcome kept --approval-nonce <finish-nonce>
 ```
 
-Use `$optim-plans:resume-previous-plan` to continue an interrupted active run. It checks the active run first, runs `resume_command` when available, and treats the direct resume request as approval for `retry_approval_nonce` before running `retry_command`; if only finish recovery is available, it reports `finish_choices` and stops. If there is no active pointer, it falls back to `previous-run` and suggests the latest preserved run from Git common state.
+Use `$optim-plans:resume-previous-plan` to continue an interrupted active run. It checks the active run first and runs `resume_command` when available for approved execution launch or retryable recovery; if only finish recovery is available, it reports `finish_choices` and stops. If there is no active pointer, it falls back to `previous-run` and suggests the latest preserved run from Git common state.
 
 Batch launch blocks include prior agent handles when a related executor or validator session can be reused, plus bounded `prior_context` as a session resume fallback when the host cannot resume directly.
 
@@ -618,7 +618,7 @@ Implemented:
 - validator worker loop before controller verification;
 - adapter-only argv launch with `shell=False`: current Claude CLI adapter `run-item` foreground standalone `--agent`, synchronous wait, and stdout JSON envelope;
 - controller verification and Git audits for path allowlists and protected Git metadata, while preserving known ignored audit noise (`.xsw/`, `.pytest_cache/`, `__pycache__/`, `*.pyc`);
-- automatic first retry restore and explicit retry approval for later retries;
+- automatic retry restore until success or controller `blocked`;
 - automatic checked-out fast-forward `run_finished` / `integrated` after clean final audits and full local proof;
 - manual `awaiting_integration` recovery when checked-out fast-forward integration cannot safely finish;
 - manual recovery `finish-run` outcomes with evidence and full local proof for `integrated`;

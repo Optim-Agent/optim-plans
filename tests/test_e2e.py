@@ -1531,6 +1531,10 @@ class E2ETests(unittest.TestCase):
             self.assertIn("retry-item", first["resume_command"])
             self.assertNotIn("retry_approval_nonce", first)
             self.assertIn("finish_approval_nonce", first)
+            self.assertFalse(any(event.get("payload", {}).get("stage") == "execution_retry" for event in state.replay().events))
+            first_event_count = len(state.replay().events)
+            controller_json("status", "--repo", str(repo))
+            self.assertEqual(len(state.replay().events), first_event_count)
 
             state.append_event("retry_restored", {"item_id": "TASK-001", "approval_nonce": None, "auto_approved": True, "restored_to": base, "run_worktree": str(run_worktree)})
             state.append_event("item_started", {**item_started, "attempt": 2})
@@ -1539,9 +1543,14 @@ class E2ETests(unittest.TestCase):
             second = controller_json("status", "--repo", str(repo))
             self.assertEqual(second["status"], "awaiting_retry_decision")
             self.assertEqual(second["retry_item_id"], "TASK-001")
-            self.assertIn("retry_approval_nonce", second)
-            self.assertIn("--approval-nonce", second["retry_command"])
+            self.assertNotIn("retry_approval_nonce", second)
+            self.assertNotIn("--approval-nonce", second["retry_command"])
+            self.assertEqual(second["resume_command"], second["retry_command"])
             self.assertIn("finish_approval_nonce", second)
+            self.assertFalse(any(event.get("payload", {}).get("stage") == "execution_retry" for event in state.replay().events))
+            second_event_count = len(state.replay().events)
+            controller_json("status", "--repo", str(repo))
+            self.assertEqual(len(state.replay().events), second_event_count)
 
         with tempfile.TemporaryDirectory() as raw:
             raw_path = Path(raw)
@@ -1605,7 +1614,9 @@ class E2ETests(unittest.TestCase):
             batch_status = controller_json("status", "--repo", str(repo))
             self.assertEqual(batch_status["retry_batch_id"], "B-test")
             self.assertIn("retry-batch", batch_status["resume_command"])
+            self.assertNotIn("retry_approval_nonce", batch_status)
             self.assertNotIn("retry_item_id", batch_status)
+            self.assertFalse(any(event.get("payload", {}).get("stage") == "execution_batch_retry" for event in state.replay().events))
 
     def test_cli_lifecycle_rejects_invalid_states_before_mutation_and_finishes_integrated(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

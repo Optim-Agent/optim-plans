@@ -986,13 +986,17 @@ class ExecutionTests(unittest.TestCase):
                     "feedback_for_executor": "",
                     "checked_items": ["VC-1", "VC-2", "VC-3"],
                 }
-                with self.assertRaisesRegex(ContractError, error):
-                    state.record_batch_validator_result(
-                        assignment["batch_id"],
-                        validator_nonce=validator_assignment["validator_nonce"],
-                        agent_handle="validator-agent",
-                        result=mutate(result),
-                    )
+                rejected = state.record_batch_validator_result(
+                    assignment["batch_id"],
+                    validator_nonce=validator_assignment["validator_nonce"],
+                    agent_handle="validator-agent",
+                    result=mutate(result),
+                )
+                events = state.replay().events
+                self.assertTrue(rejected["auto_validator_retry"])
+                self.assertIn("batch_validator_protocol_rejected", [event["type"] for event in events])
+                self.assertIn("batch_retry_restored", [event["type"] for event in events])
+                self.assertIn(error, next(event["payload"]["evidence"] for event in events if event["type"] == "batch_validator_protocol_rejected"))
                 self.assertNotIn("batch_checkpoint_created", [event["type"] for event in state.replay().events])
 
         with tempfile.TemporaryDirectory() as raw:
@@ -1025,6 +1029,22 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(retry["item_ids"], assignment["item_ids"])
             self.assertEqual(retry["attempt"], 2)
             self.assertEqual(retry["launch_block"]["validator_feedback"]["feedback_for_executor"], "fix batch")
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_batch_execution(repo, items, validator=True, validator_retry_limit=1)
+            assignment, validator_assignment = prepare_batch(state, run_worktree)
+            failed = state.fail_batch_validator(
+                assignment["batch_id"],
+                reason="process",
+                validator_nonce=validator_assignment["validator_nonce"],
+                agent_handle="validator-agent",
+                evidence="validator crashed",
+            )
+            self.assertTrue(failed["auto_validator_retry"])
+            retry = state.assign_batch()
+            self.assertEqual(retry["batch_id"], assignment["batch_id"])
+            self.assertEqual(retry["attempt"], 2)
 
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
@@ -1129,6 +1149,49 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(state.replay().status, "executing")
             self.assertIn("retry_restored", [event["type"] for event in state.replay().events])
 
+    def test_active_audit_failure_auto_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_execution(
+                repo,
+                verification_argv=[sys.executable, "-c", "pass"],
+            )
+            state.assign_item("TASK-001")
+            target = run_worktree / "src/host.txt"
+            target.parent.mkdir()
+            target.write_text("bad\n", encoding="utf-8")
+
+            restored = state.record_attempt_failure("audit_failed", "TASK-001", evidence="active audit failed")
+
+            self.assertTrue(restored["auto_retry"])
+            self.assertFalse(target.exists())
+            self.assertEqual(state.replay().status, "executing")
+            self.assertIn("retry_restored", [event["type"] for event in state.replay().events])
+
+        items = [
+            {"id": "TASK-001", "allowed_paths": ["src/1.txt"]},
+            {"id": "TASK-002", "allowed_paths": ["src/2.txt"]},
+            {"id": "TASK-003", "allowed_paths": ["src/3.txt"]},
+        ]
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_batch_execution(repo, items)
+            assignment = state.assign_batch()
+            target = run_worktree / "src/1.txt"
+            target.parent.mkdir()
+            target.write_text("bad\n", encoding="utf-8")
+
+            restored = state.record_batch_attempt_failure(
+                "batch_audit_failed",
+                assignment["batch_id"],
+                evidence="active batch audit failed",
+            )
+
+            self.assertTrue(restored["auto_retry"])
+            self.assertFalse(target.exists())
+            self.assertEqual(state.replay().status, "executing")
+            self.assertIn("batch_retry_restored", [event["type"] for event in state.replay().events])
+
     def test_host_retry_item_returns_assignment_after_manual_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
@@ -1139,7 +1202,7 @@ class ExecutionTests(unittest.TestCase):
             state.assign_item("TASK-001")
             (run_worktree / "src").mkdir()
             (run_worktree / "src/host.txt").write_text("bad\n", encoding="utf-8")
-            state.record_attempt_failure("audit_failed", "TASK-001", evidence="manual audit failure")
+            state.record_attempt_failure("audit_failed", "TASK-001", evidence="manual audit failure", retryable=False)
 
             retried = state.retry_item("TASK-001", None)
 
@@ -1518,7 +1581,7 @@ class ExecutionTests(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, "lifecycle is context_integrity_recovery"):
                 state.request_batch_retry(assignment["batch_id"])
 
-    def test_validator_protocol_rejection_does_not_auto_retry(self) -> None:
+    def test_validator_protocol_rejection_auto_retries_until_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             raw_path = Path(raw)
             repo = make_repo(raw_path)
@@ -1558,14 +1621,16 @@ class ExecutionTests(unittest.TestCase):
                 verification_argv=[sys.executable, "-c", "pass"],
             )
 
-            with self.assertRaisesRegex(Exception, "checked_items"):
-                state.run_item("TASK-001")
+            result = state.run_item("TASK-001")
 
             event_types = [event["type"] for event in state.replay().events]
+            self.assertEqual(result["reason"], "three consecutive equivalent retryable failures")
             self.assertIn("validator_protocol_rejected", event_types)
-            self.assertIn("awaiting_retry_decision", event_types)
-            self.assertNotIn("retry_restored", event_types)
+            self.assertIn("retry_restored", event_types)
+            self.assertIn("execution_blocked", event_types)
+            self.assertNotIn("awaiting_retry_decision", event_types)
             self.assertNotIn("checkpoint_created", event_types)
+            self.assertFalse(any(event.get("payload", {}).get("stage") in {"execution_retry", "finish_run"} for event in state.replay().events))
 
     def test_verifier_delta_drift_after_validator_pass_blocks_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -3287,7 +3352,7 @@ class ExecutionTests(unittest.TestCase):
             (run_worktree / "src").mkdir()
             target = run_worktree / "src/task.txt"
             target.write_text("first failure\n", encoding="utf-8")
-            state.record_attempt_failure("audit_failed", "TASK-001", evidence="first failure")
+            state.record_attempt_failure("audit_failed", "TASK-001", evidence="first failure", retryable=False)
             first_finish = state.request_finish_approval()
             state.record_answer(first_finish["nonce"], "failed")
             first = state.request_retry("TASK-001")
@@ -3297,7 +3362,7 @@ class ExecutionTests(unittest.TestCase):
             state.begin_item("TASK-001")
             (run_worktree / "src").mkdir(exist_ok=True)
             target.write_text("second failure\n", encoding="utf-8")
-            state.record_attempt_failure("audit_failed", "TASK-001", evidence="second failure")
+            state.record_attempt_failure("audit_failed", "TASK-001", evidence="second failure", retryable=False)
             second = state.request_retry("TASK-001")
             second_finish = state.request_finish_approval()
 
@@ -3332,7 +3397,7 @@ class ExecutionTests(unittest.TestCase):
             state.begin_item("TASK-001")
             (run_worktree / "src").mkdir()
             (run_worktree / "src/task.txt").write_text("failed\n", encoding="utf-8")
-            state.record_attempt_failure("audit_failed", "TASK-001", evidence="manual audit failure")
+            state.record_attempt_failure("audit_failed", "TASK-001", evidence="manual audit failure", retryable=False)
             retry = state.request_retry("TASK-001")
             state.record_answer(retry["nonce"], "approve")
 

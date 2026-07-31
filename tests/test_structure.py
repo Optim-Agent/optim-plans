@@ -117,7 +117,7 @@ class StructureTests(unittest.TestCase):
             "adapter-only argv launch with `shell=False`",
             "validator worker loop before controller verification",
             "controller verification and Git audits",
-            "explicit retry approval for later retries",
+            "automatic retry restore until success or controller `blocked`",
             "automatic checked-out fast-forward `run_finished` / `integrated`",
             "manual recovery `finish-run` outcomes",
         ):

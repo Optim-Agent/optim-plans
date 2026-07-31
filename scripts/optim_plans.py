@@ -804,9 +804,9 @@ def cmd_status(args: argparse.Namespace) -> None:
         else:
             payload["next_action"] = "approve the execution launch nonce before running start-execution"
     elif replayed.status == "awaiting_retry_decision":
-        retry_batch_id = next(
+        batch_failure = next(
             (
-                event.get("payload", {}).get("batch_id")
+                event
                 for event in reversed(replayed.events)
                 if event["type"]
                 in {
@@ -820,6 +820,7 @@ def cmd_status(args: argparse.Namespace) -> None:
             ),
             None,
         )
+        retry_batch_id = batch_failure.get("payload", {}).get("batch_id") if batch_failure is not None else None
         if isinstance(retry_batch_id, str):
             payload["retry_batch_id"] = retry_batch_id
             retry_seen = any(
@@ -835,7 +836,11 @@ def cmd_status(args: argparse.Namespace) -> None:
                 "--batch-id",
                 retry_batch_id,
             ]
-            if retry_seen:
+            if state._is_retryable_failure_event(batch_failure):
+                payload["retry_command"] = shlex.join(retry_argv)
+                payload["resume_command"] = payload["retry_command"]
+                payload["next_action"] = "run resume_command for the automatic batch retry, or finish with finish_approval_nonce"
+            elif retry_seen:
                 retry = state.request_batch_retry(retry_batch_id)
                 payload["retry_approval_nonce"] = retry["nonce"]
                 retry_argv.extend(["--approval-nonce", retry["nonce"]])
@@ -854,9 +859,9 @@ def cmd_status(args: argparse.Namespace) -> None:
             else:
                 payload["resume_command"] = shlex.join(retry_argv)
                 payload["next_action"] = "run resume_command for the automatic first batch retry, or finish with finish_approval_nonce"
-        retry_item_id = None if isinstance(retry_batch_id, str) else next(
+        item_failure = None if isinstance(retry_batch_id, str) else next(
             (
-                event.get("payload", {}).get("item_id")
+                event
                 for event in reversed(replayed.events)
                 if event["type"]
                 in {"worker_failed", "validator_protocol_rejected", "validator_failed", "verification_failed", "audit_failed"}
@@ -864,6 +869,7 @@ def cmd_status(args: argparse.Namespace) -> None:
             ),
             None,
         )
+        retry_item_id = item_failure.get("payload", {}).get("item_id") if item_failure is not None else None
         if isinstance(retry_item_id, str):
             payload["retry_item_id"] = retry_item_id
             retry_seen = any(
@@ -879,7 +885,11 @@ def cmd_status(args: argparse.Namespace) -> None:
                 "--item-id",
                 retry_item_id,
             ]
-            if retry_seen:
+            if state._is_retryable_failure_event(item_failure):
+                payload["retry_command"] = shlex.join(retry_argv)
+                payload["resume_command"] = payload["retry_command"]
+                payload["next_action"] = "run resume_command for the automatic retry, or finish with finish_approval_nonce"
+            elif retry_seen:
                 retry = state.request_retry(retry_item_id)
                 payload["retry_approval_nonce"] = retry["nonce"]
                 retry_argv.extend(["--approval-nonce", retry["nonce"]])

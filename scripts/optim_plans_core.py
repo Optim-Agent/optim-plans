@@ -41,8 +41,22 @@ HOST_EXECUTOR_PROMPT_PROTOCOL = "optim-plans-host-executor-v1"
 HOST_EXECUTOR_RESULT_SCHEMA = "optim-plans-worker-result-v1"
 HOST_VALIDATOR_PROMPT_PROTOCOL = "optim-plans-host-validator-v1"
 HOST_VALIDATOR_RESULT_SCHEMA = "optim-plans-validator-result-v1"
-ITEM_RETRYABLE_FAILURE_EVENTS = {"worker_failed", "verification_failed", "validator_result_recorded"}
-BATCH_RETRYABLE_FAILURE_EVENTS = {"batch_worker_failed", "batch_verification_failed", "batch_validator_result_recorded"}
+ITEM_RETRYABLE_FAILURE_EVENTS = {
+    "worker_failed",
+    "validator_result_recorded",
+    "validator_protocol_rejected",
+    "validator_failed",
+    "verification_failed",
+    "audit_failed",
+}
+BATCH_RETRYABLE_FAILURE_EVENTS = {
+    "batch_worker_failed",
+    "batch_validator_result_recorded",
+    "batch_validator_protocol_rejected",
+    "batch_validator_failed",
+    "batch_verification_failed",
+    "batch_audit_failed",
+}
 RETRYABLE_FAILURE_EVENTS = ITEM_RETRYABLE_FAILURE_EVENTS | BATCH_RETRYABLE_FAILURE_EVENTS
 IGNORED_AUDIT_NOISE_PATTERNS = [".xsw/", ".pytest_cache/", "__pycache__/", "*.pyc"]
 PLAN_CONTEXT_REQUIRED_SECTIONS = (
@@ -2713,6 +2727,8 @@ class OptimPlansState:
     def _is_retryable_failure_event(self, event: dict[str, Any]) -> bool:
         event_type = event["type"]
         payload = event.get("payload", {})
+        if payload.get("retryable") is False:
+            return False
         if event_type not in RETRYABLE_FAILURE_EVENTS:
             return False
         if event_type in {"validator_result_recorded", "batch_validator_result_recorded"}:
@@ -2807,6 +2823,14 @@ class OptimPlansState:
             raise ContractError("delta fingerprint changed before retry restore")
         return delta
 
+    def _auto_retry_restore_preflight_locked(self, events: list[dict[str, Any]], start: dict[str, Any]) -> Path:
+        started = self._execution_started_record(events)
+        self._require_protected_metadata_clean(started)
+        run_worktree = self._require_run_worktree(started, expected_head=start["base_commit"], clean=False)
+        if Path(start["run_worktree"]).resolve() != run_worktree.resolve():
+            raise ContractError("failed attempt is not bound to the controller-owned worktree")
+        return run_worktree
+
     def _append_attempt_manual_recovery_locked(
         self,
         event_type: str,
@@ -2869,10 +2893,22 @@ class OptimPlansState:
         return payload
 
     def _record_auto_retry_audit_failure_locked(self, item_id: str, *, evidence: str, start: dict[str, Any]) -> None:
-        self._append_attempt_manual_recovery_locked("audit_failed", item_id, evidence=f"audit failed: {evidence}", start=start)
+        self._append_attempt_manual_recovery_locked(
+            "audit_failed",
+            item_id,
+            evidence=f"audit failed: {evidence}",
+            start=start,
+            extra={"retryable": False},
+        )
 
     def _record_batch_auto_retry_audit_failure_locked(self, batch_id: str, *, evidence: str, start: dict[str, Any]) -> None:
-        self._append_batch_manual_recovery_locked("batch_audit_failed", batch_id, evidence=f"audit failed: {evidence}", start=start)
+        self._append_batch_manual_recovery_locked(
+            "batch_audit_failed",
+            batch_id,
+            evidence=f"audit failed: {evidence}",
+            start=start,
+            extra={"retryable": False},
+        )
 
     def _restore_item_auto_retry_locked(
         self,
@@ -2884,13 +2920,16 @@ class OptimPlansState:
     ) -> dict[str, Any]:
         payload = failure_event["payload"]
         try:
-            self._item_auto_retry_delta_locked(
-                events,
-                manifest,
-                item,
-                start,
-                expected_delta_fingerprint=payload.get("delta_fingerprint"),
-            )
+            if failure_event["type"] == "audit_failed":
+                self._auto_retry_restore_preflight_locked(events, start)
+            else:
+                self._item_auto_retry_delta_locked(
+                    events,
+                    manifest,
+                    item,
+                    start,
+                    expected_delta_fingerprint=payload.get("delta_fingerprint"),
+                )
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
             self._record_auto_retry_audit_failure_locked(item["id"], evidence=str(exc), start=start)
             raise
@@ -2902,7 +2941,8 @@ class OptimPlansState:
             "approval_nonce": None,
             "auto_approved": True,
             "auto_retry": True,
-            "auto_validator_retry": failure_event["type"] == "validator_result_recorded",
+            "auto_validator_retry": failure_event["type"]
+            in {"validator_result_recorded", "validator_protocol_rejected", "validator_failed"},
             "failure_event": failure_event["type"],
             "restored_to": start["base_commit"],
             "run_worktree": str(run_worktree),
@@ -2923,12 +2963,15 @@ class OptimPlansState:
         payload = failure_event["payload"]
         batch_id = start["batch_id"]
         try:
-            self._batch_auto_retry_delta_locked(
-                events,
-                manifest,
-                start,
-                expected_delta_fingerprint=payload.get("delta_fingerprint"),
-            )
+            if failure_event["type"] == "batch_audit_failed":
+                self._auto_retry_restore_preflight_locked(events, start)
+            else:
+                self._batch_auto_retry_delta_locked(
+                    events,
+                    manifest,
+                    start,
+                    expected_delta_fingerprint=payload.get("delta_fingerprint"),
+                )
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
             self._record_batch_auto_retry_audit_failure_locked(batch_id, evidence=str(exc), start=start)
             raise
@@ -2941,7 +2984,8 @@ class OptimPlansState:
             "approval_nonce": None,
             "auto_approved": True,
             "auto_retry": True,
-            "auto_validator_retry": failure_event["type"] == "batch_validator_result_recorded",
+            "auto_validator_retry": failure_event["type"]
+            in {"batch_validator_result_recorded", "batch_validator_protocol_rejected", "batch_validator_failed"},
             "failure_event": failure_event["type"],
             "restored_to": start["base_commit"],
             "run_worktree": str(run_worktree),
@@ -2971,14 +3015,19 @@ class OptimPlansState:
         }
         if extra:
             payload.update(extra)
-        if event_type not in ITEM_RETRYABLE_FAILURE_EVENTS or (
+        if payload.get("retryable") is False or event_type not in ITEM_RETRYABLE_FAILURE_EVENTS or (
             event_type == "validator_result_recorded" and payload.get("status") != "fail"
         ):
             return self._append_attempt_manual_recovery_locked(event_type, item_id, evidence=evidence, start=start, extra=extra)
+        payload["retryable"] = True
         try:
-            delta = self._item_auto_retry_delta_locked(self.replay().events, record["manifest"], item, start)
-            payload.update({"changed_files": delta["changed_files"], "delta_fingerprint": delta["delta_fingerprint"]})
+            if event_type == "audit_failed":
+                self._auto_retry_restore_preflight_locked(self.replay().events, start)
+            else:
+                delta = self._item_auto_retry_delta_locked(self.replay().events, record["manifest"], item, start)
+                payload.update({"changed_files": delta["changed_files"], "delta_fingerprint": delta["delta_fingerprint"]})
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            payload["retryable"] = False
             self._append_event_locked(event_type, payload)
             self._record_auto_retry_audit_failure_locked(item_id, evidence=str(exc), start=start)
             raise
@@ -3020,14 +3069,19 @@ class OptimPlansState:
         }
         if extra:
             payload.update(extra)
-        if event_type not in BATCH_RETRYABLE_FAILURE_EVENTS or (
+        if payload.get("retryable") is False or event_type not in BATCH_RETRYABLE_FAILURE_EVENTS or (
             event_type == "batch_validator_result_recorded" and payload.get("status") != "fail"
         ):
             return self._append_batch_manual_recovery_locked(event_type, batch_id, evidence=evidence, start=start, extra=extra)
+        payload["retryable"] = True
         try:
-            delta = self._batch_auto_retry_delta_locked(self.replay().events, record["manifest"], start)
-            payload.update({"changed_files": delta["changed_files"], "delta_fingerprint": delta["delta_fingerprint"]})
+            if event_type == "batch_audit_failed":
+                self._auto_retry_restore_preflight_locked(self.replay().events, start)
+            else:
+                delta = self._batch_auto_retry_delta_locked(self.replay().events, record["manifest"], start)
+                payload.update({"changed_files": delta["changed_files"], "delta_fingerprint": delta["delta_fingerprint"]})
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
+            payload["retryable"] = False
             self._append_event_locked(event_type, payload)
             self._record_batch_auto_retry_audit_failure_locked(batch_id, evidence=str(exc), start=start)
             raise
@@ -3050,7 +3104,14 @@ class OptimPlansState:
             return self._append_event_locked("batch_execution_blocked", blocked)["payload"]
         return self._restore_batch_auto_retry_locked(events, record["manifest"], start, failure_event)
 
-    def record_attempt_failure(self, event_type: str, item_id: str, *, evidence: str) -> dict[str, Any]:
+    def record_attempt_failure(
+        self,
+        event_type: str,
+        item_id: str,
+        *,
+        evidence: str,
+        retryable: bool | None = None,
+    ) -> dict[str, Any]:
         if event_type not in {"verification_failed", "audit_failed"}:
             raise ContractError(f"unsupported failure event {event_type!r}")
         if not evidence.strip():
@@ -3064,7 +3125,8 @@ class OptimPlansState:
             if statuses[item_id] not in {"in_progress", "completed", "validated"}:
                 raise ContractError(f"{item_id} has no active attempt to fail")
             start = self._latest_item_start(replayed.events, item_id)
-            return self._record_attempt_failure_locked(event_type, item_id, evidence=evidence, start=start)
+            extra = None if retryable is None else {"retryable": retryable}
+            return self._record_attempt_failure_locked(event_type, item_id, evidence=evidence, start=start, extra=extra)
 
     def record_batch_attempt_failure(self, event_type: str, batch_id: str, *, evidence: str) -> dict[str, Any]:
         if event_type not in {"batch_verification_failed", "batch_audit_failed"}:
@@ -3299,7 +3361,7 @@ class OptimPlansState:
         if batch is not None:
             raise ContractError(f"{item_id} belongs to active batch {batch['batch_id']}; use batch commands")
 
-    def _latest_batch_failure(self, events: list[dict[str, Any]], batch_id: str) -> dict[str, Any]:
+    def _latest_batch_failure_event(self, events: list[dict[str, Any]], batch_id: str) -> dict[str, Any]:
         for event in reversed(events):
             payload = event.get("payload", {})
             if payload.get("batch_id") != batch_id:
@@ -3313,10 +3375,13 @@ class OptimPlansState:
                 "batch_audit_failed",
             }:
                 if event["type"] != "batch_validator_result_recorded" or payload.get("status") == "fail":
-                    return payload
+                    return event
             if event["type"] in {"batch_checkpoint_created", "batch_retry_restored", "batch_started"}:
                 break
         raise ContractError(f"{batch_id} has no failed attempt to retry")
+
+    def _latest_batch_failure(self, events: list[dict[str, Any]], batch_id: str) -> dict[str, Any]:
+        return self._latest_batch_failure_event(events, batch_id)["payload"]
 
     def _pending_retry_batch(self, events: list[dict[str, Any]]) -> dict[str, Any] | None:
         for event in reversed(events):
@@ -4050,6 +4115,7 @@ class OptimPlansState:
                     item["id"],
                     evidence="audit failed: delta fingerprint changed before validator assignment",
                     start=start,
+                    extra={"retryable": False},
                 )
                 raise ContractError("delta fingerprint changed before validator assignment")
             return self._validator_assignment_response_locked(events, manifest, item, existing, validator_config)
@@ -4135,6 +4201,7 @@ class OptimPlansState:
                     start["batch_id"],
                     evidence="audit failed: delta fingerprint changed before validator assignment",
                     start=start,
+                    extra={"retryable": False},
                 )
                 raise ContractError("delta fingerprint changed before validator assignment")
             return self._batch_validator_assignment_response_locked(events, manifest, existing, validator_config)
@@ -4971,8 +5038,9 @@ class OptimPlansState:
         evidence: str,
         assignment: dict[str, Any],
         start: dict[str, Any],
-    ) -> None:
-        self._record_attempt_failure_locked(
+        retryable: bool = True,
+    ) -> dict[str, Any]:
+        return self._record_attempt_failure_locked(
             "validator_protocol_rejected",
             item_id,
             evidence=evidence,
@@ -4983,6 +5051,7 @@ class OptimPlansState:
                 "validator_config_hash": assignment["validator_config_hash"],
                 "validator_prompt_hash": assignment["validator_prompt_hash"],
                 "delta_fingerprint": assignment["delta_fingerprint"],
+                "retryable": retryable,
             },
         )
 
@@ -5052,8 +5121,9 @@ class OptimPlansState:
         evidence: str,
         assignment: dict[str, Any],
         start: dict[str, Any],
-    ) -> None:
-        self._record_batch_attempt_failure_locked(
+        retryable: bool = True,
+    ) -> dict[str, Any]:
+        return self._record_batch_attempt_failure_locked(
             "batch_validator_protocol_rejected",
             batch_id,
             evidence=evidence,
@@ -5065,6 +5135,7 @@ class OptimPlansState:
                 "validator_config_hash": assignment["validator_config_hash"],
                 "validator_prompt_hash": assignment["validator_prompt_hash"],
                 "delta_fingerprint": assignment["delta_fingerprint"],
+                "retryable": retryable,
             },
         )
 
@@ -5231,12 +5302,28 @@ class OptimPlansState:
                 )
                 if current["delta_fingerprint"] != assignment["delta_fingerprint"]:
                     raise ContractError("delta fingerprint changed before validator result receipt")
+            except ContractError as exc:
+                self._reject_validator_result_locked(
+                    item_id,
+                    evidence=f"validator result rejected: {exc}",
+                    assignment=assignment,
+                    start=start,
+                    retryable=False,
+                )
+                raise
+            try:
                 payload = self._validator_result_payload(result, assignment=assignment, item=item)
             except ContractError as exc:
-                self._reject_validator_result_locked(item_id, evidence=f"validator result rejected: {exc}", assignment=assignment, start=start)
-                raise
+                return self._reject_validator_result_locked(
+                    item_id,
+                    evidence=f"validator result rejected: {exc}",
+                    assignment=assignment,
+                    start=start,
+                )
             if registration is not None:
                 payload.update({"agent_handle": agent_handle, "launch_nonce": registration["launch_nonce"]})
+            if payload["status"] == "fail":
+                payload["retryable"] = True
             recorded = self._append_event_locked("validator_result_recorded", payload)["payload"]
             if recorded["status"] == "fail":
                 return self._auto_restore_validator_retry_locked(
@@ -5289,17 +5376,28 @@ class OptimPlansState:
                 )
                 if current["delta_fingerprint"] != assignment["delta_fingerprint"]:
                     raise ContractError("delta fingerprint changed before validator result receipt")
-                payload = self._batch_validator_result_payload(result, assignment=assignment, items=items)
             except ContractError as exc:
                 self._reject_batch_validator_result_locked(
                     batch_id,
                     evidence=f"validator result rejected: {exc}",
                     assignment=assignment,
                     start=start,
+                    retryable=False,
                 )
                 raise
+            try:
+                payload = self._batch_validator_result_payload(result, assignment=assignment, items=items)
+            except ContractError as exc:
+                return self._reject_batch_validator_result_locked(
+                    batch_id,
+                    evidence=f"validator result rejected: {exc}",
+                    assignment=assignment,
+                    start=start,
+                )
             if registration is not None:
                 payload.update({"agent_handle": agent_handle, "launch_nonce": registration["launch_nonce"]})
+            if payload["status"] == "fail":
+                payload["retryable"] = True
             recorded = self._append_event_locked("batch_validator_result_recorded", payload)["payload"]
             if recorded["status"] == "fail":
                 return self._auto_restore_batch_validator_retry_locked(
@@ -5489,8 +5587,7 @@ class OptimPlansState:
             recovery = self._record_context_integrity_recovery_locked(item_id, assignment=assignment, start=start)
             if recovery is not None:
                 return recovery
-            self._reject_validator_result_locked(item_id, evidence=evidence, assignment=assignment, start=start)
-            return {"item_id": item_id, "validator_nonce": validator_nonce, "status": "rejected"}
+            return self._reject_validator_result_locked(item_id, evidence=evidence, assignment=assignment, start=start)
 
     def reject_batch_validator_protocol(self, batch_id: str, *, validator_nonce: str, evidence: str) -> dict[str, Any]:
         with self.controller_lock():
@@ -5501,8 +5598,7 @@ class OptimPlansState:
             recovery = self._record_batch_context_integrity_recovery_locked(batch_id, assignment=assignment, start=start)
             if recovery is not None:
                 return recovery
-            self._reject_batch_validator_result_locked(batch_id, evidence=evidence, assignment=assignment, start=start)
-            return {"batch_id": batch_id, "validator_nonce": validator_nonce, "status": "rejected"}
+            return self._reject_batch_validator_result_locked(batch_id, evidence=evidence, assignment=assignment, start=start)
 
     def run_validator(self, item_id: str) -> dict[str, Any]:
         assignment = self.assign_validator(item_id)
@@ -5554,18 +5650,15 @@ class OptimPlansState:
             raise ContractError(evidence)
         if not validator.stdout.strip():
             evidence = "validator result rejected: validator stdout result is missing"
-            self.reject_validator_protocol(item_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
-            raise ContractError(evidence)
+            return self.reject_validator_protocol(item_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
         try:
             result = parse_json_strict(validator.stdout.strip(), source="validator stdout")
         except ContractError as exc:
             evidence = f"validator result rejected: {exc}"
-            self.reject_validator_protocol(item_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
-            raise
+            return self.reject_validator_protocol(item_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
         if not isinstance(result, dict):
             evidence = "validator result rejected: validator result must be a JSON object"
-            self.reject_validator_protocol(item_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
-            raise ContractError(evidence)
+            return self.reject_validator_protocol(item_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
         return self.record_validator_result(item_id, validator_nonce=assignment["validator_nonce"], result=result)
 
     def _require_host_assignment_locked(
@@ -5847,18 +5940,15 @@ class OptimPlansState:
             raise ContractError(evidence)
         if not validator.stdout.strip():
             evidence = "validator result rejected: validator stdout result is missing"
-            self.reject_batch_validator_protocol(batch_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
-            raise ContractError(evidence)
+            return self.reject_batch_validator_protocol(batch_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
         try:
             result = parse_json_strict(validator.stdout.strip(), source="validator stdout")
         except ContractError as exc:
             evidence = f"validator result rejected: {exc}"
-            self.reject_batch_validator_protocol(batch_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
-            raise
+            return self.reject_batch_validator_protocol(batch_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
         if not isinstance(result, dict):
             evidence = "validator result rejected: validator result must be a JSON object"
-            self.reject_batch_validator_protocol(batch_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
-            raise ContractError(evidence)
+            return self.reject_batch_validator_protocol(batch_id, validator_nonce=assignment["validator_nonce"], evidence=evidence)
         return self.record_batch_validator_result(batch_id, validator_nonce=assignment["validator_nonce"], result=result)
 
     def advance_batch(self, batch_id: str) -> dict[str, Any]:
@@ -5915,6 +6005,8 @@ class OptimPlansState:
             validated = self.run_batch_validator(batch_id)
             if validated.get("status") == "pass":
                 return self.advance_batch(batch_id)
+            if validated.get("auto_validator_retry"):
+                return self.assign_batch(item_ids)
             return validated
         if status in {"completed", "validated"}:
             self._assert_batch_protected_metadata_before_verification(batch_id)
@@ -6025,6 +6117,8 @@ class OptimPlansState:
             validated = self.run_validator(item_id)
             if validated.get("status") == "pass":
                 return self.advance_item(item_id)
+            if validated.get("auto_validator_retry"):
+                return self.assign_item(item_id)
             return validated
         if status in {"completed", "validated"}:
             self._assert_protected_metadata_before_verification(item_id)
@@ -6076,7 +6170,7 @@ class OptimPlansState:
                 started = self._execution_started_record(replayed.events)
                 self._require_protected_metadata_clean(started)
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
-            self.record_attempt_failure("audit_failed", item_id, evidence=f"audit failed: {exc}")
+            self.record_attempt_failure("audit_failed", item_id, evidence=f"audit failed: {exc}", retryable=False)
             raise
 
     def _latest_validator_pass(self, events: list[dict[str, Any]], item_id: str) -> dict[str, Any]:
@@ -6103,7 +6197,7 @@ class OptimPlansState:
                 if delta["delta_fingerprint"] != validator["delta_fingerprint"]:
                     raise ContractError("delta fingerprint changed before verification")
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
-            self.record_attempt_failure("audit_failed", item_id, evidence=f"audit failed: {exc}")
+            self.record_attempt_failure("audit_failed", item_id, evidence=f"audit failed: {exc}", retryable=False)
             raise
 
     def _assert_delta_fingerprint_after_verification(self, item_id: str) -> None:
@@ -6119,7 +6213,7 @@ class OptimPlansState:
                 if delta["delta_fingerprint"] != validator["delta_fingerprint"]:
                     raise ContractError("delta fingerprint changed after verification")
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
-            self.record_attempt_failure("audit_failed", item_id, evidence=f"audit failed: {exc}")
+            self.record_attempt_failure("audit_failed", item_id, evidence=f"audit failed: {exc}", retryable=False)
             raise
 
     def _latest_batch_validator_pass(self, events: list[dict[str, Any]], batch_id: str) -> dict[str, Any]:
@@ -6142,7 +6236,13 @@ class OptimPlansState:
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
             start = self._latest_batch_start(self.replay().events, batch_id)
             with self.controller_lock():
-                self._record_batch_attempt_failure_locked("batch_audit_failed", batch_id, evidence=f"audit failed: {exc}", start=start)
+                self._record_batch_attempt_failure_locked(
+                    "batch_audit_failed",
+                    batch_id,
+                    evidence=f"audit failed: {exc}",
+                    start=start,
+                    extra={"retryable": False},
+                )
             raise
 
     def _assert_batch_delta_fingerprint_before_verification(self, batch_id: str) -> None:
@@ -6159,7 +6259,13 @@ class OptimPlansState:
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
             start = self._latest_batch_start(self.replay().events, batch_id)
             with self.controller_lock():
-                self._record_batch_attempt_failure_locked("batch_audit_failed", batch_id, evidence=f"audit failed: {exc}", start=start)
+                self._record_batch_attempt_failure_locked(
+                    "batch_audit_failed",
+                    batch_id,
+                    evidence=f"audit failed: {exc}",
+                    start=start,
+                    extra={"retryable": False},
+                )
             raise
 
     def _assert_batch_delta_fingerprint_after_verification(self, batch_id: str) -> None:
@@ -6176,7 +6282,13 @@ class OptimPlansState:
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
             start = self._latest_batch_start(self.replay().events, batch_id)
             with self.controller_lock():
-                self._record_batch_attempt_failure_locked("batch_audit_failed", batch_id, evidence=f"audit failed: {exc}", start=start)
+                self._record_batch_attempt_failure_locked(
+                    "batch_audit_failed",
+                    batch_id,
+                    evidence=f"audit failed: {exc}",
+                    start=start,
+                    extra={"retryable": False},
+                )
             raise
 
     def run_item(self, item_id: str) -> dict[str, Any]:
@@ -6385,7 +6497,7 @@ class OptimPlansState:
                 break
         raise ContractError(f"{item_id} has not been started")
 
-    def _latest_failure(self, events: list[dict[str, Any]], item_id: str) -> dict[str, Any]:
+    def _latest_failure_event(self, events: list[dict[str, Any]], item_id: str) -> dict[str, Any]:
         for event in reversed(events):
             payload = event.get("payload", {})
             if payload.get("item_id") != item_id:
@@ -6399,10 +6511,13 @@ class OptimPlansState:
                 "audit_failed",
             }:
                 if event["type"] != "validator_result_recorded" or payload.get("status") == "fail":
-                    return payload
+                    return event
             if event["type"] in {"checkpoint_created", "retry_restored", "item_started"}:
                 break
         raise ContractError(f"{item_id} has no failed attempt to retry")
+
+    def _latest_failure(self, events: list[dict[str, Any]], item_id: str) -> dict[str, Any]:
+        return self._latest_failure_event(events, item_id)["payload"]
 
     def start_execution(self, approval_nonce: str) -> dict[str, Any]:
         with self.controller_lock():
@@ -6673,7 +6788,13 @@ class OptimPlansState:
             if clean_audit["changed_files"]:
                 raise ContractError("run worktree is not clean after checkpoint")
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
-            self._record_attempt_failure_locked("audit_failed", item_id, evidence=f"checkpoint failed: {exc}", start=start)
+            self._record_attempt_failure_locked(
+                "audit_failed",
+                item_id,
+                evidence=f"checkpoint failed: {exc}",
+                start=start,
+                extra={"retryable": False},
+            )
             raise
         payload = {"item_id": item_id, "commit": commit, "changed_files": audit["changed_files"]}
         return self._append_event_locked("checkpoint_created", payload)["payload"]
@@ -6817,7 +6938,13 @@ class OptimPlansState:
             if clean_audit["changed_files"]:
                 raise ContractError("run worktree is not clean after checkpoint")
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
-            self._record_batch_attempt_failure_locked("batch_audit_failed", batch_id, evidence=f"checkpoint failed: {exc}", start=start)
+            self._record_batch_attempt_failure_locked(
+                "batch_audit_failed",
+                batch_id,
+                evidence=f"checkpoint failed: {exc}",
+                start=start,
+                extra={"retryable": False},
+            )
             raise
         payload = {
             "batch_id": batch_id,
@@ -6860,13 +6987,17 @@ class OptimPlansState:
             self._require_lifecycle_locked(replayed.events, {"awaiting_retry_decision"}, "retry-batch")
             started = self._execution_started_record(replayed.events)
             self._require_protected_metadata_clean(started)
-            failure = self._latest_batch_failure(replayed.events, batch_id)
+            failure_event = self._latest_batch_failure_event(replayed.events, batch_id)
+            failure = failure_event["payload"]
             item_ids = list(failure["item_ids"])
             question: dict[str, Any] | None = None
             answer: dict[str, Any] | None = None
-            auto_approved = approval_nonce is None and not any(
-                event["type"] == "batch_retry_restored" and event.get("payload", {}).get("batch_id") == batch_id
-                for event in replayed.events
+            auto_approved = approval_nonce is None and (
+                self._is_retryable_failure_event(failure_event)
+                or not any(
+                    event["type"] == "batch_retry_restored" and event.get("payload", {}).get("batch_id") == batch_id
+                    for event in replayed.events
+                )
             )
             if not auto_approved:
                 if approval_nonce is None:
@@ -6907,7 +7038,12 @@ class OptimPlansState:
                 "auto_approved": auto_approved,
                 "restored_to": failure["base_commit"],
                 "run_worktree": str(run_worktree),
+                "failure_event": failure_event["type"],
+                "evidence": failure.get("evidence", ""),
             }
+            for key in ("validator_nonce", "feedback_for_executor", "checked_items"):
+                if key in failure:
+                    payload[key] = failure[key]
             return self._append_event_locked("batch_retry_restored", payload)["payload"]
 
     def retry_batch(self, batch_id: str, approval_nonce: str | None) -> dict[str, Any]:
@@ -6937,12 +7073,16 @@ class OptimPlansState:
             self._reject_item_command_if_batch_member(replayed.events, item_id, "retry-item")
             started = self._execution_started_record(replayed.events)
             self._require_protected_metadata_clean(started)
-            failure = self._latest_failure(replayed.events, item_id)
+            failure_event = self._latest_failure_event(replayed.events, item_id)
+            failure = failure_event["payload"]
             question: dict[str, Any] | None = None
             answer: dict[str, Any] | None = None
-            auto_approved = approval_nonce is None and not any(
-                event["type"] == "retry_restored" and event.get("payload", {}).get("item_id") == item_id
-                for event in replayed.events
+            auto_approved = approval_nonce is None and (
+                self._is_retryable_failure_event(failure_event)
+                or not any(
+                    event["type"] == "retry_restored" and event.get("payload", {}).get("item_id") == item_id
+                    for event in replayed.events
+                )
             )
             if not auto_approved:
                 if approval_nonce is None:
@@ -6981,7 +7121,12 @@ class OptimPlansState:
                 "auto_approved": auto_approved,
                 "restored_to": failure["base_commit"],
                 "run_worktree": str(run_worktree),
+                "failure_event": failure_event["type"],
+                "evidence": failure.get("evidence", ""),
             }
+            for key in ("validator_nonce", "feedback_for_executor", "checked_items"):
+                if key in failure:
+                    payload[key] = failure[key]
             return self._append_event_locked("retry_restored", payload)["payload"]
 
     def retry_item(self, item_id: str, approval_nonce: str | None) -> dict[str, Any]:
@@ -7025,6 +7170,7 @@ class OptimPlansState:
                     "failure_event": "audit_failed",
                     "final_commit": head,
                     "evidence": bounded_evidence(f"final audit failed: {exc}"),
+                    "retryable": False,
                 }
                 self._append_event_locked("audit_failed", payload)
                 self._append_event_locked(
