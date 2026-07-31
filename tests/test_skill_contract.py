@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills/optim-plans/SKILL.md"
 ANALYZE_SKILL = ROOT / "skills/analyze-and-plan/SKILL.md"
 RESUME_SKILL = ROOT / "skills/resume-previous-plan/SKILL.md"
+RESEARCH_SKILL = ROOT / "skills/research-and-plan/SKILL.md"
 SEARCH_SKILL = ROOT / "skills/search-and-plan/SKILL.md"
 
 
@@ -520,6 +521,13 @@ class SkillContractTests(unittest.TestCase):
             "## Candidate user decisions",
         ):
             self.assertIn(f"`{section}`", text)
+
+    def test_research_and_plan_alias_points_to_search_and_plan(self) -> None:
+        self.assertTrue(RESEARCH_SKILL.is_file())
+        text = RESEARCH_SKILL.read_text(encoding="utf-8")
+        self.assertIn("name: research-and-plan", text)
+        self.assertIn("Alias for search-and-plan", text)
+        self.assertIn("../search-and-plan/SKILL.md", text)
 
     def test_readme_documents_search_and_plan_method(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

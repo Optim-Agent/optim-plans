@@ -8,6 +8,8 @@ first, ISO dates, and grouped change types.
 
 ## Unreleased
 
+- Added `research-and-plan` as a compatibility alias for `search-and-plan`.
+
 ## 0.2.1 - 2026-07-31
 
 ### Added
