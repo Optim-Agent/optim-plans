@@ -10,6 +10,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class StructureTests(unittest.TestCase):
+    def assertRootGitignoreIgnores(self, relative: str) -> None:
+        ignored = subprocess.run(
+            ["git", "check-ignore", "--no-index", "--verbose", relative],
+            cwd=ROOT,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(ignored.returncode, 0, f"{relative} must be ignored")
+        self.assertTrue(
+            ignored.stdout.startswith(".gitignore:"),
+            f"{relative} must be ignored by root .gitignore, got {ignored.stdout.strip()!r}",
+        )
+
     def test_plugin_manifests_and_marketplaces_are_parseable(self) -> None:
         required = [
             ".codex-plugin/plugin.json",
@@ -58,6 +73,10 @@ class StructureTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         source_path = (ROOT / entries[0]["source"]["path"]).resolve()
         self.assertEqual(source_path, ROOT)
+
+    def test_xsw_state_is_ignored_by_root_gitignore(self) -> None:
+        for relative in (".xsw/", ".xsw/xsw.sqlite3"):
+            self.assertRootGitignoreIgnores(relative)
 
     def test_referenced_plugin_paths_exist(self) -> None:
         manifest = json.loads((ROOT / ".codex-plugin/plugin.json").read_text())

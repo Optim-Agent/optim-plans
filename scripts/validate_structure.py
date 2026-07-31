@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -24,6 +25,22 @@ def load_json(path: str) -> dict:
     if not isinstance(payload, dict):
         raise AssertionError(f"{path} must contain an object")
     return payload
+
+
+def require_root_gitignore_ignore(path: str) -> None:
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--verbose", path],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"{path} must be ignored by root .gitignore")
+    if not result.stdout.startswith(".gitignore:"):
+        source = result.stdout.strip() or result.stderr.strip() or "no verbose source"
+        raise AssertionError(f"{path} ignore source must be .gitignore, got {source}")
 
 
 def main() -> int:
@@ -54,6 +71,8 @@ def main() -> int:
         raise AssertionError("CHANGELOG.md missing 0.2.0 entry")
     if "## 0.1.2 - 2026-07-27" not in changelog:
         raise AssertionError("CHANGELOG.md missing 0.1.2 entry")
+    for path in (".xsw/", ".xsw/xsw.sqlite3"):
+        require_root_gitignore_ignore(path)
 
     for path in (
         ".claude-plugin/plugin.json",
