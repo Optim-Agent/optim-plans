@@ -556,7 +556,9 @@ def cmd_ask(args: argparse.Namespace) -> None:
     if _language_gate(state):
         return
     level = plan_level(args.plan_level)
-    state._require_plan_level(level.name)
+    actual_level = state._run_plan_level_name()
+    if actual_level is not None and actual_level != "plan":
+        state._require_plan_level(level.name)
     ledger = QuestionLedger()
     language = _language(state.repo)
     generic = args.decision_id is not None or args.recommended_option is not None or bool(args.alternative_option)
