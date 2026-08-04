@@ -70,6 +70,22 @@ class ExecutionTests(unittest.TestCase):
             "result_schema": HOST_VALIDATOR_RESULT_SCHEMA,
         }
 
+    def _foreground_worker(self) -> dict[str, object]:
+        from scripts.optim_plans_core import (
+            HOST_EXECUTOR_PROMPT_PROTOCOL,
+            HOST_EXECUTOR_RESULT_SCHEMA,
+            host_agent,
+            host_executor_prompt_hash,
+        )
+
+        return {
+            "mode": "foreground",
+            "platform": host_agent(),
+            "prompt_protocol": HOST_EXECUTOR_PROMPT_PROTOCOL,
+            "prompt_hash": host_executor_prompt_hash(),
+            "result_schema": HOST_EXECUTOR_RESULT_SCHEMA,
+        }
+
     def _validator_prompt(self) -> dict[str, object]:
         from scripts.optim_plans_core import HOST_VALIDATOR_PROMPT_PROTOCOL, VALIDATOR_PROMPT_CONTRACT, validator_prompt_hash
 
@@ -207,6 +223,34 @@ class ExecutionTests(unittest.TestCase):
                 "verification_argv": verification_argv,
                 "verification_timeout_seconds": 5,
                 "items": [{"id": "TASK-001", "allowed_paths": allowed_paths or ["src/host.txt"]}],
+            }
+        )
+        question = state.request_execution_approval()
+        state.record_answer(question["nonce"], "approve")
+        state.start_execution(question["nonce"])
+        return state, run_worktree
+
+    def _start_foreground_execution(
+        self,
+        repo: Path,
+        *,
+        verification_argv: list[str],
+        allowed_paths: list[str] | None = None,
+    ):
+        from scripts.optim_plans_core import OptimPlansState
+
+        state = OptimPlansState.initialize(repo, topic="Foreground Execution", plan_hash="abc123")
+        run_worktree = state.root / "run-worktrees" / state.run_id
+        state.persist_execution_manifest(
+            {
+                "plan_hash": "abc123",
+                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "run_worktree_path": str(run_worktree),
+                "worker": self._foreground_worker(),
+                "verification_argv": verification_argv,
+                "verification_timeout_seconds": 5,
+                "items": [{"id": "TASK-001", "allowed_paths": allowed_paths or ["src/foreground.txt"]}],
             }
         )
         question = state.request_execution_approval()
@@ -1265,6 +1309,41 @@ class ExecutionTests(unittest.TestCase):
                 ],
             )
             self.assertFalse(any(event.get("payload", {}).get("stage") == "finish_run" for event in state.replay().events))
+
+    def test_run_item_allows_foreground_executor_assignment(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            self._add_passing_full_proof_files(repo)
+            state, run_worktree = self._start_foreground_execution(
+                repo,
+                verification_argv=[
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; assert Path('src/foreground.txt').read_text() == 'ok\\n'",
+                ],
+                allowed_paths=["src/foreground.txt"],
+            )
+
+            assignment = state.run_item("TASK-001")
+
+            self.assertEqual(assignment["phase"], "foreground_assigned")
+            self.assertEqual(assignment["worker"]["mode"], "foreground")
+            self.assertIn("complete-item", assignment["next_action"])
+            self.assertIn("advance-item", assignment["next_action"])
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/foreground.txt").write_text("ok\n", encoding="utf-8")
+            state.complete_host_item(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                agent_handle="foreground",
+                evidence="foreground session completed",
+            )
+            checkpoint = state.advance_item("TASK-001")
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                checkpoint = state.advance_item("TASK-001")
+
+            self.assertIn("commit", checkpoint)
 
     def test_current_manifest_runs_validator_before_verification_and_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

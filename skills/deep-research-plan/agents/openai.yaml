@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deep Research Plan"
+  short_description: "Research deeply before planning"
+  default_prompt: "Use $optim-plans:deep-research-plan to research references deeply before planning."

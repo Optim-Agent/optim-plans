@@ -35,8 +35,9 @@ Users may choose the planning depth in the prompt or via direct controller flags
 - `plan`: 1 to 5 planning questions; at most three refinement rounds, 600 seconds per reviewer/criticizer pass, and at most three high-priority comments or questions per round.
 - `big-plan`: 5 to 10 planning questions; websearch is required for brainstorming, with at most five refinement rounds, 1800 seconds per reviewer/criticizer pass, and at most five high-priority comments or questions per round.
 - `huge-plan` / `huge plan`: at least 10 planning questions, no maximum; websearch is required for brainstorming and refinement, with no refinement round or timeout limit and at most five high-priority comments or questions per round.
+- `deep-research-plan` / `deep research plan`: `huge-plan` depth plus the `../deep-research-plan/SKILL.md` contract for 3+ downloaded refs, graphify JSON, and per-ref adoption questions.
 
-For `plan`, `big-plan`, and `huge-plan`, only high-priority comments or criticisms continue refinement; if a round produces none, terminate that round.
+For `plan`, `big-plan`, `huge-plan`, and `deep-research-plan`, only high-priority comments or criticisms continue refinement; if a round produces none, terminate that round.
 
 If no level is named, auto-select the smallest level that fits the user's prompt and repo evidence before the first planning question. Do not ask the user to choose the level as that question.
 

@@ -226,6 +226,12 @@ Use `$optim-plans:search-and-plan` when outside references should shape a repo-c
 
 The skill prefers `agent-reach` when available; if it is missing, it gives one sentence of install guidance, does not install tools before execution approval, records backend failures/evidence gaps, and continues from fallback search plus repository evidence. Adoptable ideas must be accepted through evidence-backed optim-plans choice prompts before entering `PLAN_v1.md`.
 
+## Deep Research Plan
+
+Use `$optim-plans:deep-research-plan` when a plan needs stronger-than-huge reference exploration. It proactively uses `agent-reach` when available, downloads at least 3 refs into ignored `./refs/`, generates `graphify` JSON for each ref when available, and asks at least 3 ref-specific controller-backed questions before any ref idea can enter `PLAN_v1.md`.
+
+This skill is not allowed to rely only on `curl`, README files, or abstracts. If `agent-reach` or `graphify` is missing, it asks once whether to install the tool locally; a refusal falls back to websearch for `agent-reach` or read tools for `graphify` and records the waiver.
+
 ## Diagnose before planning
 
 ```text
@@ -356,7 +362,7 @@ You can edit this template by hand:
 }
 ```
 
-- `refinement_worker.choice`, `executor_worker.choice`, and `validator_worker.choice` are `background` or `foreground`. Set `executor_worker.choice` to `background`: foreground executor execution is unsupported.
+- `refinement_worker.choice`, `executor_worker.choice`, and `validator_worker.choice` are `background` or `foreground`. With `executor_worker.choice` set to `foreground`, `worker-config --role executor` emits an in-session foreground worker block; `run-item` / `assign-item` returns the manifest-bound assignment, then `complete-item` and `advance-item` finish it without spawning a worker.
 - `platform` is `codex` or `claude`, and must match the current host platform; otherwise the stored preference is ignored.
 - `mode` is `default` or `manual`. `manual` requires non-empty `model` and `effort` values.
 - `execution_mode` applies only to a Codex executor: use `host-multi-agent` by default or `cli-adapter` as a fallback. Current Claude executors use the CLI adapter path: `run-item` launches the `optim-plans-executor` with `--agent` as a foreground standalone subagent, waits synchronously, and reads stdout JSON. They do not use host `spawn_agent` / `wait_agent`, `--bg`, hidden background subagents, host/background mode, or notification/outputFile waits.
@@ -372,6 +378,7 @@ Normal `$optim-plans` and `/optim-plans` calls auto-select the smallest planning
 | `plan` | 1-5 | Normal multi-decision project or repository changes. | Runs bounded planning and up to three high-priority refinement rounds with a 600 second reviewer/criticizer timeout. |
 | `big-plan` | 5-10 | Broad features with research needs, shared-state risk, or unclear architecture. | Requires websearch during brainstorming and allows up to five high-priority refinement rounds with an 1800 second timeout. |
 | `huge-plan` / `huge plan` | 10+ | New plugins, large systems, or open-ended efforts where the shape is not known yet. | Uses websearch during brainstorming and refinement, then keeps looping until no high-priority issue remains. |
+| `deep-research-plan` / `deep research plan` | 10+ | Plans that need projects, articles, or papers studied before scope settles. | Adds ignored `./refs/` downloads, graphify JSON, and per-ref adoption questions on top of `huge-plan`. |
 
 <details>
 <summary><strong>Illustrative examples for each planning level</strong></summary>
@@ -582,7 +589,8 @@ Start with the skill:
 -> [`skills/optim-plans/references/execution.md`](skills/optim-plans/references/execution.md): execution gate and verification contract<br>
 -> [`skills/optim-plans/references/artifacts.md`](skills/optim-plans/references/artifacts.md): public Markdown and machine-state layout<br>
 -> [`skills/research-and-plan/SKILL.md`](skills/research-and-plan/SKILL.md): compatibility alias for search-and-plan<br>
--> [`skills/search-and-plan/SKILL.md`](skills/search-and-plan/SKILL.md): external research before controller-backed planning
+-> [`skills/search-and-plan/SKILL.md`](skills/search-and-plan/SKILL.md): external research before controller-backed planning<br>
+-> [`skills/deep-research-plan/SKILL.md`](skills/deep-research-plan/SKILL.md): downloaded refs and graphify analysis before controller-backed planning
 
 ## Verification
 

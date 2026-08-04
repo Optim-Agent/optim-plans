@@ -11,6 +11,7 @@ ANALYZE_SKILL = ROOT / "skills/analyze-and-plan/SKILL.md"
 RESUME_SKILL = ROOT / "skills/resume-previous-plan/SKILL.md"
 RESEARCH_SKILL = ROOT / "skills/research-and-plan/SKILL.md"
 SEARCH_SKILL = ROOT / "skills/search-and-plan/SKILL.md"
+DEEP_RESEARCH_SKILL = ROOT / "skills/deep-research-plan/SKILL.md"
 
 
 def skill_description(path: Path) -> str:
@@ -37,7 +38,7 @@ class SkillContractTests(unittest.TestCase):
             "analyze-and-plan": skill_description(ANALYZE_SKILL),
             **{
                 level: skill_description(ROOT / "skills" / level / "SKILL.md")
-                for level in ("mini-plan", "small-plan", "plan", "big-plan", "huge-plan")
+                for level in ("mini-plan", "small-plan", "plan", "big-plan", "huge-plan", "deep-research-plan")
             },
         }
         main = descriptions["optim-plans"]
@@ -63,6 +64,7 @@ class SkillContractTests(unittest.TestCase):
             "plan": ("normal repo changes", "bounded"),
             "big-plan": ("broad or risky", "websearch"),
             "huge-plan": ("open-ended", "high-risk"),
+            "deep-research-plan": ("downloaded projects", "graphify json"),
         }
         wrappers = {level: descriptions[level] for level in wrapper_expectations}
         self.assertEqual(len(set(wrappers.values())), len(wrappers))
@@ -188,6 +190,7 @@ class SkillContractTests(unittest.TestCase):
             "`plan`: 1 to 5 planning questions; at most three refinement rounds",
             "`big-plan`: 5 to 10 planning questions; websearch is required for brainstorming",
             "`huge-plan` / `huge plan`: at least 10 planning questions, no maximum; websearch is required for brainstorming and refinement",
+            "`deep-research-plan` / `deep research plan`: `huge-plan` depth plus",
             "high-priority",
             "600 seconds",
             "1800 seconds",
@@ -201,7 +204,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertNotIn("If no level is named, use `plan`.", text)
 
     def test_plan_level_wrapper_skills_exist_for_codex_completion(self) -> None:
-        for level in ("mini-plan", "small-plan", "plan", "big-plan", "huge-plan"):
+        for level in ("mini-plan", "small-plan", "plan", "big-plan", "huge-plan", "deep-research-plan"):
             path = ROOT / "skills" / level / "SKILL.md"
             self.assertTrue(path.is_file(), level)
             text = path.read_text(encoding="utf-8")
@@ -325,7 +328,8 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("ask `agent-choice --role executor`", execution)
         self.assertIn("default only from `executor_worker.choice`", execution)
         self.assertIn("continue to executor model/effort and `worker-config`", execution)
-        self.assertIn("foreground executor execution is unsupported", execution)
+        self.assertIn("build a foreground executor worker block", execution)
+        self.assertIn("returns the manifest-bound assignment and launch block", execution)
 
     def test_execution_contract_matches_manifest_bound_controller_lifecycle(self) -> None:
         execution = (ROOT / "skills/optim-plans/references/execution.md").read_text(encoding="utf-8")
@@ -522,6 +526,32 @@ class SkillContractTests(unittest.TestCase):
         ):
             self.assertIn(f"`{section}`", text)
 
+    def test_deep_research_plan_contract(self) -> None:
+        self.assertTrue(DEEP_RESEARCH_SKILL.is_file())
+        text = DEEP_RESEARCH_SKILL.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\n"))
+        for expected in (
+            "name: deep-research-plan",
+            "../optim-plans/SKILL.md",
+            "treating the request as if it named `deep-research-plan`",
+            "root `.gitignore` ignores `refs/`",
+            "Prefer `agent-reach` when available",
+            "If `agent-reach` is missing, ask exactly one yes/no sentence",
+            "Download at least 3 relevant refs into `./refs/<topic>/`",
+            "Do not satisfy this with `curl` alone",
+            "README-only snapshots",
+            "abstract-only paper notes",
+            "generate graphify JSON beside the ref",
+            "If `graphify` is missing, ask exactly one yes/no sentence",
+            "at least 3 ref-specific controller-backed choice questions",
+            "recommended option first",
+            "`Other` second-last",
+            "`Auto-complete` last",
+            "at least 10 planning questions",
+            "Block rather than pad when fewer than 3 credible refs exist",
+        ):
+            self.assertIn(expected, text)
+
     def test_research_and_plan_alias_points_to_search_and_plan(self) -> None:
         self.assertTrue(RESEARCH_SKILL.is_file())
         text = RESEARCH_SKILL.read_text(encoding="utf-8")
@@ -542,6 +572,20 @@ class SkillContractTests(unittest.TestCase):
             "records backend failures/evidence gaps",
             "Adoptable ideas must be accepted through evidence-backed optim-plans choice prompts",
             "skills/search-and-plan/SKILL.md",
+        ):
+            self.assertIn(expected, readme)
+
+    def test_readme_documents_deep_research_plan_method(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for expected in (
+            "$optim-plans:deep-research-plan",
+            "stronger-than-huge",
+            "downloads at least 3 refs into ignored `./refs/`",
+            "`agent-reach`",
+            "`graphify` JSON",
+            "at least 3 ref-specific controller-backed questions",
+            "not allowed to rely only on `curl`, README files, or abstracts",
+            "skills/deep-research-plan/SKILL.md",
         ):
             self.assertIn(expected, readme)
 

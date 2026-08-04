@@ -8,7 +8,17 @@ first, ISO dates, and grouped change types.
 
 ## Unreleased
 
+## 0.2.2 - 2026-08-04
+
+### Added
+
+- Added `deep-research-plan` for stronger-than-huge planning with downloaded
+  refs, graphify JSON, and per-reference adoption questions.
 - Added `research-and-plan` as a compatibility alias for `search-and-plan`.
+
+### Changed
+
+- Bumped Claude and Codex plugin metadata to `0.2.2`.
 
 ## 0.2.1 - 2026-07-31
 

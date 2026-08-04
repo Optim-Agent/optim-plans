@@ -14,6 +14,8 @@ from typing import Any
 try:
     from optim_plans_core import (
         ContractError,
+        HOST_EXECUTOR_PROMPT_PROTOCOL,
+        HOST_EXECUTOR_RESULT_SCHEMA,
         HOST_VALIDATOR_PROMPT_PROTOCOL,
         HOST_VALIDATOR_RESULT_SCHEMA,
         OptimPlansState,
@@ -36,6 +38,8 @@ try:
 except ImportError:  # pragma: no cover - package import path
     from scripts.optim_plans_core import (
         ContractError,
+        HOST_EXECUTOR_PROMPT_PROTOCOL,
+        HOST_EXECUTOR_RESULT_SCHEMA,
         HOST_VALIDATOR_PROMPT_PROTOCOL,
         HOST_VALIDATOR_RESULT_SCHEMA,
         OptimPlansState,
@@ -649,6 +653,17 @@ def cmd_worker_config(args: argparse.Namespace) -> None:
     key = _worker_config_key(args.role)
     language = _language(state.repo)
     role_label = _t(language, args.role, {"reviewer": "审查者", "criticizer": "质疑者", "executor": "执行器", "validator": "验证器"}[args.role])
+    if args.role == "executor" and _agent_choice_preference(state.repo, key) == "foreground":
+        print_json(
+            {
+                "mode": "foreground",
+                "platform": host_agent(),
+                "prompt_protocol": HOST_EXECUTOR_PROMPT_PROTOCOL,
+                "prompt_hash": host_executor_prompt_hash(),
+                "result_schema": HOST_EXECUTOR_RESULT_SCHEMA,
+            }
+        )
+        return
     if args.role == "validator" and _agent_choice_preference(state.repo, key) == "foreground":
         print_json(
             {
@@ -958,7 +973,7 @@ def cmd_prepare_execution(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     if _language_gate(state):
         return
-    if _worker_preference(state.repo, "executor_worker") is None:
+    if _worker_preference(state.repo, "executor_worker") is None and _agent_choice_preference(state.repo, "executor_worker") != "foreground":
         _worker_question(
             state,
             prompt=_t(_language(state.repo), "Choose executor model and effort", "选择执行器模型和推理强度"),

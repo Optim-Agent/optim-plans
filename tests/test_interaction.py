@@ -184,6 +184,7 @@ class InteractionTests(unittest.TestCase):
                 ("plan", 1, 5, 0, 3, 600, 3, False, True, ()),
                 ("big-plan", 5, 10, 0, 5, 1800, 5, False, True, ("brainstorming",)),
                 ("huge-plan", 10, None, 0, None, None, 5, False, True, ("brainstorming", "refinement")),
+                ("deep-research-plan", 10, None, 0, None, None, 5, False, True, ("brainstorming", "refinement")),
             ],
         )
         self.assertEqual(
@@ -202,6 +203,7 @@ class InteractionTests(unittest.TestCase):
             },
         )
         self.assertEqual(plan_level("huge plan").name, "huge-plan")
+        self.assertEqual(plan_level("deep research plan").name, "deep-research-plan")
         with self.assertRaises(ContractError):
             plan_level("mega-plan")
 

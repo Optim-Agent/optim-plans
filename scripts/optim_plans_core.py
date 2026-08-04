@@ -881,12 +881,25 @@ def _status_entries(repo: Path) -> list[tuple[str, str]]:
 def _pathspec_exclusions(repo: Path, ignored_paths: list[Path] | None) -> list[str]:
     root = repo.resolve()
     exclusions: list[str] = []
+    seen: set[str] = set()
+
+    def add(relative: str) -> None:
+        if relative not in seen:
+            exclusions.append(f":(exclude){relative}")
+            seen.add(relative)
+
     for path in ignored_paths or []:
         try:
-            relative = Path(path).resolve().relative_to(root).as_posix()
+            relative_path = Path(path).resolve().relative_to(root)
         except ValueError:
             continue
-        exclusions.append(f":(exclude){relative}")
+        add(relative_path.as_posix())
+        for parent in relative_path.parents:
+            if parent == Path("."):
+                break
+            relative = parent.as_posix()
+            if git_maybe(repo, "check-ignore", "-q", relative) is not None:
+                add(relative)
     return exclusions
 
 
@@ -1659,7 +1672,7 @@ class OptimPlansState:
             raise ContractError(f"validator.check_ids for {item['id']} must not contain duplicates")
         return list(check_ids)
 
-    def _temporary_source_index_tree(self, *, head: str) -> str:
+    def _temporary_source_index_tree(self, *, head: str, entries: list[tuple[str, str]]) -> str:
         fd, raw_index = tempfile.mkstemp(prefix="source-snapshot-", dir=self.run_dir)
         os.close(fd)
         index = Path(raw_index)
@@ -1668,15 +1681,9 @@ class OptimPlansState:
             env = os.environ.copy()
             env["GIT_INDEX_FILE"] = str(index)
             _git_with_env(self.repo, env, "read-tree", head)
-            _git_with_env(
-                self.repo,
-                env,
-                "add",
-                "-A",
-                "--",
-                ".",
-                *_pathspec_exclusions(self.repo, [self.artifact_dir]),
-            )
+            paths = sorted({path for _status, path in entries})
+            if paths:
+                _git_with_env(self.repo, env, "add", "-A", "--", *paths)
             return _git_with_env(self.repo, env, "write-tree")
         finally:
             if index.exists():
@@ -1690,7 +1697,7 @@ class OptimPlansState:
             head = git(self.repo, "rev-parse", "--verify", "HEAD")
         except subprocess.CalledProcessError as exc:
             raise ContractError("source base commit is required before source auto-commit") from exc
-        tree = self._temporary_source_index_tree(head=head)
+        tree = self._temporary_source_index_tree(head=head, entries=entries)
         fingerprint = stable_json_hash({"head": head, "tree": tree, "status": entries})
         return {
             "head": head,
@@ -2442,6 +2449,8 @@ class OptimPlansState:
             raise ContractError("execution manifest worker adapter config is required")
         if raw.get("mode") == "host-multi-agent":
             return self._host_worker_config(raw)
+        if raw.get("mode") == "foreground":
+            return self._foreground_executor_config(raw)
         adapter = raw.get("adapter", raw.get("name"))
         argv = raw.get("argv")
         env = raw.get("env", {})
@@ -2503,6 +2512,26 @@ class OptimPlansState:
             "config_files": list(config_files),
             "smoke": {"argv": list(smoke_argv), "env": dict(smoke_env), "timeout_seconds": float(smoke_timeout)},
             "timeout_seconds": None,
+        }
+
+    def _foreground_executor_config(self, raw: dict[str, Any]) -> dict[str, Any]:
+        platform = raw.get("platform", host_agent())
+        if platform not in ADAPTER_NAMES:
+            raise ContractError("foreground executor platform must be claude or codex")
+        if platform != host_agent():
+            raise ContractError(f"cross-platform foreground executor is not allowed: {host_agent()} host cannot run {platform}")
+        if raw.get("prompt_protocol") != HOST_EXECUTOR_PROMPT_PROTOCOL:
+            raise ContractError(f"foreground executor prompt_protocol must be {HOST_EXECUTOR_PROMPT_PROTOCOL}")
+        if raw.get("prompt_hash") != host_executor_prompt_hash():
+            raise ContractError("foreground executor prompt_hash does not match the controller executor contract")
+        if raw.get("result_schema") != HOST_EXECUTOR_RESULT_SCHEMA:
+            raise ContractError(f"foreground executor result_schema must be {HOST_EXECUTOR_RESULT_SCHEMA}")
+        return {
+            "mode": "foreground",
+            "platform": platform,
+            "prompt_protocol": HOST_EXECUTOR_PROMPT_PROTOCOL,
+            "prompt_hash": host_executor_prompt_hash(),
+            "result_schema": HOST_EXECUTOR_RESULT_SCHEMA,
         }
 
     def _host_worker_config(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -3165,6 +3194,12 @@ class OptimPlansState:
         config = self._worker_config(manifest, item)
         if config.get("mode") != "host-multi-agent":
             raise ContractError("item is not configured for host-multi-agent execution; use run-item for CLI adapter workers")
+        return config
+
+    def _require_assignable_worker_config(self, manifest: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+        config = self._worker_config(manifest, item)
+        if config.get("mode") not in {"host-multi-agent", "foreground"}:
+            raise ContractError("item is not configured for manifest-bound assignment; use run-item for CLI adapter workers")
         return config
 
     def _require_host_batch_worker_config(self, manifest: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -4281,14 +4316,18 @@ class OptimPlansState:
         phase = statuses[item["id"]]
         next_action = None
         if phase == "in_progress":
-            registration = self._latest_host_registration(events, assignment_nonce=start["assignment_nonce"])
-            if registration is not None:
-                phase = "agent_registered"
-                next_action = self._wait_next_action("executor_item", registration)
-            elif self._latest_host_authorization(events, assignment_nonce=start["assignment_nonce"]) is not None:
-                phase = "spawn_authorized"
+            if worker_config.get("mode") == "foreground":
+                phase = "foreground_assigned"
+                next_action = self._foreground_next_action(start)
             else:
-                phase = "assigned"
+                registration = self._latest_host_registration(events, assignment_nonce=start["assignment_nonce"])
+                if registration is not None:
+                    phase = "agent_registered"
+                    next_action = self._wait_next_action("executor_item", registration)
+                elif self._latest_host_authorization(events, assignment_nonce=start["assignment_nonce"]) is not None:
+                    phase = "spawn_authorized"
+                else:
+                    phase = "assigned"
         elif phase == "completed":
             phase = "worker_completed"
         elif phase == "verified":
@@ -4305,6 +4344,32 @@ class OptimPlansState:
             response["next_action"] = next_action
         return response
 
+    def _foreground_next_action(self, start: dict[str, Any]) -> str:
+        complete = self._controller_command(
+            "complete-item",
+            "--item-id",
+            start["item_id"],
+            "--assignment-nonce",
+            start["assignment_nonce"],
+            "--agent-handle",
+            "foreground",
+            "--evidence",
+            "<evidence>",
+        )
+        fail = self._controller_command(
+            "fail-item",
+            "--item-id",
+            start["item_id"],
+            "--assignment-nonce",
+            start["assignment_nonce"],
+            "--agent-handle",
+            "foreground",
+            "--evidence",
+            "<evidence>",
+        )
+        advance = self._controller_command("advance-item", "--item-id", start["item_id"])
+        return f"edit the run worktree in this session, then run {complete} and {advance}; on failure run {fail}"
+
     def assign_item(self, item_id: str) -> dict[str, Any]:
         with self.controller_lock():
             replayed = self.replay()
@@ -4314,7 +4379,7 @@ class OptimPlansState:
             self._require_protected_metadata_clean(started)
             item = self._manifest_item(record["manifest"], item_id)
             self._reject_item_command_if_batch_member(replayed.events, item_id, "assign-item")
-            worker_config = self._require_host_worker_config(record["manifest"], item)
+            worker_config = self._require_assignable_worker_config(record["manifest"], item)
             worker_config_hash = stable_json_hash(worker_config)
             statuses = self._item_statuses(replayed.events, record["manifest"])
             if statuses[item_id] == "in_progress":
@@ -5681,6 +5746,28 @@ class OptimPlansState:
             raise ContractError("active assignment is not bound to the approved host worker config")
         return start
 
+    def _require_foreground_assignment_locked(
+        self,
+        events: list[dict[str, Any]],
+        manifest: dict[str, Any],
+        item: dict[str, Any],
+        assignment_nonce: str,
+    ) -> dict[str, Any]:
+        if not isinstance(assignment_nonce, str) or not assignment_nonce.strip():
+            raise ContractError("assignment nonce is required")
+        statuses = self._item_statuses(events, manifest)
+        if statuses[item["id"]] != "in_progress":
+            raise ContractError(f"{item['id']} does not have an active foreground assignment")
+        start = self._latest_item_start(events, item["id"])
+        if start.get("assignment_nonce") != assignment_nonce:
+            raise ContractError("assignment nonce does not match active item assignment")
+        worker_config = self._worker_config(manifest, item)
+        if worker_config.get("mode") != "foreground":
+            raise ContractError("item is not configured for foreground execution")
+        if start.get("worker_config_hash") != stable_json_hash(worker_config):
+            raise ContractError("active assignment is not bound to the approved foreground worker config")
+        return start
+
     def authorize_spawn(self, item_id: str, assignment_nonce: str, launch_block: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(launch_block, dict):
             raise ContractError("launch block must be a JSON object")
@@ -5797,6 +5884,8 @@ class OptimPlansState:
         agent_handle: str,
         evidence: str,
     ) -> dict[str, Any]:
+        if not isinstance(agent_handle, str) or not agent_handle.strip():
+            raise ContractError("agent handle is required")
         if not evidence.strip():
             raise ContractError("worker completion evidence is required")
         with self.controller_lock():
@@ -5804,6 +5893,21 @@ class OptimPlansState:
             record = self._execution_manifest_record(replayed.events)
             item = self._manifest_item(record["manifest"], item_id)
             self._reject_item_command_if_batch_member(replayed.events, item_id, "complete-item")
+            worker_config = self._worker_config(record["manifest"], item)
+            if worker_config.get("mode") == "foreground":
+                self._require_foreground_assignment_locked(
+                    replayed.events,
+                    record["manifest"],
+                    item,
+                    assignment_nonce,
+                )
+                payload = {
+                    "item_id": item_id,
+                    "assignment_nonce": assignment_nonce,
+                    "agent_handle": agent_handle,
+                    "evidence": bounded_evidence(evidence),
+                }
+                return self._append_event_locked("worker_completed", payload)["payload"]
             _start, registration = self._require_registered_host_agent_locked(
                 replayed.events,
                 record["manifest"],
@@ -5836,7 +5940,16 @@ class OptimPlansState:
             record = self._execution_manifest_record(replayed.events)
             item = self._manifest_item(record["manifest"], item_id)
             self._reject_item_command_if_batch_member(replayed.events, item_id, "fail-item")
-            if agent_handle is not None:
+            worker_config = self._worker_config(record["manifest"], item)
+            if worker_config.get("mode") == "foreground":
+                start = self._require_foreground_assignment_locked(
+                    replayed.events,
+                    record["manifest"],
+                    item,
+                    assignment_nonce,
+                )
+                extra = {"assignment_nonce": assignment_nonce, "agent_handle": agent_handle or "foreground"}
+            elif agent_handle is not None:
                 start, registration = self._require_registered_host_agent_locked(
                     replayed.events,
                     record["manifest"],
@@ -6063,7 +6176,7 @@ class OptimPlansState:
             record = self._execution_manifest_record(replayed.events)
             item = self._manifest_item(record["manifest"], item_id)
             self._reject_item_command_if_batch_member(replayed.events, item_id, "advance-item")
-            worker_config = self._require_host_worker_config(record["manifest"], item)
+            worker_config = self._require_assignable_worker_config(record["manifest"], item)
             verification_config = self._verification_config(record["manifest"], item)
             statuses = self._item_statuses(replayed.events, record["manifest"])
             status = statuses[item_id]
@@ -6323,10 +6436,13 @@ class OptimPlansState:
                 "host-multi-agent workers require assign-item, authorize-spawn, register-agent, "
                 "complete-item or fail-item, and advance-item; run-item is CLI adapter fallback only"
             )
+        if worker_config.get("mode") == "foreground" and statuses[item_id] in {"pending", "in_progress"}:
+            return self.assign_item(item_id)
         verification_config = self._verification_config(record["manifest"], item)
-        self._ensure_adapter_launch_files(worker_config, write=False)
+        if worker_config.get("mode") != "foreground":
+            self._ensure_adapter_launch_files(worker_config, write=False)
 
-        if statuses[item_id] != "validated":
+        if statuses[item_id] == "pending":
             started = self.begin_item(item_id)
             self._ensure_adapter_launch_files(worker_config)
             run_worktree = Path(started["run_worktree"])
@@ -6389,6 +6505,9 @@ class OptimPlansState:
                     return self.run_item(item_id)
                 else:
                     return validated
+        statuses = self._item_statuses(self.replay().events, record["manifest"])
+        if statuses[item_id] not in {"completed", "validated"}:
+            raise ContractError(f"{item_id} is not ready for verification; current status is {statuses[item_id]}")
         start = self._latest_item_start(self.replay().events, item_id)
         run_worktree = Path(start["run_worktree"])
 
@@ -8047,6 +8166,7 @@ PLAN_LEVELS = (
     PlanLevel("plan", 1, 5, 0, 3, 600, 3, False, True),
     PlanLevel("big-plan", 5, 10, 0, 5, 1800, 5, False, True, ("brainstorming",)),
     PlanLevel("huge-plan", 10, None, 0, None, None, 5, False, True, ("brainstorming", "refinement"), ("huge plan",)),
+    PlanLevel("deep-research-plan", 10, None, 0, None, None, 5, False, True, ("brainstorming", "refinement"), ("deep research plan",)),
 )
 _PLAN_LEVELS_BY_NAME = {name: level for level in PLAN_LEVELS for name in (level.name, *level.aliases)}
 

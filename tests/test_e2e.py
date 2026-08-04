@@ -684,6 +684,22 @@ class E2ETests(unittest.TestCase):
             self.assertEqual(resolved["result_schema"], HOST_VALIDATOR_RESULT_SCHEMA)
             self.assertNotIn("argv", resolved)
 
+    def test_worker_config_executor_foreground_has_no_adapter(self) -> None:
+        from scripts.optim_plans_core import HOST_EXECUTOR_RESULT_SCHEMA, host_agent
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            init_controller(repo, "Foreground Executor")
+            question = ask_agent_choice(repo, "Choose executor", role="executor")
+            answer_choice(repo, question["nonce"], "foreground")
+
+            resolved = controller_json("worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo))
+
+            self.assertEqual(resolved["mode"], "foreground")
+            self.assertEqual(resolved["platform"], host_agent())
+            self.assertEqual(resolved["result_schema"], HOST_EXECUTOR_RESULT_SCHEMA)
+            self.assertNotIn("argv", resolved)
+
     def test_prepare_execution_executor_worker_required_before_manifest_recording(self) -> None:
         from scripts.optim_plans_core import host_agent
 
