@@ -19,14 +19,19 @@ class StateTests(unittest.TestCase):
             parse_json_strict('{"a":1,"a":2}', source="dup")
 
     def test_run_state_lives_in_git_common_dir_and_replays_events(self) -> None:
-        from scripts.optim_plans_core import OptimPlansState
+        from scripts.optim_plans_core import ContractError, OptimPlansState
 
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))
             state = OptimPlansState.initialize(repo, topic="New Feature", plan_hash="abc123")
             self.assertTrue(str(state.run_dir).startswith(str(repo / ".git" / "optim-plans")))
             self.assertEqual(os.stat(state.root).st_mode & 0o077, 0)
-            self.assertEqual(json.loads(state.run_file.read_text())["topic"], "New Feature")
+            run = json.loads(state.run_file.read_text())
+            self.assertEqual(run["topic"], "New Feature")
+            self.assertEqual(run["plan_level"]["name"], "plan")
+            state._require_plan_level("plan")
+            with self.assertRaisesRegex(ContractError, "plan_level"):
+                state._require_plan_level("deep-research-plan")
 
             first = state.append_event("pending_question", {"nonce": "n1"})
             second = state.append_event("answer_recorded", {"nonce": "n1"})
@@ -126,6 +131,105 @@ class StateTests(unittest.TestCase):
             append_json_line(state.events_file, {"schema": 1, "seq": 2, "type": "bad", "time": "x"})
             with self.assertRaises(ContractError):
                 state.replay()
+
+    def _write_deep_ref_files(self, repo: Path, ref_id: str) -> tuple[str, str]:
+        local = repo / "refs" / ref_id
+        local.mkdir(parents=True)
+        graph = local / "graph.json"
+        graph.write_text('{"nodes":[]}\n', encoding="utf-8")
+        return local.relative_to(repo).as_posix(), graph.relative_to(repo).as_posix()
+
+    def _record_ready_ref(self, state, repo: Path, ref_id: str) -> None:
+        local, graph = self._write_deep_ref_files(repo, ref_id)
+        state.record_deep_ref(
+            {
+                "ref_id": ref_id,
+                "name": ref_id,
+                "url": f"https://example.invalid/{ref_id}",
+                "commit": "abc123",
+                "kind": "project",
+                "local_path": local,
+            }
+        )
+        state.record_deep_ref_graph({"ref_id": ref_id, "graph_json_path": graph, "coverage": "full", "backend": "graphify"})
+        state.record_deep_ref_analysis({"ref_id": ref_id, "analysis_artifact": "README.md"})
+        for index in range(3):
+            question = state.request_deep_ref_adoption(
+                {"ref_id": ref_id, "claim": f"{ref_id}-claim-{index}", "evidence_path": "README.md"}
+            )
+            state.record_answer(question["nonce"], "accept")
+
+    def test_deep_research_projection_replays_ready_refs(self) -> None:
+        from scripts.optim_plans_core import OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state = OptimPlansState.initialize(repo, topic="Deep", plan_hash="abc123", plan_level_name="deep-research-plan")
+
+            for ref_id in ("r1", "r2", "r3"):
+                self._record_ready_ref(state, repo, ref_id)
+
+            projection = state.deep_research_projection()
+            self.assertTrue(projection["required"])
+            self.assertTrue(projection["ready"])
+            self.assertEqual(projection["ref_count"], 3)
+            self.assertEqual([ref["adoption_answer_count"] for ref in projection["refs"]], [3, 3, 3])
+            registered = state.register_plan(repo / "README.md", 1)
+            self.assertTrue(registered["deep_research_ready"])
+
+    def test_deep_research_projection_reports_adversarial_blockers(self) -> None:
+        from scripts.optim_plans_core import OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state = OptimPlansState.initialize(repo, topic="Deep", plan_hash="abc123", plan_level_name="deep-research-plan")
+            local, graph = self._write_deep_ref_files(repo, "r1")
+            bad_graph = repo / "refs" / "r1" / "bad.json"
+            bad_graph.write_text("{bad json", encoding="utf-8")
+
+            state.append_event(
+                "deep_ref_recorded",
+                {
+                    "ref_id": "r1",
+                    "name": "r1",
+                    "url": "https://example.invalid/r1",
+                    "commit": "abc123",
+                    "kind": "project",
+                    "local_path": local,
+                },
+            )
+            state.append_event("deep_ref_recorded", {"ref_id": "r1", "local_path": local})
+            state.append_event("deep_ref_recorded", {"ref_id": "r2", "name": "r2", "url": "u", "commit": "c", "kind": "project", "local_path": "/tmp/outside"})
+            state.append_event("deep_ref_graphified", {"ref_id": "r1", "graph_json_path": graph, "coverage": "full", "backend": "graphify", "commit": "wrong"})
+            state.append_event("deep_ref_graphified", {"ref_id": "r1", "graph_json_path": bad_graph.relative_to(repo).as_posix(), "coverage": "full", "backend": "graphify"})
+            state.append_event("deep_ref_analyzed", {"ref_id": "r1", "analysis_artifact": "missing.md"})
+            state.append_event("deep_ref_waiver_recorded", {"ref_id": "r1", "waiver_type": "graphify-install-refused", "coverage": "coverage-sufficient", "answer_nonce": "missing"})
+            for nonce in ("n1", "n2"):
+                state.append_event(
+                    "pending_question",
+                    {
+                        "nonce": nonce,
+                        "stage": "deep-research-adoption",
+                        "source_ref": "r1",
+                        "claim": "duplicate",
+                        "evidence_path": "README.md",
+                        "options": [{"id": "accept"}],
+                    },
+                )
+                state.append_event("answer_recorded", {"nonce": nonce, "choice": "accept"})
+
+            blockers = "\n".join(state.deep_research_projection()["blockers"])
+            for expected in (
+                "duplicate ref_id",
+                "must stay inside the repo",
+                "graph commit mismatch",
+                "bad.json",
+                "analysis_artifact does not exist",
+                "waiver answer nonce",
+                "duplicate adoption claim",
+                "at least 3 credible refs",
+            ):
+                self.assertIn(expected, blockers)
 
 
 if __name__ == "__main__":

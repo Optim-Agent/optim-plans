@@ -69,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--repo", required=True)
     init.add_argument("--topic", required=True)
     init.add_argument("--request-text")
+    init.add_argument("--plan-level", default="plan")
 
     ask = sub.add_parser("ask")
     ask.add_argument("--repo", required=True)
@@ -94,6 +95,56 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status")
     status.add_argument("--repo", required=True)
+
+    register_plan = sub.add_parser("register-plan")
+    register_plan.add_argument("--repo", required=True)
+    register_plan.add_argument("--path", required=True)
+    register_plan.add_argument("--version", required=True, type=int)
+
+    deep_ref = sub.add_parser("deep-record-ref")
+    deep_ref.add_argument("--repo", required=True)
+    deep_ref.add_argument("--ref-id", required=True)
+    deep_ref.add_argument("--name", required=True)
+    deep_ref.add_argument("--url", required=True)
+    deep_ref.add_argument("--commit", required=True)
+    deep_ref.add_argument("--kind", required=True)
+    deep_ref.add_argument("--local-path", required=True)
+
+    deep_graph = sub.add_parser("deep-record-graph")
+    deep_graph.add_argument("--repo", required=True)
+    deep_graph.add_argument("--ref-id", required=True)
+    deep_graph.add_argument("--graph-json-path", required=True)
+    deep_graph.add_argument("--coverage", required=True)
+    deep_graph.add_argument("--backend", required=True)
+    deep_graph.add_argument("--commit")
+
+    deep_analysis = sub.add_parser("deep-record-analysis")
+    deep_analysis.add_argument("--repo", required=True)
+    deep_analysis.add_argument("--ref-id", required=True)
+    deep_analysis.add_argument("--analysis-artifact", required=True)
+    deep_analysis.add_argument("--commit")
+
+    deep_waiver = sub.add_parser("deep-record-waiver")
+    deep_waiver.add_argument("--repo", required=True)
+    deep_waiver.add_argument("--ref-id", required=True)
+    deep_waiver.add_argument("--waiver-type", required=True)
+    deep_waiver.add_argument("--reason", required=True)
+    deep_waiver.add_argument("--coverage", required=True)
+    deep_waiver.add_argument("--answer-nonce", required=True)
+    deep_waiver.add_argument("--commit")
+
+    deep_waiver_question = sub.add_parser("deep-waiver-question")
+    deep_waiver_question.add_argument("--repo", required=True)
+    deep_waiver_question.add_argument("--ref-id", required=True)
+    deep_waiver_question.add_argument("--prompt")
+
+    deep_adoption = sub.add_parser("deep-adoption-question")
+    deep_adoption.add_argument("--repo", required=True)
+    deep_adoption.add_argument("--ref-id", required=True)
+    deep_adoption.add_argument("--claim", required=True)
+    deep_adoption.add_argument("--evidence-path", required=True)
+    deep_adoption.add_argument("--prompt")
+    deep_adoption.add_argument("--commit")
 
     previous = sub.add_parser("previous-run")
     previous.add_argument("--repo", required=True)
@@ -485,7 +536,13 @@ def _option_tuple(raw: list[str]) -> tuple[str, str, str]:
 
 def cmd_init(args: argparse.Namespace) -> None:
     request_text = args.request_text if args.request_text is not None else args.topic
-    state = OptimPlansState.initialize(Path(args.repo), topic=args.topic, plan_hash=sha256_text(args.topic), request_text=request_text)
+    state = OptimPlansState.initialize(
+        Path(args.repo),
+        topic=args.topic,
+        plan_hash=sha256_text(args.topic),
+        request_text=request_text,
+        plan_level_name=args.plan_level,
+    )
     state.append_event("initialized", {"topic": args.topic})
     payload = {"run_id": state.run_id, "artifact_dir": str(state.artifact_dir.relative_to(state.repo))}
     question = state.ensure_language_selection()
@@ -499,6 +556,7 @@ def cmd_ask(args: argparse.Namespace) -> None:
     if _language_gate(state):
         return
     level = plan_level(args.plan_level)
+    state._require_plan_level(level.name)
     ledger = QuestionLedger()
     language = _language(state.repo)
     generic = args.decision_id is not None or args.recommended_option is not None or bool(args.alternative_option)
@@ -768,12 +826,30 @@ def cmd_worker_config(args: argparse.Namespace) -> None:
 def cmd_status(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     replayed = state.replay()
+    deep_research = state.deep_research_projection(replayed.events)
     payload: dict[str, Any] = {
         "run_id": state.run_id,
         "status": replayed.status,
         "events": len(replayed.events),
         "legacy_active": replayed.status == "legacy_active",
     }
+    if deep_research["required"] or deep_research["ref_count"]:
+        payload["deep_research"] = {
+            "ready": deep_research["ready"],
+            "ref_count": deep_research["ref_count"],
+            "blockers": deep_research["blockers"],
+            "refs": [
+                {
+                    "ref_id": ref["ref_id"],
+                    "name": ref["name"],
+                    "graph_json_path": ref["graph_json_path"],
+                    "analysis_artifact": ref["analysis_artifact"],
+                    "adoption_answer_count": ref["adoption_answer_count"],
+                }
+                for ref in deep_research["refs"]
+            ],
+            "trajectory": deep_research["trajectory"],
+        }
     if replayed.status == "legacy_active":
         approval = state.request_finish_approval()
         payload["events"] = len(state.replay().events)
@@ -963,6 +1039,80 @@ def cmd_status(args: argparse.Namespace) -> None:
     if active_wait is not None:
         payload.update(active_wait)
     print_json(payload)
+
+
+def cmd_register_plan(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(state.register_plan(Path(args.path), args.version))
+
+
+def cmd_deep_record_ref(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.record_deep_ref(
+            {
+                "ref_id": args.ref_id,
+                "name": args.name,
+                "url": args.url,
+                "commit": args.commit,
+                "kind": args.kind,
+                "local_path": args.local_path,
+            }
+        )
+    )
+
+
+def cmd_deep_record_graph(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    payload = {
+        "ref_id": args.ref_id,
+        "graph_json_path": args.graph_json_path,
+        "coverage": args.coverage,
+        "backend": args.backend,
+    }
+    if args.commit:
+        payload["commit"] = args.commit
+    print_json(state.record_deep_ref_graph(payload))
+
+
+def cmd_deep_record_analysis(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    payload = {"ref_id": args.ref_id, "analysis_artifact": args.analysis_artifact}
+    if args.commit:
+        payload["commit"] = args.commit
+    print_json(state.record_deep_ref_analysis(payload))
+
+
+def cmd_deep_record_waiver(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    payload = {
+        "ref_id": args.ref_id,
+        "waiver_type": args.waiver_type,
+        "reason": args.reason,
+        "coverage": args.coverage,
+        "answer_nonce": args.answer_nonce,
+    }
+    if args.commit:
+        payload["commit"] = args.commit
+    print_json(state.record_deep_ref_waiver(payload))
+
+
+def cmd_deep_waiver_question(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    payload = {"ref_id": args.ref_id}
+    if args.prompt:
+        payload["prompt"] = args.prompt
+    print_json(state.request_deep_ref_waiver(payload))
+
+
+def cmd_deep_adoption_question(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    payload = {"ref_id": args.ref_id, "claim": args.claim, "evidence_path": args.evidence_path}
+    if args.prompt:
+        payload["prompt"] = args.prompt
+    if args.commit:
+        payload["commit"] = args.commit
+    print_json(state.request_deep_ref_adoption(payload))
 
 
 def cmd_previous_run(args: argparse.Namespace) -> None:
@@ -1295,6 +1445,13 @@ def main(argv: list[str] | None = None) -> int:
             "answer": cmd_answer,
             "worker-config": cmd_worker_config,
             "status": cmd_status,
+            "register-plan": cmd_register_plan,
+            "deep-record-ref": cmd_deep_record_ref,
+            "deep-record-graph": cmd_deep_record_graph,
+            "deep-record-analysis": cmd_deep_record_analysis,
+            "deep-record-waiver": cmd_deep_record_waiver,
+            "deep-waiver-question": cmd_deep_waiver_question,
+            "deep-adoption-question": cmd_deep_adoption_question,
             "previous-run": cmd_previous_run,
             "prepare-execution": cmd_prepare_execution,
             "start-execution": cmd_start_execution,

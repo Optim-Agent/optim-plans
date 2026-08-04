@@ -228,9 +228,9 @@ The skill prefers `agent-reach` when available; if it is missing, it gives one s
 
 ## Deep Research Plan
 
-Use `$optim-plans:deep-research-plan` when a plan needs stronger-than-huge reference exploration. It proactively uses `agent-reach` when available, downloads at least 3 refs into ignored `./refs/`, generates `graphify` JSON for each ref when available, and asks at least 3 ref-specific controller-backed questions before any ref idea can enter `PLAN_v1.md`.
+Use `$optim-plans:deep-research-plan` when a plan needs stronger-than-huge reference exploration. It proactively uses `agent-reach` when available, downloads at least 3 refs into ignored `./refs/`, records them with `deep-record-ref`, generates and records `graphify` JSON for each ref, and asks at least 3 ref-specific controller-backed questions through nonce-bound `deep-adoption-question` prompts before any ref idea can enter `PLAN_v1.md`.
 
-This skill is not allowed to rely only on `curl`, README files, or abstracts. If `agent-reach` or `graphify` is missing, it asks once whether to install the tool locally; a refusal falls back to websearch for `agent-reach` or read tools for `graphify` and records the waiver.
+This skill is not allowed to rely only on `curl`, README files, or abstracts. If `agent-reach` or `graphify` is missing, it asks once whether to install the tool locally; a refusal falls back to websearch for `agent-reach` or read tools for `graphify` and records the nonce-bound waiver. Deep-research runs expose readiness in `status`, must pass `register-plan --version 1` before accepting `PLAN_v1.md`, and `prepare-execution` rechecks the registered ref readiness.
 
 ## Diagnose before planning
 

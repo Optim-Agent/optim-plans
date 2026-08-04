@@ -328,6 +328,18 @@ class ExecutionTests(unittest.TestCase):
         path.write_text(json.dumps(manifest), encoding="utf-8")
         return path
 
+    def test_deep_research_prepare_requires_registered_ready_plan(self) -> None:
+        from scripts.optim_plans_core import ContractError, OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            state = OptimPlansState.initialize(repo, topic="Deep", plan_hash="abc123", plan_level_name="deep-research-plan")
+            manifest_path = self._prepare_manifest_path(raw_path, repo)
+
+            with self.assertRaisesRegex(ContractError, "PLAN_v1"):
+                state.prepare_execution(manifest_path)
+
     def _finish_nonce(self, state, outcome: str) -> str:
         question = state.request_finish_approval()
         choices = {option["id"] for option in question["options"]}

@@ -97,6 +97,9 @@ VALIDATOR_PROMPT_CONTRACT = {
     "required_result_fields": ["status", "evidence", "feedback_for_executor", "checked_items"],
 }
 LEGACY_ACTIVE_EVENT_TYPES = {"item_completed", "execution_completed", "run_completed", "worker_result_recorded"}
+DEEP_RESEARCH_PLAN_LEVEL = "deep-research-plan"
+DEEP_RESEARCH_ADOPTION_STAGE = "deep-research-adoption"
+DEEP_RESEARCH_WAIVER_STAGE = "deep-research-waiver"
 LIFECYCLE_EVENT_TYPES = {
     "execution_manifest_created",
     "source_snapshot_committed",
@@ -1367,6 +1370,7 @@ class OptimPlansState:
         topic: str,
         plan_hash: str,
         request_text: str | None = None,
+        plan_level_name: str = "plan",
     ) -> "OptimPlansState":
         repo = Path(repo).absolute()
         common = git_common_dir(repo)
@@ -1404,6 +1408,7 @@ class OptimPlansState:
             "worktree_id": worktree_id,
             "topic": topic,
             "plan_hash": plan_hash,
+            "plan_level": plan_level(plan_level_name).to_json(),
             "artifact_dir": str(artifact_dir.relative_to(repo)),
         }
         if request_text is not None:
@@ -1519,6 +1524,343 @@ class OptimPlansState:
 
     def _plan_context(self) -> dict[str, Any]:
         return plan_context(self.artifact_dir)
+
+    def _run_plan_level_name(self) -> str | None:
+        try:
+            run = parse_json_strict(self.run_file.read_text(encoding="utf-8"), source=str(self.run_file))
+        except OSError:
+            return None
+        raw = run.get("plan_level")
+        if isinstance(raw, dict) and isinstance(raw.get("name"), str):
+            return plan_level(raw["name"]).name
+        return None
+
+    def _require_plan_level(self, level: str) -> None:
+        actual = self._run_plan_level_name()
+        if actual is not None and actual != plan_level(level).name:
+            raise ContractError(f"run plan_level is {actual}; expected {plan_level(level).name}")
+
+    def _is_deep_research_run(self) -> bool:
+        return self._run_plan_level_name() == DEEP_RESEARCH_PLAN_LEVEL
+
+    def _repo_path(self, raw: Any, *, label: str, must_exist: bool = True) -> tuple[str, Path]:
+        if not isinstance(raw, str) or not raw.strip():
+            raise ContractError(f"{label} is required")
+        path = Path(raw)
+        resolved = path.resolve() if path.is_absolute() else (self.repo / path).resolve()
+        try:
+            relative = resolved.relative_to(self.repo.resolve()).as_posix()
+        except ValueError as exc:
+            raise ContractError(f"{label} must stay inside the repo") from exc
+        if must_exist and not resolved.exists():
+            raise ContractError(f"{label} does not exist: {relative}")
+        return relative, resolved
+
+    def _refs_path(self, raw: Any, *, label: str, must_exist: bool = True) -> tuple[str, Path]:
+        relative, resolved = self._repo_path(raw, label=label, must_exist=must_exist)
+        if relative != "refs" and not relative.startswith("refs/"):
+            raise ContractError(f"{label} must be under refs/")
+        return relative, resolved
+
+    def _deep_ref_events_projection(self, events: list[dict[str, Any]]) -> dict[str, Any]:
+        refs: dict[str, dict[str, Any]] = {}
+        blockers: list[str] = []
+        trajectory: list[str] = []
+        answers = {
+            event.get("payload", {}).get("nonce"): event.get("payload", {}).get("choice")
+            for event in events
+            if event["type"] == "answer_recorded"
+        }
+        pending = {
+            event.get("payload", {}).get("nonce"): event.get("payload", {})
+            for event in events
+            if event["type"] == "pending_question"
+        }
+
+        def ref(ref_id: Any, event_type: str) -> dict[str, Any] | None:
+            if not isinstance(ref_id, str) or not ref_id.strip():
+                blockers.append(f"{event_type}: ref_id is required")
+                return None
+            if ref_id not in refs:
+                blockers.append(f"{event_type}: unknown ref_id {ref_id}")
+                return None
+            return refs[ref_id]
+
+        for event in events:
+            event_type = event["type"]
+            payload = event.get("payload", {})
+            if event_type == "deep_ref_recorded":
+                ref_id = payload.get("ref_id")
+                if not isinstance(ref_id, str) or not ref_id.strip():
+                    blockers.append("deep_ref_recorded: ref_id is required")
+                    continue
+                if ref_id in refs:
+                    blockers.append(f"duplicate ref_id {ref_id}")
+                    continue
+                for key in ("name", "url", "commit", "kind"):
+                    if not isinstance(payload.get(key), str) or not payload[key].strip():
+                        blockers.append(f"{ref_id}: {key} is required")
+                try:
+                    local_path, _resolved = self._refs_path(payload.get("local_path"), label=f"{ref_id} local_path")
+                except ContractError as exc:
+                    blockers.append(str(exc))
+                    local_path = payload.get("local_path")
+                refs[ref_id] = {
+                    "ref_id": ref_id,
+                    "name": payload.get("name"),
+                    "url": payload.get("url"),
+                    "commit": payload.get("commit"),
+                    "kind": payload.get("kind"),
+                    "local_path": local_path,
+                    "graph_json_path": None,
+                    "coverage": None,
+                    "graphify_backend": None,
+                    "waivers": [],
+                    "analysis_artifact": None,
+                    "adoption_records": [],
+                    "adoption_answer_count": 0,
+                }
+                trajectory.append(f"recorded {ref_id}")
+            elif event_type == "deep_ref_graphified":
+                current = ref(payload.get("ref_id"), event_type)
+                if current is None:
+                    continue
+                if payload.get("commit") is not None and payload.get("commit") != current.get("commit"):
+                    blockers.append(f"{current['ref_id']}: graph commit mismatch")
+                try:
+                    graph_path, graph_resolved = self._refs_path(payload.get("graph_json_path"), label=f"{current['ref_id']} graph_json_path")
+                    parse_json_strict(graph_resolved.read_text(encoding="utf-8"), source=str(graph_resolved))
+                except (ContractError, OSError) as exc:
+                    blockers.append(str(exc))
+                    graph_path = payload.get("graph_json_path")
+                current["graph_json_path"] = graph_path
+                current["coverage"] = payload.get("coverage")
+                current["graphify_backend"] = payload.get("backend")
+                trajectory.append(f"graphified {current['ref_id']}")
+            elif event_type == "deep_ref_analyzed":
+                current = ref(payload.get("ref_id"), event_type)
+                if current is None:
+                    continue
+                if payload.get("commit") is not None and payload.get("commit") != current.get("commit"):
+                    blockers.append(f"{current['ref_id']}: analysis commit mismatch")
+                try:
+                    analysis_artifact, _resolved = self._repo_path(payload.get("analysis_artifact"), label=f"{current['ref_id']} analysis_artifact")
+                except ContractError as exc:
+                    blockers.append(str(exc))
+                    analysis_artifact = payload.get("analysis_artifact")
+                current["analysis_artifact"] = analysis_artifact
+                trajectory.append(f"analyzed {current['ref_id']}")
+            elif event_type == "deep_ref_waiver_recorded":
+                current = ref(payload.get("ref_id"), event_type)
+                if current is None:
+                    continue
+                if payload.get("commit") is not None and payload.get("commit") != current.get("commit"):
+                    blockers.append(f"{current['ref_id']}: waiver commit mismatch")
+                answer_nonce = payload.get("answer_nonce")
+                question = pending.get(answer_nonce)
+                if question is None or question.get("stage") != DEEP_RESEARCH_WAIVER_STAGE or answers.get(answer_nonce) not in {"no", "decline", "reject", "stop"}:
+                    blockers.append(f"{current['ref_id']}: waiver answer nonce is not a recorded install refusal")
+                waiver = {
+                    "waiver_type": payload.get("waiver_type"),
+                    "reason": payload.get("reason"),
+                    "coverage": payload.get("coverage"),
+                    "answer_nonce": answer_nonce,
+                }
+                current["waivers"].append(waiver)
+                trajectory.append(f"waived {current['ref_id']} {payload.get('waiver_type')}")
+
+        adoption_keys: set[tuple[str, str]] = set()
+        for nonce, question in pending.items():
+            if question.get("stage") != DEEP_RESEARCH_ADOPTION_STAGE or nonce not in answers:
+                continue
+            current = ref(question.get("source_ref"), DEEP_RESEARCH_ADOPTION_STAGE)
+            if current is None:
+                continue
+            if question.get("commit") is not None and question.get("commit") != current.get("commit"):
+                blockers.append(f"{current['ref_id']}: adoption commit mismatch")
+            claim = question.get("claim")
+            if not isinstance(claim, str) or not claim.strip():
+                blockers.append(f"{current['ref_id']}: adoption claim is required")
+                continue
+            key = (current["ref_id"], claim)
+            if key in adoption_keys:
+                blockers.append(f"{current['ref_id']}: duplicate adoption claim {claim}")
+                continue
+            adoption_keys.add(key)
+            try:
+                evidence_path, _resolved = self._repo_path(question.get("evidence_path"), label=f"{current['ref_id']} adoption evidence_path")
+            except ContractError as exc:
+                blockers.append(str(exc))
+                continue
+            decision = answers[nonce]
+            if decision == "auto":
+                decision = question.get("recommended_option_id", "auto")
+            current["adoption_records"].append(
+                {
+                    "source_ref": current["ref_id"],
+                    "claim": claim,
+                    "evidence_path": evidence_path,
+                    "decision": decision,
+                    "answer_nonce": nonce,
+                }
+            )
+            current["adoption_answer_count"] = len(current["adoption_records"])
+            trajectory.append(f"adoption {current['ref_id']} {claim}: {decision}")
+
+        for current in refs.values():
+            sufficient_waiver = any(
+                waiver.get("waiver_type") == "graphify-install-refused" and waiver.get("coverage") == "coverage-sufficient"
+                for waiver in current["waivers"]
+            )
+            if current["graph_json_path"] is None and not sufficient_waiver:
+                blockers.append(f"{current['ref_id']}: graphify JSON or coverage-sufficient waiver is required")
+            if current["analysis_artifact"] is None:
+                blockers.append(f"{current['ref_id']}: analysis artifact is required")
+            if current["adoption_answer_count"] < 3:
+                blockers.append(f"{current['ref_id']}: at least 3 adoption answers are required")
+        if len(refs) < 3:
+            blockers.append("at least 3 credible refs are required")
+
+        return {
+            "required": self._is_deep_research_run(),
+            "ready": not blockers,
+            "refs": list(refs.values()),
+            "ref_count": len(refs),
+            "blockers": blockers,
+            "trajectory": trajectory,
+        }
+
+    def deep_research_projection(self, events: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        return self._deep_ref_events_projection(events or self.replay().events)
+
+    def _require_deep_research_run(self) -> None:
+        self._require_plan_level(DEEP_RESEARCH_PLAN_LEVEL)
+
+    def _require_deep_research_ready_for_prepare(self, events: list[dict[str, Any]]) -> None:
+        if not self._is_deep_research_run():
+            return
+        projection = self.deep_research_projection(events)
+        registered = [
+            event.get("payload", {})
+            for event in events
+            if event["type"] == "plan_registered" and event.get("payload", {}).get("version") == 1
+        ]
+        if not registered:
+            raise ContractError("deep-research PLAN_v1 must be registered before prepare-execution")
+        if not projection["ready"]:
+            raise ContractError("deep-research readiness blockers: " + "; ".join(projection["blockers"]))
+
+    def record_deep_ref(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_deep_research_run()
+        ref_id = payload.get("ref_id")
+        if any(ref.get("ref_id") == ref_id for ref in self.deep_research_projection()["refs"]):
+            raise ContractError(f"duplicate ref_id {ref_id}")
+        local_path, _resolved = self._refs_path(payload.get("local_path"), label="local_path")
+        event_payload = {key: payload.get(key) for key in ("ref_id", "name", "url", "commit", "kind")}
+        event_payload["local_path"] = local_path
+        event = self.append_event("deep_ref_recorded", event_payload)
+        blockers = self.deep_research_projection()["blockers"]
+        if blockers:
+            return {**event["payload"], "readiness_blockers": blockers}
+        return event["payload"]
+
+    def record_deep_ref_graph(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_deep_research_run()
+        if not any(ref.get("ref_id") == payload.get("ref_id") for ref in self.deep_research_projection()["refs"]):
+            raise ContractError(f"unknown ref_id {payload.get('ref_id')}")
+        graph_path, graph_resolved = self._refs_path(payload.get("graph_json_path"), label="graph_json_path")
+        parse_json_strict(graph_resolved.read_text(encoding="utf-8"), source=str(graph_resolved))
+        event_payload = {
+            "ref_id": payload.get("ref_id"),
+            "graph_json_path": graph_path,
+            "coverage": payload.get("coverage"),
+            "backend": payload.get("backend"),
+        }
+        if payload.get("commit") is not None:
+            event_payload["commit"] = payload["commit"]
+        return self.append_event("deep_ref_graphified", event_payload)["payload"]
+
+    def record_deep_ref_analysis(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_deep_research_run()
+        if not any(ref.get("ref_id") == payload.get("ref_id") for ref in self.deep_research_projection()["refs"]):
+            raise ContractError(f"unknown ref_id {payload.get('ref_id')}")
+        analysis_artifact, _resolved = self._repo_path(payload.get("analysis_artifact"), label="analysis_artifact")
+        event_payload = {"ref_id": payload.get("ref_id"), "analysis_artifact": analysis_artifact}
+        if payload.get("commit") is not None:
+            event_payload["commit"] = payload["commit"]
+        return self.append_event("deep_ref_analyzed", event_payload)["payload"]
+
+    def record_deep_ref_waiver(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_deep_research_run()
+        if not any(ref.get("ref_id") == payload.get("ref_id") for ref in self.deep_research_projection()["refs"]):
+            raise ContractError(f"unknown ref_id {payload.get('ref_id')}")
+        event_payload = {key: payload.get(key) for key in ("ref_id", "waiver_type", "reason", "coverage", "answer_nonce")}
+        if payload.get("commit") is not None:
+            event_payload["commit"] = payload["commit"]
+        return self.append_event("deep_ref_waiver_recorded", event_payload)["payload"]
+
+    def request_deep_ref_adoption(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_deep_research_run()
+        ref_id = payload.get("ref_id")
+        if not any(ref.get("ref_id") == ref_id for ref in self.deep_research_projection()["refs"]):
+            raise ContractError(f"unknown ref_id {ref_id}")
+        evidence_path, _resolved = self._repo_path(payload.get("evidence_path"), label="evidence_path")
+        language = self._controller_language()
+        prompt = payload.get("prompt") or f"Use this {ref_id} finding in the plan?"
+        question = QuestionLedger().ask(
+            prompt,
+            recommended=("accept", _text(language, "Accept", "采纳"), _text(language, "allow this ref idea into the plan", "允许此 ref idea 进入计划")),
+            alternatives=[("reject", _text(language, "Reject", "拒绝"), _text(language, "do not use this ref idea", "不使用此 ref idea"))],
+            language=language,
+        )
+        question_payload = question.to_json(expected_seq=len(self.replay().events) + 1)
+        question_payload.update(
+            {
+                "stage": DEEP_RESEARCH_ADOPTION_STAGE,
+                "source_ref": ref_id,
+                "claim": payload.get("claim"),
+                "evidence_path": evidence_path,
+            }
+        )
+        if payload.get("commit") is not None:
+            question_payload["commit"] = payload["commit"]
+        return self.append_event("pending_question", question_payload)["payload"]
+
+    def request_deep_ref_waiver(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_deep_research_run()
+        ref_id = payload.get("ref_id")
+        if not any(ref.get("ref_id") == ref_id for ref in self.deep_research_projection()["refs"]):
+            raise ContractError(f"unknown ref_id {ref_id}")
+        language = self._controller_language()
+        question = QuestionLedger().ask(
+            payload.get("prompt") or f"Install graphify for {ref_id}?",
+            recommended=("yes", _text(language, "Yes", "是"), _text(language, "install or use graphify before waiver", "安装或使用 graphify 后再豁免")),
+            alternatives=[("no", _text(language, "No", "否"), _text(language, "record install refusal for read-tools fallback", "记录安装拒绝并使用读取工具 fallback"))],
+            allow_auto_complete=False,
+            language=language,
+        )
+        question_payload = question.to_json(expected_seq=len(self.replay().events) + 1)
+        question_payload.update({"stage": DEEP_RESEARCH_WAIVER_STAGE, "ref_id": ref_id})
+        return self.append_event("pending_question", question_payload)["payload"]
+
+    def register_plan(self, path: Path, version: int) -> dict[str, Any]:
+        if version < 1:
+            raise ContractError("plan version must be positive")
+        relative, resolved = self._repo_path(str(path), label="plan path")
+        with self.controller_lock():
+            events = self.replay().events
+            projection = self.deep_research_projection(events)
+            if self._is_deep_research_run() and version == 1 and not projection["ready"]:
+                raise ContractError("deep-research readiness blockers: " + "; ".join(projection["blockers"]))
+            payload: dict[str, Any] = {
+                "path": relative,
+                "version": version,
+                "sha256": _hash_file(resolved),
+            }
+            if self._is_deep_research_run():
+                payload["deep_research_ready"] = projection["ready"]
+                payload["deep_research_ref_count"] = projection["ref_count"]
+            return self._append_event_locked("plan_registered", payload)["payload"]
 
     def _append_event_locked(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         replayed = self.replay()
@@ -1839,6 +2181,7 @@ class OptimPlansState:
             self._require_lifecycle_locked(replayed.events, {"planning"}, "prepare-execution")
             if any(event["type"] == "execution_manifest_created" for event in replayed.events):
                 raise ContractError("execution manifest is write-once")
+            self._require_deep_research_ready_for_prepare(replayed.events)
         self._smoke_execution_manifest(canonical)
         with self.controller_lock():
             return self._persist_execution_manifest_locked(canonical)
@@ -1860,6 +2203,7 @@ class OptimPlansState:
             self._require_lifecycle_locked(replayed.events, {"planning"}, "prepare-execution")
             if any(event["type"] == "execution_manifest_created" for event in replayed.events):
                 raise ContractError("execution manifest is write-once")
+            self._require_deep_research_ready_for_prepare(replayed.events)
             snapshot = self._source_snapshot()
             if snapshot is not None:
                 decision = self._source_auto_commit_decision_locked(replayed.events, snapshot)
@@ -1881,6 +2225,7 @@ class OptimPlansState:
                 self._require_lifecycle_locked(replayed.events, {"planning"}, "prepare-execution")
                 if any(event["type"] == "execution_manifest_created" for event in replayed.events):
                     raise ContractError("execution manifest is write-once")
+                self._require_deep_research_ready_for_prepare(replayed.events)
                 snapshot = self._source_snapshot()
                 if approved_snapshot is not None:
                     if not self._same_source_snapshot(snapshot, approved_snapshot):
@@ -8259,6 +8604,8 @@ GENERIC_QUESTION_RESERVED_NAMES = {
     "skip-summary",
     "always-skip-summary",
     LANGUAGE_SELECTION_STAGE,
+    DEEP_RESEARCH_ADOPTION_STAGE,
+    DEEP_RESEARCH_WAIVER_STAGE,
     "other",
     "auto",
     "skip-refinement-execute",
