@@ -175,17 +175,32 @@ def build_parser() -> argparse.ArgumentParser:
     authorize.add_argument("--assignment-nonce", required=True)
     authorize.add_argument("--launch-block", required=True)
 
+    authorize_resume = sub.add_parser("authorize-resume")
+    authorize_resume.add_argument("--repo", required=True)
+    authorize_resume.add_argument("--item-id", required=True)
+    authorize_resume.add_argument("--assignment-nonce", required=True)
+    authorize_resume.add_argument("--prior-agent-handle", required=True)
+    authorize_resume.add_argument("--launch-block", required=True)
+
     authorize_batch = sub.add_parser("authorize-batch-spawn")
     authorize_batch.add_argument("--repo", required=True)
     authorize_batch.add_argument("--batch-id", required=True)
     authorize_batch.add_argument("--assignment-nonce", required=True)
     authorize_batch.add_argument("--launch-block", required=True)
 
+    authorize_batch_resume = sub.add_parser("authorize-batch-resume")
+    authorize_batch_resume.add_argument("--repo", required=True)
+    authorize_batch_resume.add_argument("--batch-id", required=True)
+    authorize_batch_resume.add_argument("--assignment-nonce", required=True)
+    authorize_batch_resume.add_argument("--prior-agent-handle", required=True)
+    authorize_batch_resume.add_argument("--launch-block", required=True)
+
     register = sub.add_parser("register-agent")
     register.add_argument("--repo", required=True)
     register.add_argument("--item-id", required=True)
     register.add_argument("--assignment-nonce", required=True)
-    register.add_argument("--launch-nonce", required=True)
+    register.add_argument("--launch-nonce")
+    register.add_argument("--resume-nonce")
     register.add_argument("--agent-handle", required=True)
     register.add_argument("--launch-block", required=True)
 
@@ -193,7 +208,8 @@ def build_parser() -> argparse.ArgumentParser:
     register_batch.add_argument("--repo", required=True)
     register_batch.add_argument("--batch-id", required=True)
     register_batch.add_argument("--assignment-nonce", required=True)
-    register_batch.add_argument("--launch-nonce", required=True)
+    register_batch.add_argument("--launch-nonce")
+    register_batch.add_argument("--resume-nonce")
     register_batch.add_argument("--agent-handle", required=True)
     register_batch.add_argument("--launch-block", required=True)
 
@@ -217,6 +233,8 @@ def build_parser() -> argparse.ArgumentParser:
     fail.add_argument("--assignment-nonce", required=True)
     fail.add_argument("--agent-handle")
     fail.add_argument("--launch-nonce")
+    fail.add_argument("--resume-nonce")
+    fail.add_argument("--resume-failure-kind", default="resume_or_send")
     fail.add_argument("--evidence", required=True)
 
     fail_batch = sub.add_parser("fail-batch")
@@ -225,6 +243,8 @@ def build_parser() -> argparse.ArgumentParser:
     fail_batch.add_argument("--assignment-nonce", required=True)
     fail_batch.add_argument("--agent-handle")
     fail_batch.add_argument("--launch-nonce")
+    fail_batch.add_argument("--resume-nonce")
+    fail_batch.add_argument("--resume-failure-kind", default="resume_or_send")
     fail_batch.add_argument("--evidence", required=True)
 
     advance = sub.add_parser("advance-item")
@@ -249,17 +269,32 @@ def build_parser() -> argparse.ArgumentParser:
     authorize_validator.add_argument("--validator-nonce", required=True)
     authorize_validator.add_argument("--launch-block", required=True)
 
+    authorize_validator_resume = sub.add_parser("authorize-validator-resume")
+    authorize_validator_resume.add_argument("--repo", required=True)
+    authorize_validator_resume.add_argument("--item-id", required=True)
+    authorize_validator_resume.add_argument("--validator-nonce", required=True)
+    authorize_validator_resume.add_argument("--prior-agent-handle", required=True)
+    authorize_validator_resume.add_argument("--launch-block", required=True)
+
     authorize_batch_validator = sub.add_parser("authorize-batch-validator-spawn")
     authorize_batch_validator.add_argument("--repo", required=True)
     authorize_batch_validator.add_argument("--batch-id", required=True)
     authorize_batch_validator.add_argument("--validator-nonce", required=True)
     authorize_batch_validator.add_argument("--launch-block", required=True)
 
+    authorize_batch_validator_resume = sub.add_parser("authorize-batch-validator-resume")
+    authorize_batch_validator_resume.add_argument("--repo", required=True)
+    authorize_batch_validator_resume.add_argument("--batch-id", required=True)
+    authorize_batch_validator_resume.add_argument("--validator-nonce", required=True)
+    authorize_batch_validator_resume.add_argument("--prior-agent-handle", required=True)
+    authorize_batch_validator_resume.add_argument("--launch-block", required=True)
+
     register_validator = sub.add_parser("register-validator")
     register_validator.add_argument("--repo", required=True)
     register_validator.add_argument("--item-id", required=True)
     register_validator.add_argument("--validator-nonce", required=True)
-    register_validator.add_argument("--launch-nonce", required=True)
+    register_validator.add_argument("--launch-nonce")
+    register_validator.add_argument("--resume-nonce")
     register_validator.add_argument("--agent-handle", required=True)
     register_validator.add_argument("--launch-block", required=True)
 
@@ -267,7 +302,8 @@ def build_parser() -> argparse.ArgumentParser:
     register_batch_validator.add_argument("--repo", required=True)
     register_batch_validator.add_argument("--batch-id", required=True)
     register_batch_validator.add_argument("--validator-nonce", required=True)
-    register_batch_validator.add_argument("--launch-nonce", required=True)
+    register_batch_validator.add_argument("--launch-nonce")
+    register_batch_validator.add_argument("--resume-nonce")
     register_batch_validator.add_argument("--agent-handle", required=True)
     register_batch_validator.add_argument("--launch-block", required=True)
 
@@ -292,6 +328,8 @@ def build_parser() -> argparse.ArgumentParser:
     fail_validator.add_argument("--validator-nonce")
     fail_validator.add_argument("--agent-handle")
     fail_validator.add_argument("--launch-nonce")
+    fail_validator.add_argument("--resume-nonce")
+    fail_validator.add_argument("--resume-failure-kind", default="resume_or_send")
     fail_validator.add_argument("--evidence", default="")
 
     fail_batch_validator = sub.add_parser("fail-batch-validator")
@@ -301,6 +339,8 @@ def build_parser() -> argparse.ArgumentParser:
     fail_batch_validator.add_argument("--validator-nonce")
     fail_batch_validator.add_argument("--agent-handle")
     fail_batch_validator.add_argument("--launch-nonce")
+    fail_batch_validator.add_argument("--resume-nonce")
+    fail_batch_validator.add_argument("--resume-failure-kind", default="resume_or_send")
     fail_batch_validator.add_argument("--evidence", default="")
 
     retry = sub.add_parser("retry-item")
@@ -1189,12 +1229,36 @@ def cmd_authorize_spawn(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_authorize_resume(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.authorize_resume(
+            args.item_id,
+            args.assignment_nonce,
+            args.prior_agent_handle,
+            _json_object_arg(args.launch_block, label="launch block"),
+        )
+    )
+
+
 def cmd_authorize_batch_spawn(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     print_json(
         state.authorize_batch_spawn(
             args.batch_id,
             args.assignment_nonce,
+            _json_object_arg(args.launch_block, label="launch block"),
+        )
+    )
+
+
+def cmd_authorize_batch_resume(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.authorize_batch_resume(
+            args.batch_id,
+            args.assignment_nonce,
+            args.prior_agent_handle,
             _json_object_arg(args.launch_block, label="launch block"),
         )
     )
@@ -1207,6 +1271,7 @@ def cmd_register_agent(args: argparse.Namespace) -> None:
             args.item_id,
             assignment_nonce=args.assignment_nonce,
             launch_nonce=args.launch_nonce,
+            resume_nonce=args.resume_nonce,
             agent_handle=args.agent_handle,
             launch_block=_json_object_arg(args.launch_block, label="launch block"),
         )
@@ -1220,6 +1285,7 @@ def cmd_register_batch_agent(args: argparse.Namespace) -> None:
             args.batch_id,
             assignment_nonce=args.assignment_nonce,
             launch_nonce=args.launch_nonce,
+            resume_nonce=args.resume_nonce,
             agent_handle=args.agent_handle,
             launch_block=_json_object_arg(args.launch_block, label="launch block"),
         )
@@ -1258,6 +1324,8 @@ def cmd_fail_item(args: argparse.Namespace) -> None:
             assignment_nonce=args.assignment_nonce,
             agent_handle=args.agent_handle,
             launch_nonce=args.launch_nonce,
+            resume_nonce=args.resume_nonce,
+            resume_failure_kind=args.resume_failure_kind,
             evidence=args.evidence,
         )
     )
@@ -1271,6 +1339,8 @@ def cmd_fail_batch(args: argparse.Namespace) -> None:
             assignment_nonce=args.assignment_nonce,
             agent_handle=args.agent_handle,
             launch_nonce=args.launch_nonce,
+            resume_nonce=args.resume_nonce,
+            resume_failure_kind=args.resume_failure_kind,
             evidence=args.evidence,
         )
     )
@@ -1307,12 +1377,36 @@ def cmd_authorize_validator_spawn(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_authorize_validator_resume(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.authorize_validator_resume(
+            args.item_id,
+            args.validator_nonce,
+            args.prior_agent_handle,
+            _json_object_arg(args.launch_block, label="validator launch block"),
+        )
+    )
+
+
 def cmd_authorize_batch_validator_spawn(args: argparse.Namespace) -> None:
     state = OptimPlansState.load_active(Path(args.repo))
     print_json(
         state.authorize_batch_validator_spawn(
             args.batch_id,
             args.validator_nonce,
+            _json_object_arg(args.launch_block, label="validator launch block"),
+        )
+    )
+
+
+def cmd_authorize_batch_validator_resume(args: argparse.Namespace) -> None:
+    state = OptimPlansState.load_active(Path(args.repo))
+    print_json(
+        state.authorize_batch_validator_resume(
+            args.batch_id,
+            args.validator_nonce,
+            args.prior_agent_handle,
             _json_object_arg(args.launch_block, label="validator launch block"),
         )
     )
@@ -1325,6 +1419,7 @@ def cmd_register_validator(args: argparse.Namespace) -> None:
             args.item_id,
             validator_nonce=args.validator_nonce,
             launch_nonce=args.launch_nonce,
+            resume_nonce=args.resume_nonce,
             agent_handle=args.agent_handle,
             launch_block=_json_object_arg(args.launch_block, label="validator launch block"),
         )
@@ -1338,6 +1433,7 @@ def cmd_register_batch_validator(args: argparse.Namespace) -> None:
             args.batch_id,
             validator_nonce=args.validator_nonce,
             launch_nonce=args.launch_nonce,
+            resume_nonce=args.resume_nonce,
             agent_handle=args.agent_handle,
             launch_block=_json_object_arg(args.launch_block, label="validator launch block"),
         )
@@ -1377,6 +1473,8 @@ def cmd_fail_validator(args: argparse.Namespace) -> None:
             validator_nonce=args.validator_nonce,
             agent_handle=args.agent_handle,
             launch_nonce=args.launch_nonce,
+            resume_nonce=args.resume_nonce,
+            resume_failure_kind=args.resume_failure_kind,
             evidence=args.evidence,
         )
     )
@@ -1391,6 +1489,8 @@ def cmd_fail_batch_validator(args: argparse.Namespace) -> None:
             validator_nonce=args.validator_nonce,
             agent_handle=args.agent_handle,
             launch_nonce=args.launch_nonce,
+            resume_nonce=args.resume_nonce,
+            resume_failure_kind=args.resume_failure_kind,
             evidence=args.evidence,
         )
     )
@@ -1461,7 +1561,9 @@ def main(argv: list[str] | None = None) -> int:
             "assign-item": cmd_assign_item,
             "assign-batch": cmd_assign_batch,
             "authorize-spawn": cmd_authorize_spawn,
+            "authorize-resume": cmd_authorize_resume,
             "authorize-batch-spawn": cmd_authorize_batch_spawn,
+            "authorize-batch-resume": cmd_authorize_batch_resume,
             "register-agent": cmd_register_agent,
             "register-batch-agent": cmd_register_batch_agent,
             "complete-item": cmd_complete_item,
@@ -1473,7 +1575,9 @@ def main(argv: list[str] | None = None) -> int:
             "assign-validator": cmd_assign_validator,
             "assign-batch-validator": cmd_assign_batch_validator,
             "authorize-validator-spawn": cmd_authorize_validator_spawn,
+            "authorize-validator-resume": cmd_authorize_validator_resume,
             "authorize-batch-validator-spawn": cmd_authorize_batch_validator_spawn,
+            "authorize-batch-validator-resume": cmd_authorize_batch_validator_resume,
             "register-validator": cmd_register_validator,
             "register-batch-validator": cmd_register_batch_validator,
             "complete-validator": cmd_complete_validator,

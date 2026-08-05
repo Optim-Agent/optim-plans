@@ -108,6 +108,8 @@ LIFECYCLE_EVENT_TYPES = {
     "batch_started",
     "host_spawn_authorized",
     "batch_host_spawn_authorized",
+    "host_resume_authorized",
+    "batch_host_resume_authorized",
     "host_agent_registered",
     "batch_agent_registered",
     "worker_completed",
@@ -118,6 +120,8 @@ LIFECYCLE_EVENT_TYPES = {
     "batch_validator_assigned",
     "validator_spawn_authorized",
     "batch_validator_spawn_authorized",
+    "validator_resume_authorized",
+    "batch_validator_resume_authorized",
     "validator_agent_registered",
     "batch_validator_agent_registered",
     "validator_result_recorded",
@@ -1241,12 +1245,16 @@ def lifecycle_status(events: list[dict[str, Any]]) -> str:
             "batch_started",
             "host_spawn_authorized",
             "batch_host_spawn_authorized",
+            "host_resume_authorized",
+            "batch_host_resume_authorized",
             "host_agent_registered",
             "batch_agent_registered",
             "validator_assigned",
             "batch_validator_assigned",
             "validator_spawn_authorized",
             "batch_validator_spawn_authorized",
+            "validator_resume_authorized",
+            "batch_validator_resume_authorized",
             "validator_agent_registered",
             "batch_validator_agent_registered",
             "retry_restored",
@@ -3808,6 +3816,327 @@ class OptimPlansState:
     def _controller_command(self, command: str, *args: str) -> str:
         return shlex.join(["python3", "scripts/optim_plans.py", command, "--repo", str(self.repo), *args])
 
+    def _registration_nonce_payload(self, registration: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(registration.get("resume_nonce"), str):
+            return {
+                "resume_nonce": registration["resume_nonce"],
+                "prior_agent_handle": registration["prior_agent_handle"],
+                "resumed": True,
+            }
+        return {"launch_nonce": registration["launch_nonce"]}
+
+    def _resume_failure_metadata(
+        self,
+        authorization: dict[str, Any],
+        *,
+        failure_kind: str,
+    ) -> dict[str, Any]:
+        keys = (
+            "assignment_nonce",
+            "validator_nonce",
+            "worker_config_hash",
+            "validator_config_hash",
+            "validator_prompt_hash",
+            "prompt_hash",
+            "delta_fingerprint",
+            "launch_block_hash",
+        )
+        return {
+            **{key: authorization[key] for key in keys if key in authorization},
+            "resume_nonce": authorization["resume_nonce"],
+            "prior_agent_handle": authorization["prior_agent_handle"],
+            "resume_failure_kind": failure_kind,
+        }
+
+    def _resume_nonce_used(self, events: list[dict[str, Any]], resume_nonce: str) -> bool:
+        return any(
+            event["type"]
+            in {
+                "host_agent_registered",
+                "batch_agent_registered",
+                "validator_agent_registered",
+                "batch_validator_agent_registered",
+                "worker_failed",
+                "batch_worker_failed",
+                "validator_failed",
+                "batch_validator_failed",
+            }
+            and event.get("payload", {}).get("resume_nonce") == resume_nonce
+            for event in events
+        )
+
+    def _latest_resume_authorization(
+        self,
+        events: list[dict[str, Any]],
+        event_type: str,
+        *,
+        target_nonce_field: str,
+        target_nonce: str,
+        resume_nonce: str | None = None,
+    ) -> dict[str, Any] | None:
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if event["type"] != event_type or payload.get(target_nonce_field) != target_nonce:
+                continue
+            if resume_nonce is None or payload.get("resume_nonce") == resume_nonce:
+                return payload
+        return None
+
+    def _require_resume_authorization(
+        self,
+        events: list[dict[str, Any]],
+        event_type: str,
+        *,
+        target_nonce_field: str,
+        target_nonce: str,
+        resume_nonce: str,
+        launch_block: dict[str, Any] | None = None,
+        agent_handle: str | None = None,
+        expected_launch_block_hash: str | None = None,
+        label: str = "host",
+    ) -> dict[str, Any]:
+        if not isinstance(resume_nonce, str) or not resume_nonce.strip():
+            raise ContractError(f"{label} resume nonce is required")
+        authorization = self._latest_resume_authorization(
+            events,
+            event_type,
+            target_nonce_field=target_nonce_field,
+            target_nonce=target_nonce,
+            resume_nonce=resume_nonce,
+        )
+        if authorization is None:
+            raise ContractError(f"unknown or stale {label} resume nonce")
+        if self._resume_nonce_used(events, resume_nonce):
+            raise ContractError(f"{label} resume nonce is stale or already used")
+        launch_block_hash = stable_json_hash(launch_block) if launch_block is not None else expected_launch_block_hash
+        if authorization.get("launch_block_hash") != launch_block_hash:
+            raise ContractError(f"{label} resume nonce is not bound to this launch block")
+        if agent_handle is not None and authorization.get("prior_agent_handle") != agent_handle:
+            raise ContractError(f"resumed {label} agent handle does not match authorized prior handle")
+        return authorization
+
+    def _resume_action(
+        self,
+        *,
+        kind: str,
+        target_id: str,
+        target_nonce: str,
+        prior_agent_handle: str,
+        launch_block: dict[str, Any],
+        authorization: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        launch_json = json_text(launch_block)
+        if kind == "executor_item":
+            authorize = self._controller_command(
+                "authorize-resume",
+                "--item-id",
+                target_id,
+                "--assignment-nonce",
+                target_nonce,
+                "--prior-agent-handle",
+                prior_agent_handle,
+                "--launch-block",
+                launch_json,
+            )
+            spawn = self._controller_command(
+                "authorize-spawn",
+                "--item-id",
+                target_id,
+                "--assignment-nonce",
+                target_nonce,
+                "--launch-block",
+                launch_json,
+            )
+            register = self._controller_command(
+                "register-agent",
+                "--item-id",
+                target_id,
+                "--assignment-nonce",
+                target_nonce,
+                "--resume-nonce",
+                authorization["resume_nonce"] if authorization else "<resume_nonce>",
+                "--agent-handle",
+                prior_agent_handle,
+                "--launch-block",
+                launch_json,
+            )
+            fail = self._controller_command(
+                "fail-item",
+                "--item-id",
+                target_id,
+                "--assignment-nonce",
+                target_nonce,
+                "--resume-nonce",
+                authorization["resume_nonce"] if authorization else "<resume_nonce>",
+                "--evidence",
+                "<evidence>",
+            )
+        elif kind == "executor_batch":
+            authorize = self._controller_command(
+                "authorize-batch-resume",
+                "--batch-id",
+                target_id,
+                "--assignment-nonce",
+                target_nonce,
+                "--prior-agent-handle",
+                prior_agent_handle,
+                "--launch-block",
+                launch_json,
+            )
+            spawn = self._controller_command(
+                "authorize-batch-spawn",
+                "--batch-id",
+                target_id,
+                "--assignment-nonce",
+                target_nonce,
+                "--launch-block",
+                launch_json,
+            )
+            register = self._controller_command(
+                "register-batch-agent",
+                "--batch-id",
+                target_id,
+                "--assignment-nonce",
+                target_nonce,
+                "--resume-nonce",
+                authorization["resume_nonce"] if authorization else "<resume_nonce>",
+                "--agent-handle",
+                prior_agent_handle,
+                "--launch-block",
+                launch_json,
+            )
+            fail = self._controller_command(
+                "fail-batch",
+                "--batch-id",
+                target_id,
+                "--assignment-nonce",
+                target_nonce,
+                "--resume-nonce",
+                authorization["resume_nonce"] if authorization else "<resume_nonce>",
+                "--evidence",
+                "<evidence>",
+            )
+        elif kind == "validator_item":
+            authorize = self._controller_command(
+                "authorize-validator-resume",
+                "--item-id",
+                target_id,
+                "--validator-nonce",
+                target_nonce,
+                "--prior-agent-handle",
+                prior_agent_handle,
+                "--launch-block",
+                launch_json,
+            )
+            spawn = self._controller_command(
+                "authorize-validator-spawn",
+                "--item-id",
+                target_id,
+                "--validator-nonce",
+                target_nonce,
+                "--launch-block",
+                launch_json,
+            )
+            register = self._controller_command(
+                "register-validator",
+                "--item-id",
+                target_id,
+                "--validator-nonce",
+                target_nonce,
+                "--resume-nonce",
+                authorization["resume_nonce"] if authorization else "<resume_nonce>",
+                "--agent-handle",
+                prior_agent_handle,
+                "--launch-block",
+                launch_json,
+            )
+            fail = self._controller_command(
+                "fail-validator",
+                "--item-id",
+                target_id,
+                "--validator-nonce",
+                target_nonce,
+                "--resume-nonce",
+                authorization["resume_nonce"] if authorization else "<resume_nonce>",
+                "--reason",
+                "unknown",
+                "--evidence",
+                "<evidence>",
+            )
+        elif kind == "validator_batch":
+            authorize = self._controller_command(
+                "authorize-batch-validator-resume",
+                "--batch-id",
+                target_id,
+                "--validator-nonce",
+                target_nonce,
+                "--prior-agent-handle",
+                prior_agent_handle,
+                "--launch-block",
+                launch_json,
+            )
+            spawn = self._controller_command(
+                "authorize-batch-validator-spawn",
+                "--batch-id",
+                target_id,
+                "--validator-nonce",
+                target_nonce,
+                "--launch-block",
+                launch_json,
+            )
+            register = self._controller_command(
+                "register-batch-validator",
+                "--batch-id",
+                target_id,
+                "--validator-nonce",
+                target_nonce,
+                "--resume-nonce",
+                authorization["resume_nonce"] if authorization else "<resume_nonce>",
+                "--agent-handle",
+                prior_agent_handle,
+                "--launch-block",
+                launch_json,
+            )
+            fail = self._controller_command(
+                "fail-batch-validator",
+                "--batch-id",
+                target_id,
+                "--validator-nonce",
+                target_nonce,
+                "--resume-nonce",
+                authorization["resume_nonce"] if authorization else "<resume_nonce>",
+                "--reason",
+                "unknown",
+                "--evidence",
+                "<evidence>",
+            )
+        else:
+            raise AssertionError(f"unknown resume kind {kind}")
+        action = {
+            "prior_agent_handle": prior_agent_handle,
+            "authorize_command": authorize,
+            "register_command": register,
+            "fail_command": fail,
+            "fresh_spawn_fallback": spawn,
+            "host_instructions": "use host resume_agent if needed, then send_input with the launch block, register, and wait_agent",
+        }
+        if authorization is not None:
+            action["resume_nonce"] = authorization["resume_nonce"]
+        return action
+
+    def _resume_next_action(self, action: dict[str, Any], *, authorized: bool) -> str:
+        if authorized:
+            return (
+                f"use host resume_agent on prior handle {action['prior_agent_handle']} if closed, "
+                f"then send_input with the launch block, run {action['register_command']}, and wait_agent; "
+                f"on resume/send failure run {action['fail_command']}"
+            )
+        return (
+            f"resume prior host agent {action['prior_agent_handle']} first: run {action['authorize_command']}, "
+            "then resume_agent if needed and send_input with the launch block; "
+            f"if resume/send is unavailable, use fresh spawn fallback {action['fresh_spawn_fallback']}"
+        )
+
     def _wait_next_action(self, kind: str, payload: dict[str, Any], *, checked_items: list[str] | None = None) -> str:
         handle = payload["agent_handle"]
         if kind == "executor_item":
@@ -4046,14 +4375,34 @@ class OptimPlansState:
             "executor": {"worker_completed", "batch_completed"},
             "validator": {"validator_result_recorded", "batch_validator_result_recorded"},
         }[role]
+        failure_types = {
+            "executor": {"worker_failed", "batch_worker_failed"},
+            "validator": {"validator_failed", "batch_validator_failed"},
+        }[role]
+        config_key = "worker_config_hash" if role == "executor" else "validator_config_hash"
+        bad_handles: set[str] = set()
         for event in reversed(events):
             payload = event.get("payload", {})
             if payload.get("assignment_nonce") == exclude_nonce or payload.get("validator_nonce") == exclude_nonce:
                 continue
-            if event["type"] in registration_types and payload.get(f"{'worker' if role == 'executor' else 'validator'}_config_hash") == config_hash:
+            if event["type"] in failure_types:
+                failed_config = payload.get(config_key)
+                if failed_config is not None and failed_config != config_hash:
+                    continue
+                if role == "validator" and prompt_hash is not None:
+                    failed_prompt = payload.get("validator_prompt_hash")
+                    if failed_prompt is not None and failed_prompt != prompt_hash:
+                        continue
+                failed_handle = payload.get("prior_agent_handle") or payload.get("agent_handle")
+                if isinstance(failed_handle, str):
+                    bad_handles.add(failed_handle)
+                continue
+            if event["type"] in registration_types and payload.get(config_key) == config_hash:
                 if role == "validator" and prompt_hash is not None and payload.get("validator_prompt_hash") != prompt_hash:
                     continue
                 if isinstance(payload.get("agent_handle"), str):
+                    if payload["agent_handle"] in bad_handles:
+                        continue
                     handle = payload["agent_handle"]
                     break
         for event in reversed(events):
@@ -4465,6 +4814,25 @@ class OptimPlansState:
         if registration is not None:
             phase = "validator_agent_registered"
             next_action = self._wait_next_action("validator_item", registration, checked_items=check_ids)
+        elif (
+            resume_authorization := self._latest_resume_authorization(
+                events,
+                "validator_resume_authorized",
+                target_nonce_field="validator_nonce",
+                target_nonce=assignment["validator_nonce"],
+            )
+        ) is not None:
+            phase = "validator_resume_authorized"
+            prior_handle = resume_authorization["prior_agent_handle"]
+            resume_action = self._resume_action(
+                kind="validator_item",
+                target_id=item["id"],
+                target_nonce=assignment["validator_nonce"],
+                prior_agent_handle=prior_handle,
+                launch_block=launch_block,
+                authorization=resume_authorization,
+            )
+            next_action = self._resume_next_action(resume_action, authorized=True)
         elif self._latest_validator_host_authorization(events, validator_nonce=assignment["validator_nonce"]) is not None:
             phase = "validator_spawn_authorized"
         response = {
@@ -4476,6 +4844,16 @@ class OptimPlansState:
         }
         if next_action is not None:
             response["next_action"] = next_action
+        prior_handle = launch_block.get("prior_validator_agent_handle")
+        if isinstance(prior_handle, str) and prior_handle and phase in {"validator_assigned", "validator_resume_authorized"}:
+            response["resume_action"] = resume_action if "resume_action" in locals() else self._resume_action(
+                kind="validator_item",
+                target_id=item["id"],
+                target_nonce=assignment["validator_nonce"],
+                prior_agent_handle=prior_handle,
+                launch_block=launch_block,
+            )
+            response.setdefault("next_action", self._resume_next_action(response["resume_action"], authorized=False))
         return response
 
     def _assign_validator_locked(
@@ -4552,6 +4930,25 @@ class OptimPlansState:
         if registration is not None:
             phase = "validator_agent_registered"
             next_action = self._wait_next_action("validator_batch", registration, checked_items=check_ids)
+        elif (
+            resume_authorization := self._latest_resume_authorization(
+                events,
+                "batch_validator_resume_authorized",
+                target_nonce_field="validator_nonce",
+                target_nonce=assignment["validator_nonce"],
+            )
+        ) is not None:
+            phase = "validator_resume_authorized"
+            prior_handle = resume_authorization["prior_agent_handle"]
+            resume_action = self._resume_action(
+                kind="validator_batch",
+                target_id=assignment["batch_id"],
+                target_nonce=assignment["validator_nonce"],
+                prior_agent_handle=prior_handle,
+                launch_block=launch_block,
+                authorization=resume_authorization,
+            )
+            next_action = self._resume_next_action(resume_action, authorized=True)
         elif self._latest_batch_validator_host_authorization(events, validator_nonce=assignment["validator_nonce"]) is not None:
             phase = "validator_spawn_authorized"
         response = {
@@ -4563,6 +4960,16 @@ class OptimPlansState:
         }
         if next_action is not None:
             response["next_action"] = next_action
+        prior_handle = launch_block.get("prior_validator_agent_handle")
+        if isinstance(prior_handle, str) and prior_handle and phase in {"validator_assigned", "validator_resume_authorized"}:
+            response["resume_action"] = resume_action if "resume_action" in locals() else self._resume_action(
+                kind="validator_batch",
+                target_id=assignment["batch_id"],
+                target_nonce=assignment["validator_nonce"],
+                prior_agent_handle=prior_handle,
+                launch_block=launch_block,
+            )
+            response.setdefault("next_action", self._resume_next_action(response["resume_action"], authorized=False))
         return response
 
     def _assign_batch_validator_locked(
@@ -4669,6 +5076,25 @@ class OptimPlansState:
                 if registration is not None:
                     phase = "agent_registered"
                     next_action = self._wait_next_action("executor_item", registration)
+                elif (
+                    resume_authorization := self._latest_resume_authorization(
+                        events,
+                        "host_resume_authorized",
+                        target_nonce_field="assignment_nonce",
+                        target_nonce=start["assignment_nonce"],
+                    )
+                ) is not None:
+                    phase = "resume_authorized"
+                    prior_handle = resume_authorization["prior_agent_handle"]
+                    resume_action = self._resume_action(
+                        kind="executor_item",
+                        target_id=item["id"],
+                        target_nonce=start["assignment_nonce"],
+                        prior_agent_handle=prior_handle,
+                        launch_block=launch_block,
+                        authorization=resume_authorization,
+                    )
+                    next_action = self._resume_next_action(resume_action, authorized=True)
                 elif self._latest_host_authorization(events, assignment_nonce=start["assignment_nonce"]) is not None:
                     phase = "spawn_authorized"
                 else:
@@ -4687,6 +5113,21 @@ class OptimPlansState:
         }
         if next_action is not None:
             response["next_action"] = next_action
+        prior_handle = launch_block.get("prior_executor_agent_handle")
+        if (
+            isinstance(prior_handle, str)
+            and prior_handle
+            and phase in {"assigned", "resume_authorized"}
+            and worker_config.get("mode") == "host-multi-agent"
+        ):
+            response["resume_action"] = resume_action if "resume_action" in locals() else self._resume_action(
+                kind="executor_item",
+                target_id=item["id"],
+                target_nonce=start["assignment_nonce"],
+                prior_agent_handle=prior_handle,
+                launch_block=launch_block,
+            )
+            response.setdefault("next_action", self._resume_next_action(response["resume_action"], authorized=False))
         return response
 
     def _foreground_next_action(self, start: dict[str, Any]) -> str:
@@ -4841,6 +5282,25 @@ class OptimPlansState:
             if registration is not None:
                 phase = "agent_registered"
                 next_action = self._wait_next_action("executor_batch", registration)
+            elif (
+                resume_authorization := self._latest_resume_authorization(
+                    events,
+                    "batch_host_resume_authorized",
+                    target_nonce_field="assignment_nonce",
+                    target_nonce=start["assignment_nonce"],
+                )
+            ) is not None:
+                phase = "resume_authorized"
+                prior_handle = resume_authorization["prior_agent_handle"]
+                resume_action = self._resume_action(
+                    kind="executor_batch",
+                    target_id=start["batch_id"],
+                    target_nonce=start["assignment_nonce"],
+                    prior_agent_handle=prior_handle,
+                    launch_block=launch_block,
+                    authorization=resume_authorization,
+                )
+                next_action = self._resume_next_action(resume_action, authorized=True)
             elif self._latest_batch_host_authorization(events, assignment_nonce=start["assignment_nonce"]) is not None:
                 phase = "spawn_authorized"
             else:
@@ -4859,6 +5319,16 @@ class OptimPlansState:
         }
         if next_action is not None:
             response["next_action"] = next_action
+        prior_handle = launch_block.get("prior_executor_agent_handle")
+        if isinstance(prior_handle, str) and prior_handle and phase in {"assigned", "resume_authorized"}:
+            response["resume_action"] = resume_action if "resume_action" in locals() else self._resume_action(
+                kind="executor_batch",
+                target_id=start["batch_id"],
+                target_nonce=start["assignment_nonce"],
+                prior_agent_handle=prior_handle,
+                launch_block=launch_block,
+            )
+            response.setdefault("next_action", self._resume_next_action(response["resume_action"], authorized=False))
         return response
 
     def _begin_batch_locked(
@@ -5012,19 +5482,73 @@ class OptimPlansState:
             }
             return self._append_event_locked("batch_host_spawn_authorized", payload)["payload"]
 
+    def authorize_batch_resume(
+        self,
+        batch_id: str,
+        assignment_nonce: str,
+        prior_agent_handle: str,
+        launch_block: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(prior_agent_handle, str) or not prior_agent_handle.strip():
+            raise ContractError("prior agent handle is required")
+        if not isinstance(launch_block, dict):
+            raise ContractError("launch block must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing"}, "authorize-batch-resume")
+            record = self._execution_manifest_record(replayed.events)
+            start, worker_config = self._require_host_batch_assignment_locked(replayed.events, record["manifest"], batch_id, assignment_nonce)
+            expected = self._host_batch_launch_block(
+                batch_id=batch_id,
+                item_ids=list(start["item_ids"]),
+                start=start,
+                worker_config=worker_config,
+            )
+            if launch_block != expected:
+                raise ContractError("host launch block does not match the approved batch assignment")
+            if launch_block.get("prior_executor_agent_handle") != prior_agent_handle:
+                raise ContractError("prior agent handle does not match the approved batch launch block")
+            if self._latest_batch_host_registration(replayed.events, assignment_nonce=assignment_nonce) is not None:
+                raise ContractError("host agent is already registered for this batch assignment")
+            launch_block_hash = stable_json_hash(launch_block)
+            existing = self._latest_resume_authorization(
+                replayed.events,
+                "batch_host_resume_authorized",
+                target_nonce_field="assignment_nonce",
+                target_nonce=assignment_nonce,
+            )
+            if existing is not None:
+                if existing.get("launch_block_hash") != launch_block_hash or existing.get("prior_agent_handle") != prior_agent_handle:
+                    raise ContractError("active batch host resume authorization is bound to a different launch block or prior handle")
+                return existing
+            payload = {
+                "batch_id": batch_id,
+                "item_ids": list(start["item_ids"]),
+                "attempt": start["attempt"],
+                "assignment_nonce": assignment_nonce,
+                "resume_nonce": uuid.uuid4().hex,
+                "prior_agent_handle": prior_agent_handle,
+                "worker_config_hash": stable_json_hash(worker_config),
+                "prompt_hash": worker_config.get("prompt_hash"),
+                "launch_block_hash": launch_block_hash,
+                "launch_block": launch_block,
+            }
+            return self._append_event_locked("batch_host_resume_authorized", payload)["payload"]
+
     def register_batch_agent(
         self,
         batch_id: str,
         *,
         assignment_nonce: str,
-        launch_nonce: str,
+        launch_nonce: str | None = None,
+        resume_nonce: str | None = None,
         agent_handle: str,
         launch_block: dict[str, Any],
     ) -> dict[str, Any]:
         if not isinstance(agent_handle, str) or not agent_handle.strip():
             raise ContractError("agent handle is required")
-        if not isinstance(launch_nonce, str) or not launch_nonce.strip():
-            raise ContractError("launch nonce is required")
+        if (launch_nonce is None) == (resume_nonce is None):
+            raise ContractError("exactly one of launch nonce or resume nonce is required")
         if not isinstance(launch_block, dict):
             raise ContractError("launch block must be a JSON object")
         with self.controller_lock():
@@ -5040,30 +5564,50 @@ class OptimPlansState:
             )
             if launch_block != expected:
                 raise ContractError("host launch block does not match the approved batch assignment")
-            authorization = self._latest_batch_host_authorization(
-                replayed.events,
-                assignment_nonce=assignment_nonce,
-                launch_nonce=launch_nonce,
-            )
-            if authorization is None:
-                raise ContractError("unknown or stale host launch nonce")
-            if authorization.get("launch_block_hash") != stable_json_hash(launch_block):
-                raise ContractError("host launch nonce is not bound to this launch block")
-            if any(
-                event["type"] == "batch_agent_registered"
-                and event.get("payload", {}).get("launch_nonce") == launch_nonce
-                for event in replayed.events
-            ):
-                raise ContractError("host launch nonce is stale or already used")
+            if resume_nonce is not None:
+                authorization = self._require_resume_authorization(
+                    replayed.events,
+                    "batch_host_resume_authorized",
+                    target_nonce_field="assignment_nonce",
+                    target_nonce=assignment_nonce,
+                    resume_nonce=resume_nonce,
+                    launch_block=launch_block,
+                    agent_handle=agent_handle,
+                    label="host",
+                )
+                nonce_payload = {
+                    "resume_nonce": resume_nonce,
+                    "prior_agent_handle": authorization["prior_agent_handle"],
+                    "resumed": True,
+                }
+            else:
+                if not isinstance(launch_nonce, str) or not launch_nonce.strip():
+                    raise ContractError("launch nonce is required")
+                authorization = self._latest_batch_host_authorization(
+                    replayed.events,
+                    assignment_nonce=assignment_nonce,
+                    launch_nonce=launch_nonce,
+                )
+                if authorization is None:
+                    raise ContractError("unknown or stale host launch nonce")
+                if authorization.get("launch_block_hash") != stable_json_hash(launch_block):
+                    raise ContractError("host launch nonce is not bound to this launch block")
+                if any(
+                    event["type"] == "batch_agent_registered"
+                    and event.get("payload", {}).get("launch_nonce") == launch_nonce
+                    for event in replayed.events
+                ):
+                    raise ContractError("host launch nonce is stale or already used")
+                nonce_payload = {"launch_nonce": launch_nonce}
             payload = {
                 "batch_id": batch_id,
                 "item_ids": list(start["item_ids"]),
                 "attempt": start["attempt"],
                 "assignment_nonce": assignment_nonce,
-                "launch_nonce": launch_nonce,
                 "agent_handle": agent_handle,
                 "worker_config_hash": stable_json_hash(worker_config),
                 "launch_block_hash": stable_json_hash(launch_block),
+                **nonce_payload,
             }
             registered = self._append_event_locked("batch_agent_registered", payload)["payload"]
             return {**registered, "next_action": self._wait_next_action("executor_batch", registered)}
@@ -5115,8 +5659,8 @@ class OptimPlansState:
                 "attempt": start["attempt"],
                 "assignment_nonce": assignment_nonce,
                 "agent_handle": agent_handle,
-                "launch_nonce": registration["launch_nonce"],
                 "evidence": bounded_evidence(evidence),
+                **self._registration_nonce_payload(registration),
             }
             return self._append_event_locked("batch_completed", payload)["payload"]
 
@@ -5127,10 +5671,14 @@ class OptimPlansState:
         assignment_nonce: str,
         agent_handle: str | None = None,
         launch_nonce: str | None = None,
+        resume_nonce: str | None = None,
+        resume_failure_kind: str = "resume_or_send",
         evidence: str,
     ) -> dict[str, Any]:
         if not evidence.strip():
             raise ContractError("worker failure evidence is required")
+        if not isinstance(resume_failure_kind, str) or not resume_failure_kind.strip():
+            raise ContractError("resume failure kind is required")
         with self.controller_lock():
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
@@ -5142,38 +5690,66 @@ class OptimPlansState:
                     assignment_nonce=assignment_nonce,
                     agent_handle=agent_handle,
                 )
+                if launch_nonce is not None and registration.get("launch_nonce") != launch_nonce:
+                    raise ContractError("host launch nonce does not match registered batch agent")
+                if resume_nonce is not None and registration.get("resume_nonce") != resume_nonce:
+                    raise ContractError("host resume nonce does not match registered batch agent")
                 extra = {
                     "assignment_nonce": assignment_nonce,
                     "agent_handle": agent_handle,
-                    "launch_nonce": registration["launch_nonce"],
+                    "worker_config_hash": registration["worker_config_hash"],
+                    **self._registration_nonce_payload(registration),
                 }
+                if registration.get("resumed") is True:
+                    extra["resume_failure_kind"] = "wait_agent"
             else:
-                if not isinstance(launch_nonce, str) or not launch_nonce.strip():
-                    raise ContractError("launch nonce is required when failing a host batch without an agent handle")
-                start, _worker_config = self._require_host_batch_assignment_locked(
+                if (launch_nonce is None) == (resume_nonce is None):
+                    raise ContractError("exactly one of launch nonce or resume nonce is required when failing a host batch without an agent handle")
+                start, worker_config = self._require_host_batch_assignment_locked(
                     replayed.events,
                     record["manifest"],
                     batch_id,
                     assignment_nonce,
                 )
-                authorization = self._latest_batch_host_authorization(
-                    replayed.events,
-                    assignment_nonce=assignment_nonce,
-                    launch_nonce=launch_nonce,
-                )
-                if authorization is None:
-                    raise ContractError("unknown or stale host launch nonce")
-                if any(
-                    event["type"] == "batch_agent_registered"
-                    and event.get("payload", {}).get("launch_nonce") == launch_nonce
-                    for event in replayed.events
-                ):
-                    raise ContractError("agent handle is required after host launch nonce registration")
-                extra = {
-                    "assignment_nonce": assignment_nonce,
-                    "launch_nonce": launch_nonce,
-                    "agent_handle_lost": True,
-                }
+                if resume_nonce is not None:
+                    expected = self._host_batch_launch_block(
+                        batch_id=batch_id,
+                        item_ids=list(start["item_ids"]),
+                        start=start,
+                        worker_config=worker_config,
+                    )
+                    authorization = self._require_resume_authorization(
+                        replayed.events,
+                        "batch_host_resume_authorized",
+                        target_nonce_field="assignment_nonce",
+                        target_nonce=assignment_nonce,
+                        resume_nonce=resume_nonce,
+                        expected_launch_block_hash=stable_json_hash(expected),
+                        label="host",
+                    )
+                    extra = self._resume_failure_metadata(authorization, failure_kind=resume_failure_kind.strip())
+                else:
+                    if not isinstance(launch_nonce, str) or not launch_nonce.strip():
+                        raise ContractError("launch nonce is required when failing a host batch without an agent handle")
+                    authorization = self._latest_batch_host_authorization(
+                        replayed.events,
+                        assignment_nonce=assignment_nonce,
+                        launch_nonce=launch_nonce,
+                    )
+                    if authorization is None:
+                        raise ContractError("unknown or stale host launch nonce")
+                    if any(
+                        event["type"] == "batch_agent_registered"
+                        and event.get("payload", {}).get("launch_nonce") == launch_nonce
+                        for event in replayed.events
+                    ):
+                        raise ContractError("agent handle is required after host launch nonce registration")
+                    extra = {
+                        "assignment_nonce": assignment_nonce,
+                        "launch_nonce": launch_nonce,
+                        "worker_config_hash": stable_json_hash(worker_config),
+                        "agent_handle_lost": True,
+                    }
             return self._record_batch_attempt_failure_locked(
                 "batch_worker_failed",
                 batch_id,
@@ -5246,19 +5822,79 @@ class OptimPlansState:
             }
             return self._append_event_locked("validator_spawn_authorized", payload)["payload"]
 
+    def authorize_validator_resume(
+        self,
+        item_id: str,
+        validator_nonce: str,
+        prior_agent_handle: str,
+        launch_block: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(prior_agent_handle, str) or not prior_agent_handle.strip():
+            raise ContractError("prior validator agent handle is required")
+        if not isinstance(launch_block, dict):
+            raise ContractError("validator launch block must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing", "validating"}, "authorize-validator-resume")
+            record = self._execution_manifest_record(replayed.events)
+            item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "authorize-validator-resume")
+            validator_config = self._validator_config(record["manifest"])
+            if validator_config.get("mode") != "host-multi-agent":
+                raise ContractError("validator is not configured for host-multi-agent execution")
+            assignment = self._require_validator_assignment_locked(replayed.events, record["manifest"], item, validator_nonce)
+            expected = self._validator_launch_block(
+                assignment=assignment,
+                validator_config=validator_config,
+                validator_prompt=record["manifest"]["validator_prompt"],
+                check_ids=self._item_validator_check_ids(item),
+            )
+            if launch_block != expected:
+                raise ContractError("validator launch block does not match the approved validator assignment")
+            if launch_block.get("prior_validator_agent_handle") != prior_agent_handle:
+                raise ContractError("prior validator agent handle does not match the approved validator launch block")
+            if self._latest_validator_host_registration(replayed.events, validator_nonce=validator_nonce) is not None:
+                raise ContractError("validator agent is already registered for this assignment")
+            launch_block_hash = stable_json_hash(launch_block)
+            existing = self._latest_resume_authorization(
+                replayed.events,
+                "validator_resume_authorized",
+                target_nonce_field="validator_nonce",
+                target_nonce=validator_nonce,
+            )
+            if existing is not None:
+                if existing.get("launch_block_hash") != launch_block_hash or existing.get("prior_agent_handle") != prior_agent_handle:
+                    raise ContractError("active validator resume authorization is bound to a different launch block or prior handle")
+                return existing
+            payload = {
+                "item_id": item_id,
+                "attempt": assignment["attempt"],
+                "validator_nonce": validator_nonce,
+                "resume_nonce": uuid.uuid4().hex,
+                "prior_agent_handle": prior_agent_handle,
+                "validator_config_hash": assignment["validator_config_hash"],
+                "validator_prompt_hash": assignment["validator_prompt_hash"],
+                "prompt_hash": validator_config.get("prompt_hash"),
+                "delta_fingerprint": assignment["delta_fingerprint"],
+                "launch_block_hash": launch_block_hash,
+                "launch_block": launch_block,
+            }
+            return self._append_event_locked("validator_resume_authorized", payload)["payload"]
+
     def register_validator_agent(
         self,
         item_id: str,
         *,
         validator_nonce: str,
-        launch_nonce: str,
+        launch_nonce: str | None = None,
+        resume_nonce: str | None = None,
         agent_handle: str,
         launch_block: dict[str, Any],
     ) -> dict[str, Any]:
         if not isinstance(agent_handle, str) or not agent_handle.strip():
             raise ContractError("validator agent handle is required")
-        if not isinstance(launch_nonce, str) or not launch_nonce.strip():
-            raise ContractError("validator launch nonce is required")
+        if (launch_nonce is None) == (resume_nonce is None):
+            raise ContractError("exactly one of validator launch nonce or resume nonce is required")
         if not isinstance(launch_block, dict):
             raise ContractError("validator launch block must be a JSON object")
         with self.controller_lock():
@@ -5277,31 +5913,51 @@ class OptimPlansState:
             )
             if launch_block != expected:
                 raise ContractError("validator launch block does not match the approved validator assignment")
-            authorization = self._latest_validator_host_authorization(
-                replayed.events,
-                validator_nonce=validator_nonce,
-                launch_nonce=launch_nonce,
-            )
-            if authorization is None:
-                raise ContractError("unknown or stale validator launch nonce")
-            if authorization.get("launch_block_hash") != stable_json_hash(launch_block):
-                raise ContractError("validator launch nonce is not bound to this launch block")
-            if any(
-                event["type"] == "validator_agent_registered"
-                and event.get("payload", {}).get("launch_nonce") == launch_nonce
-                for event in replayed.events
-            ):
-                raise ContractError("validator launch nonce is stale or already used")
+            if resume_nonce is not None:
+                authorization = self._require_resume_authorization(
+                    replayed.events,
+                    "validator_resume_authorized",
+                    target_nonce_field="validator_nonce",
+                    target_nonce=validator_nonce,
+                    resume_nonce=resume_nonce,
+                    launch_block=launch_block,
+                    agent_handle=agent_handle,
+                    label="validator",
+                )
+                nonce_payload = {
+                    "resume_nonce": resume_nonce,
+                    "prior_agent_handle": authorization["prior_agent_handle"],
+                    "resumed": True,
+                }
+            else:
+                if not isinstance(launch_nonce, str) or not launch_nonce.strip():
+                    raise ContractError("validator launch nonce is required")
+                authorization = self._latest_validator_host_authorization(
+                    replayed.events,
+                    validator_nonce=validator_nonce,
+                    launch_nonce=launch_nonce,
+                )
+                if authorization is None:
+                    raise ContractError("unknown or stale validator launch nonce")
+                if authorization.get("launch_block_hash") != stable_json_hash(launch_block):
+                    raise ContractError("validator launch nonce is not bound to this launch block")
+                if any(
+                    event["type"] == "validator_agent_registered"
+                    and event.get("payload", {}).get("launch_nonce") == launch_nonce
+                    for event in replayed.events
+                ):
+                    raise ContractError("validator launch nonce is stale or already used")
+                nonce_payload = {"launch_nonce": launch_nonce}
             payload = {
                 "item_id": item_id,
                 "attempt": assignment["attempt"],
                 "validator_nonce": validator_nonce,
-                "launch_nonce": launch_nonce,
                 "agent_handle": agent_handle,
                 "validator_config_hash": assignment["validator_config_hash"],
                 "validator_prompt_hash": assignment["validator_prompt_hash"],
                 "delta_fingerprint": assignment["delta_fingerprint"],
                 "launch_block_hash": stable_json_hash(launch_block),
+                **nonce_payload,
             }
             registered = self._append_event_locked("validator_agent_registered", payload)["payload"]
             return {
@@ -5374,19 +6030,79 @@ class OptimPlansState:
             }
             return self._append_event_locked("batch_validator_spawn_authorized", payload)["payload"]
 
+    def authorize_batch_validator_resume(
+        self,
+        batch_id: str,
+        validator_nonce: str,
+        prior_agent_handle: str,
+        launch_block: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(prior_agent_handle, str) or not prior_agent_handle.strip():
+            raise ContractError("prior validator agent handle is required")
+        if not isinstance(launch_block, dict):
+            raise ContractError("validator launch block must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing", "validating"}, "authorize-batch-validator-resume")
+            record = self._execution_manifest_record(replayed.events)
+            validator_config = self._validator_config(record["manifest"])
+            if validator_config.get("mode") != "host-multi-agent":
+                raise ContractError("validator is not configured for host-multi-agent execution")
+            assignment = self._require_batch_validator_assignment_locked(replayed.events, record["manifest"], batch_id, validator_nonce)
+            expected = self._batch_validator_launch_block(
+                assignment=assignment,
+                validator_config=validator_config,
+                validator_prompt=record["manifest"]["validator_prompt"],
+                check_ids=self._batch_validator_check_ids(self._batch_items(record["manifest"], list(assignment["item_ids"]))),
+            )
+            if launch_block != expected:
+                raise ContractError("validator launch block does not match the approved batch validator assignment")
+            if launch_block.get("prior_validator_agent_handle") != prior_agent_handle:
+                raise ContractError("prior validator agent handle does not match the approved batch validator launch block")
+            if self._latest_batch_validator_host_registration(replayed.events, validator_nonce=validator_nonce) is not None:
+                raise ContractError("validator agent is already registered for this batch assignment")
+            launch_block_hash = stable_json_hash(launch_block)
+            existing = self._latest_resume_authorization(
+                replayed.events,
+                "batch_validator_resume_authorized",
+                target_nonce_field="validator_nonce",
+                target_nonce=validator_nonce,
+            )
+            if existing is not None:
+                if existing.get("launch_block_hash") != launch_block_hash or existing.get("prior_agent_handle") != prior_agent_handle:
+                    raise ContractError("active batch validator resume authorization is bound to a different launch block or prior handle")
+                return existing
+            payload = {
+                "batch_id": batch_id,
+                "item_ids": list(assignment["item_ids"]),
+                "attempt": assignment["attempt"],
+                "assignment_nonce": assignment["assignment_nonce"],
+                "validator_nonce": validator_nonce,
+                "resume_nonce": uuid.uuid4().hex,
+                "prior_agent_handle": prior_agent_handle,
+                "validator_config_hash": assignment["validator_config_hash"],
+                "validator_prompt_hash": assignment["validator_prompt_hash"],
+                "prompt_hash": validator_config.get("prompt_hash"),
+                "delta_fingerprint": assignment["delta_fingerprint"],
+                "launch_block_hash": launch_block_hash,
+                "launch_block": launch_block,
+            }
+            return self._append_event_locked("batch_validator_resume_authorized", payload)["payload"]
+
     def register_batch_validator_agent(
         self,
         batch_id: str,
         *,
         validator_nonce: str,
-        launch_nonce: str,
+        launch_nonce: str | None = None,
+        resume_nonce: str | None = None,
         agent_handle: str,
         launch_block: dict[str, Any],
     ) -> dict[str, Any]:
         if not isinstance(agent_handle, str) or not agent_handle.strip():
             raise ContractError("validator agent handle is required")
-        if not isinstance(launch_nonce, str) or not launch_nonce.strip():
-            raise ContractError("validator launch nonce is required")
+        if (launch_nonce is None) == (resume_nonce is None):
+            raise ContractError("exactly one of validator launch nonce or resume nonce is required")
         if not isinstance(launch_block, dict):
             raise ContractError("validator launch block must be a JSON object")
         with self.controller_lock():
@@ -5403,33 +6119,53 @@ class OptimPlansState:
             )
             if launch_block != expected:
                 raise ContractError("validator launch block does not match the approved batch validator assignment")
-            authorization = self._latest_batch_validator_host_authorization(
-                replayed.events,
-                validator_nonce=validator_nonce,
-                launch_nonce=launch_nonce,
-            )
-            if authorization is None:
-                raise ContractError("unknown or stale validator launch nonce")
-            if authorization.get("launch_block_hash") != stable_json_hash(launch_block):
-                raise ContractError("validator launch nonce is not bound to this launch block")
-            if any(
-                event["type"] == "batch_validator_agent_registered"
-                and event.get("payload", {}).get("launch_nonce") == launch_nonce
-                for event in replayed.events
-            ):
-                raise ContractError("validator launch nonce is stale or already used")
+            if resume_nonce is not None:
+                authorization = self._require_resume_authorization(
+                    replayed.events,
+                    "batch_validator_resume_authorized",
+                    target_nonce_field="validator_nonce",
+                    target_nonce=validator_nonce,
+                    resume_nonce=resume_nonce,
+                    launch_block=launch_block,
+                    agent_handle=agent_handle,
+                    label="validator",
+                )
+                nonce_payload = {
+                    "resume_nonce": resume_nonce,
+                    "prior_agent_handle": authorization["prior_agent_handle"],
+                    "resumed": True,
+                }
+            else:
+                if not isinstance(launch_nonce, str) or not launch_nonce.strip():
+                    raise ContractError("validator launch nonce is required")
+                authorization = self._latest_batch_validator_host_authorization(
+                    replayed.events,
+                    validator_nonce=validator_nonce,
+                    launch_nonce=launch_nonce,
+                )
+                if authorization is None:
+                    raise ContractError("unknown or stale validator launch nonce")
+                if authorization.get("launch_block_hash") != stable_json_hash(launch_block):
+                    raise ContractError("validator launch nonce is not bound to this launch block")
+                if any(
+                    event["type"] == "batch_validator_agent_registered"
+                    and event.get("payload", {}).get("launch_nonce") == launch_nonce
+                    for event in replayed.events
+                ):
+                    raise ContractError("validator launch nonce is stale or already used")
+                nonce_payload = {"launch_nonce": launch_nonce}
             payload = {
                 "batch_id": batch_id,
                 "item_ids": list(assignment["item_ids"]),
                 "attempt": assignment["attempt"],
                 "assignment_nonce": assignment["assignment_nonce"],
                 "validator_nonce": validator_nonce,
-                "launch_nonce": launch_nonce,
                 "agent_handle": agent_handle,
                 "validator_config_hash": assignment["validator_config_hash"],
                 "validator_prompt_hash": assignment["validator_prompt_hash"],
                 "delta_fingerprint": assignment["delta_fingerprint"],
                 "launch_block_hash": stable_json_hash(launch_block),
+                **nonce_payload,
             }
             registered = self._append_event_locked("batch_validator_agent_registered", payload)["payload"]
             return {
@@ -5731,7 +6467,7 @@ class OptimPlansState:
                     start=start,
                 )
             if registration is not None:
-                payload.update({"agent_handle": agent_handle, "launch_nonce": registration["launch_nonce"]})
+                payload.update({"agent_handle": agent_handle, **self._registration_nonce_payload(registration)})
             if payload["status"] == "fail":
                 payload["retryable"] = True
             recorded = self._append_event_locked("validator_result_recorded", payload)["payload"]
@@ -5805,7 +6541,7 @@ class OptimPlansState:
                     start=start,
                 )
             if registration is not None:
-                payload.update({"agent_handle": agent_handle, "launch_nonce": registration["launch_nonce"]})
+                payload.update({"agent_handle": agent_handle, **self._registration_nonce_payload(registration)})
             if payload["status"] == "fail":
                 payload["retryable"] = True
             recorded = self._append_event_locked("batch_validator_result_recorded", payload)["payload"]
@@ -5826,10 +6562,16 @@ class OptimPlansState:
         validator_nonce: str | None = None,
         agent_handle: str | None = None,
         launch_nonce: str | None = None,
+        resume_nonce: str | None = None,
+        resume_failure_kind: str = "resume_or_send",
         evidence: str = "",
     ) -> dict[str, Any]:
         if reason not in {"process", "crash", "timeout", "interrupted", "unknown"}:
             raise ContractError("validator failure reason must be process, crash, timeout, interrupted, or unknown")
+        if launch_nonce is not None and resume_nonce is not None:
+            raise ContractError("exactly one of validator launch nonce or resume nonce is allowed")
+        if not isinstance(resume_failure_kind, str) or not resume_failure_kind.strip():
+            raise ContractError("resume failure kind is required")
         with self.controller_lock():
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
@@ -5857,7 +6599,13 @@ class OptimPlansState:
                 )
                 if registration is None:
                     raise ContractError("registered validator agent handle does not match active assignment")
-                extra.update({"agent_handle": agent_handle, "launch_nonce": registration["launch_nonce"]})
+                if launch_nonce is not None and registration.get("launch_nonce") != launch_nonce:
+                    raise ContractError("validator launch nonce does not match registered agent")
+                if resume_nonce is not None and registration.get("resume_nonce") != resume_nonce:
+                    raise ContractError("validator resume nonce does not match registered agent")
+                extra.update({"agent_handle": agent_handle, **self._registration_nonce_payload(registration)})
+                if registration.get("resumed") is True:
+                    extra["resume_failure_kind"] = "wait_agent"
             elif launch_nonce is not None:
                 authorization = self._latest_validator_host_authorization(
                     replayed.events,
@@ -5867,6 +6615,24 @@ class OptimPlansState:
                 if authorization is None:
                     raise ContractError("unknown or stale validator launch nonce")
                 extra.update({"launch_nonce": launch_nonce, "agent_handle_lost": True})
+            elif resume_nonce is not None:
+                validator_config = self._validator_config(record["manifest"])
+                expected = self._validator_launch_block(
+                    assignment=assignment,
+                    validator_config=validator_config,
+                    validator_prompt=record["manifest"]["validator_prompt"],
+                    check_ids=self._item_validator_check_ids(item),
+                )
+                authorization = self._require_resume_authorization(
+                    replayed.events,
+                    "validator_resume_authorized",
+                    target_nonce_field="validator_nonce",
+                    target_nonce=assignment["validator_nonce"],
+                    resume_nonce=resume_nonce,
+                    expected_launch_block_hash=stable_json_hash(expected),
+                    label="validator",
+                )
+                extra.update(self._resume_failure_metadata(authorization, failure_kind=resume_failure_kind.strip()))
             recovery = self._record_context_integrity_recovery_locked(item_id, assignment=assignment, start=start)
             if recovery is not None:
                 return recovery
@@ -5886,10 +6652,16 @@ class OptimPlansState:
         validator_nonce: str | None = None,
         agent_handle: str | None = None,
         launch_nonce: str | None = None,
+        resume_nonce: str | None = None,
+        resume_failure_kind: str = "resume_or_send",
         evidence: str = "",
     ) -> dict[str, Any]:
         if reason not in {"process", "crash", "timeout", "interrupted", "unknown"}:
             raise ContractError("validator failure reason must be process, crash, timeout, interrupted, or unknown")
+        if launch_nonce is not None and resume_nonce is not None:
+            raise ContractError("exactly one of validator launch nonce or resume nonce is allowed")
+        if not isinstance(resume_failure_kind, str) or not resume_failure_kind.strip():
+            raise ContractError("resume failure kind is required")
         with self.controller_lock():
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
@@ -5916,7 +6688,13 @@ class OptimPlansState:
                 )
                 if registration is None:
                     raise ContractError("registered validator agent handle does not match active assignment")
-                extra.update({"agent_handle": agent_handle, "launch_nonce": registration["launch_nonce"]})
+                if launch_nonce is not None and registration.get("launch_nonce") != launch_nonce:
+                    raise ContractError("validator launch nonce does not match registered batch agent")
+                if resume_nonce is not None and registration.get("resume_nonce") != resume_nonce:
+                    raise ContractError("validator resume nonce does not match registered batch agent")
+                extra.update({"agent_handle": agent_handle, **self._registration_nonce_payload(registration)})
+                if registration.get("resumed") is True:
+                    extra["resume_failure_kind"] = "wait_agent"
             elif launch_nonce is not None:
                 authorization = self._latest_batch_validator_host_authorization(
                     replayed.events,
@@ -5926,6 +6704,24 @@ class OptimPlansState:
                 if authorization is None:
                     raise ContractError("unknown or stale validator launch nonce")
                 extra.update({"launch_nonce": launch_nonce, "agent_handle_lost": True})
+            elif resume_nonce is not None:
+                validator_config = self._validator_config(record["manifest"])
+                expected = self._batch_validator_launch_block(
+                    assignment=assignment,
+                    validator_config=validator_config,
+                    validator_prompt=record["manifest"]["validator_prompt"],
+                    check_ids=self._batch_validator_check_ids(self._batch_items(record["manifest"], list(assignment["item_ids"]))),
+                )
+                authorization = self._require_resume_authorization(
+                    replayed.events,
+                    "batch_validator_resume_authorized",
+                    target_nonce_field="validator_nonce",
+                    target_nonce=assignment["validator_nonce"],
+                    resume_nonce=resume_nonce,
+                    expected_launch_block_hash=stable_json_hash(expected),
+                    label="validator",
+                )
+                extra.update(self._resume_failure_metadata(authorization, failure_kind=resume_failure_kind.strip()))
             recovery = self._record_batch_context_integrity_recovery_locked(batch_id, assignment=assignment, start=start)
             if recovery is not None:
                 return recovery
@@ -6147,19 +6943,70 @@ class OptimPlansState:
             }
             return self._append_event_locked("host_spawn_authorized", payload)["payload"]
 
+    def authorize_resume(
+        self,
+        item_id: str,
+        assignment_nonce: str,
+        prior_agent_handle: str,
+        launch_block: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(prior_agent_handle, str) or not prior_agent_handle.strip():
+            raise ContractError("prior agent handle is required")
+        if not isinstance(launch_block, dict):
+            raise ContractError("launch block must be a JSON object")
+        with self.controller_lock():
+            replayed = self.replay()
+            self._require_lifecycle_locked(replayed.events, {"executing"}, "authorize-resume")
+            record = self._execution_manifest_record(replayed.events)
+            item = self._manifest_item(record["manifest"], item_id)
+            self._reject_item_command_if_batch_member(replayed.events, item_id, "authorize-resume")
+            worker_config = self._require_host_worker_config(record["manifest"], item)
+            start = self._require_host_assignment_locked(replayed.events, record["manifest"], item, assignment_nonce)
+            expected = self._host_launch_block(item_id=item_id, start=start, worker_config=worker_config)
+            if launch_block != expected:
+                raise ContractError("host launch block does not match the approved item assignment")
+            if launch_block.get("prior_executor_agent_handle") != prior_agent_handle:
+                raise ContractError("prior agent handle does not match the approved item launch block")
+            if self._latest_host_registration(replayed.events, assignment_nonce=assignment_nonce) is not None:
+                raise ContractError("host agent is already registered for this assignment")
+            launch_block_hash = stable_json_hash(launch_block)
+            existing = self._latest_resume_authorization(
+                replayed.events,
+                "host_resume_authorized",
+                target_nonce_field="assignment_nonce",
+                target_nonce=assignment_nonce,
+            )
+            if existing is not None:
+                if existing.get("launch_block_hash") != launch_block_hash or existing.get("prior_agent_handle") != prior_agent_handle:
+                    raise ContractError("active host resume authorization is bound to a different launch block or prior handle")
+                return existing
+            payload = {
+                "item_id": item_id,
+                "attempt": start["attempt"],
+                "assignment_nonce": assignment_nonce,
+                "resume_nonce": uuid.uuid4().hex,
+                "prior_agent_handle": prior_agent_handle,
+                "worker_config_hash": stable_json_hash(worker_config),
+                "prompt_hash": worker_config.get("prompt_hash"),
+                "launch_block_hash": launch_block_hash,
+                "launch_block": launch_block,
+            }
+            return self._append_event_locked("host_resume_authorized", payload)["payload"]
+
     def register_agent(
         self,
         item_id: str,
         *,
         assignment_nonce: str,
-        launch_nonce: str,
+        launch_nonce: str | None = None,
+        resume_nonce: str | None = None,
         agent_handle: str,
         launch_block: dict[str, Any],
     ) -> dict[str, Any]:
         if not isinstance(agent_handle, str) or not agent_handle.strip():
             raise ContractError("agent handle is required")
-        if not isinstance(launch_nonce, str) or not launch_nonce.strip():
-            raise ContractError("launch nonce is required")
+        if (launch_nonce is None) == (resume_nonce is None):
+            raise ContractError("exactly one of launch nonce or resume nonce is required")
         if not isinstance(launch_block, dict):
             raise ContractError("launch block must be a JSON object")
         with self.controller_lock():
@@ -6173,29 +7020,49 @@ class OptimPlansState:
             expected = self._host_launch_block(item_id=item_id, start=start, worker_config=worker_config)
             if launch_block != expected:
                 raise ContractError("host launch block does not match the approved item assignment")
-            authorization = self._latest_host_authorization(
-                replayed.events,
-                assignment_nonce=assignment_nonce,
-                launch_nonce=launch_nonce,
-            )
-            if authorization is None:
-                raise ContractError("unknown or stale host launch nonce")
-            if authorization.get("launch_block_hash") != stable_json_hash(launch_block):
-                raise ContractError("host launch nonce is not bound to this launch block")
-            if any(
-                event["type"] == "host_agent_registered"
-                and event.get("payload", {}).get("launch_nonce") == launch_nonce
-                for event in replayed.events
-            ):
-                raise ContractError("host launch nonce is stale or already used")
+            if resume_nonce is not None:
+                authorization = self._require_resume_authorization(
+                    replayed.events,
+                    "host_resume_authorized",
+                    target_nonce_field="assignment_nonce",
+                    target_nonce=assignment_nonce,
+                    resume_nonce=resume_nonce,
+                    launch_block=launch_block,
+                    agent_handle=agent_handle,
+                    label="host",
+                )
+                nonce_payload = {
+                    "resume_nonce": resume_nonce,
+                    "prior_agent_handle": authorization["prior_agent_handle"],
+                    "resumed": True,
+                }
+            else:
+                if not isinstance(launch_nonce, str) or not launch_nonce.strip():
+                    raise ContractError("launch nonce is required")
+                authorization = self._latest_host_authorization(
+                    replayed.events,
+                    assignment_nonce=assignment_nonce,
+                    launch_nonce=launch_nonce,
+                )
+                if authorization is None:
+                    raise ContractError("unknown or stale host launch nonce")
+                if authorization.get("launch_block_hash") != stable_json_hash(launch_block):
+                    raise ContractError("host launch nonce is not bound to this launch block")
+                if any(
+                    event["type"] == "host_agent_registered"
+                    and event.get("payload", {}).get("launch_nonce") == launch_nonce
+                    for event in replayed.events
+                ):
+                    raise ContractError("host launch nonce is stale or already used")
+                nonce_payload = {"launch_nonce": launch_nonce}
             payload = {
                 "item_id": item_id,
                 "attempt": start["attempt"],
                 "assignment_nonce": assignment_nonce,
-                "launch_nonce": launch_nonce,
                 "agent_handle": agent_handle,
                 "worker_config_hash": stable_json_hash(worker_config),
                 "launch_block_hash": stable_json_hash(launch_block),
+                **nonce_payload,
             }
             registered = self._append_event_locked("host_agent_registered", payload)["payload"]
             return {**registered, "next_action": self._wait_next_action("executor_item", registered)}
@@ -6264,8 +7131,8 @@ class OptimPlansState:
                 "item_id": item_id,
                 "assignment_nonce": assignment_nonce,
                 "agent_handle": agent_handle,
-                "launch_nonce": registration["launch_nonce"],
                 "evidence": bounded_evidence(evidence),
+                **self._registration_nonce_payload(registration),
             }
             return self._append_event_locked("worker_completed", payload)["payload"]
 
@@ -6276,10 +7143,14 @@ class OptimPlansState:
         assignment_nonce: str,
         agent_handle: str | None = None,
         launch_nonce: str | None = None,
+        resume_nonce: str | None = None,
+        resume_failure_kind: str = "resume_or_send",
         evidence: str,
     ) -> dict[str, Any]:
         if not evidence.strip():
             raise ContractError("worker failure evidence is required")
+        if not isinstance(resume_failure_kind, str) or not resume_failure_kind.strip():
+            raise ContractError("resume failure kind is required")
         with self.controller_lock():
             replayed = self.replay()
             record = self._execution_manifest_record(replayed.events)
@@ -6302,33 +7173,56 @@ class OptimPlansState:
                     assignment_nonce=assignment_nonce,
                     agent_handle=agent_handle,
                 )
+                if launch_nonce is not None and registration.get("launch_nonce") != launch_nonce:
+                    raise ContractError("host launch nonce does not match registered agent")
+                if resume_nonce is not None and registration.get("resume_nonce") != resume_nonce:
+                    raise ContractError("host resume nonce does not match registered agent")
                 extra = {
                     "assignment_nonce": assignment_nonce,
                     "agent_handle": agent_handle,
-                    "launch_nonce": registration["launch_nonce"],
+                    "worker_config_hash": registration["worker_config_hash"],
+                    **self._registration_nonce_payload(registration),
                 }
+                if registration.get("resumed") is True:
+                    extra["resume_failure_kind"] = "wait_agent"
             else:
-                if not isinstance(launch_nonce, str) or not launch_nonce.strip():
-                    raise ContractError("launch nonce is required when failing a host item without an agent handle")
+                if (launch_nonce is None) == (resume_nonce is None):
+                    raise ContractError("exactly one of launch nonce or resume nonce is required when failing a host item without an agent handle")
                 start = self._require_host_assignment_locked(replayed.events, record["manifest"], item, assignment_nonce)
-                authorization = self._latest_host_authorization(
-                    replayed.events,
-                    assignment_nonce=assignment_nonce,
-                    launch_nonce=launch_nonce,
-                )
-                if authorization is None:
-                    raise ContractError("unknown or stale host launch nonce")
-                if any(
-                    event["type"] == "host_agent_registered"
-                    and event.get("payload", {}).get("launch_nonce") == launch_nonce
-                    for event in replayed.events
-                ):
-                    raise ContractError("agent handle is required after host launch nonce registration")
-                extra = {
-                    "assignment_nonce": assignment_nonce,
-                    "launch_nonce": launch_nonce,
-                    "agent_handle_lost": True,
-                }
+                if resume_nonce is not None:
+                    expected = self._host_launch_block(item_id=item_id, start=start, worker_config=self._require_host_worker_config(record["manifest"], item))
+                    authorization = self._require_resume_authorization(
+                        replayed.events,
+                        "host_resume_authorized",
+                        target_nonce_field="assignment_nonce",
+                        target_nonce=assignment_nonce,
+                        resume_nonce=resume_nonce,
+                        expected_launch_block_hash=stable_json_hash(expected),
+                        label="host",
+                    )
+                    extra = self._resume_failure_metadata(authorization, failure_kind=resume_failure_kind.strip())
+                else:
+                    if not isinstance(launch_nonce, str) or not launch_nonce.strip():
+                        raise ContractError("launch nonce is required when failing a host item without an agent handle")
+                    authorization = self._latest_host_authorization(
+                        replayed.events,
+                        assignment_nonce=assignment_nonce,
+                        launch_nonce=launch_nonce,
+                    )
+                    if authorization is None:
+                        raise ContractError("unknown or stale host launch nonce")
+                    if any(
+                        event["type"] == "host_agent_registered"
+                        and event.get("payload", {}).get("launch_nonce") == launch_nonce
+                        for event in replayed.events
+                    ):
+                        raise ContractError("agent handle is required after host launch nonce registration")
+                    extra = {
+                        "assignment_nonce": assignment_nonce,
+                        "launch_nonce": launch_nonce,
+                        "worker_config_hash": stable_json_hash(worker_config),
+                        "agent_handle_lost": True,
+                    }
             return self._record_attempt_failure_locked(
                 "worker_failed",
                 item_id,
@@ -6894,7 +7788,12 @@ class OptimPlansState:
                 batch_status = "in_progress"
             elif event["type"] == "batch_completed":
                 batch_status = "completed"
-            elif event["type"] in {"batch_validator_assigned", "batch_validator_spawn_authorized", "batch_validator_agent_registered"}:
+            elif event["type"] in {
+                "batch_validator_assigned",
+                "batch_validator_spawn_authorized",
+                "batch_validator_resume_authorized",
+                "batch_validator_agent_registered",
+            }:
                 batch_status = "validating"
             elif event["type"] == "batch_validator_result_recorded":
                 batch_status = "validated" if payload.get("status") == "pass" else "failed"
@@ -6927,7 +7826,12 @@ class OptimPlansState:
                 statuses[item_id] = "in_progress"
             elif event["type"] == "worker_completed":
                 statuses[item_id] = "completed"
-            elif event["type"] in {"validator_assigned", "validator_spawn_authorized", "validator_agent_registered"}:
+            elif event["type"] in {
+                "validator_assigned",
+                "validator_spawn_authorized",
+                "validator_resume_authorized",
+                "validator_agent_registered",
+            }:
                 statuses[item_id] = "validating"
             elif event["type"] == "validator_result_recorded":
                 statuses[item_id] = "validated" if payload.get("status") == "pass" else "failed"

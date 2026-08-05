@@ -801,6 +801,134 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(recorded["launch_nonce"], validator_auth["launch_nonce"])
             self.assertIn("commit", checkpoint)
 
+    def test_host_validator_item_resume_success_binds_prompt_hash(self) -> None:
+        from scripts.optim_plans_core import ContractError
+
+        items = [
+            {"id": "TASK-001", "allowed_paths": ["src/1.txt"], "validator": {"check_ids": ["VC-1"]}},
+            {"id": "TASK-002", "allowed_paths": ["src/2.txt"], "validator": {"check_ids": ["VC-2"]}},
+        ]
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_batch_execution(
+                repo,
+                items,
+                verification_argv=[sys.executable, "-c", "pass"],
+                validator=True,
+            )
+            first = state.assign_item("TASK-001")
+            first_auth = state.authorize_spawn("TASK-001", first["assignment_nonce"], first["launch_block"])
+            state.register_agent(
+                "TASK-001",
+                assignment_nonce=first["assignment_nonce"],
+                launch_nonce=first_auth["launch_nonce"],
+                agent_handle="executor-one",
+                launch_block=first["launch_block"],
+            )
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/1.txt").write_text("one\n", encoding="utf-8")
+            state.complete_host_item("TASK-001", assignment_nonce=first["assignment_nonce"], agent_handle="executor-one", evidence="executor done")
+            validator_one = state.advance_item("TASK-001")
+            validator_auth = state.authorize_validator_spawn(
+                "TASK-001",
+                validator_one["validator_nonce"],
+                validator_one["validator_launch_block"],
+            )
+            state.register_validator_agent(
+                "TASK-001",
+                validator_nonce=validator_one["validator_nonce"],
+                launch_nonce=validator_auth["launch_nonce"],
+                agent_handle="validator-one",
+                launch_block=validator_one["validator_launch_block"],
+            )
+            state.record_validator_result(
+                "TASK-001",
+                validator_nonce=validator_one["validator_nonce"],
+                agent_handle="validator-one",
+                result={
+                    "run_id": state.run_id,
+                    "item_id": "TASK-001",
+                    "attempt": validator_one["attempt"],
+                    "nonce": validator_one["validator_nonce"],
+                    "validator_config_hash": validator_one["validator_config_hash"],
+                    "validator_prompt_hash": validator_one["validator_prompt_hash"],
+                    "delta_fingerprint": validator_one["delta_fingerprint"],
+                    "status": "pass",
+                    "evidence": "validator one passed",
+                    "feedback_for_executor": "",
+                    "checked_items": ["VC-1"],
+                },
+            )
+            checkpoint = state.advance_item("TASK-001")
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                state.advance_item("TASK-001")
+
+            second = state.assign_item("TASK-002")
+            second_auth = state.authorize_spawn("TASK-002", second["assignment_nonce"], second["launch_block"])
+            state.register_agent(
+                "TASK-002",
+                assignment_nonce=second["assignment_nonce"],
+                launch_nonce=second_auth["launch_nonce"],
+                agent_handle="executor-two",
+                launch_block=second["launch_block"],
+            )
+            (run_worktree / "src/2.txt").write_text("two\n", encoding="utf-8")
+            state.complete_host_item("TASK-002", assignment_nonce=second["assignment_nonce"], agent_handle="executor-two", evidence="executor two done")
+
+            validator_two = state.advance_item("TASK-002")
+            self.assertEqual(validator_two["validator_launch_block"]["prior_validator_agent_handle"], "validator-one")
+            self.assertIn("authorize-validator-resume", validator_two["next_action"])
+            altered = json.loads(json.dumps(validator_two["validator_launch_block"]))
+            altered["validator_prompt_hash"] = "wrong"
+            with self.assertRaisesRegex(ContractError, "validator launch block does not match"):
+                state.authorize_validator_resume("TASK-002", validator_two["validator_nonce"], "validator-one", altered)
+            resume_auth = state.authorize_validator_resume(
+                "TASK-002",
+                validator_two["validator_nonce"],
+                "validator-one",
+                validator_two["validator_launch_block"],
+            )
+            self.assertEqual(resume_auth["validator_prompt_hash"], validator_two["validator_prompt_hash"])
+            self.assertEqual(resume_auth["prompt_hash"], validator_two["validator"]["prompt_hash"])
+            with self.assertRaisesRegex(ContractError, "authorized prior handle"):
+                state.register_validator_agent(
+                    "TASK-002",
+                    validator_nonce=validator_two["validator_nonce"],
+                    resume_nonce=resume_auth["resume_nonce"],
+                    agent_handle="other-validator",
+                    launch_block=validator_two["validator_launch_block"],
+                )
+            registered = state.register_validator_agent(
+                "TASK-002",
+                validator_nonce=validator_two["validator_nonce"],
+                resume_nonce=resume_auth["resume_nonce"],
+                agent_handle="validator-one",
+                launch_block=validator_two["validator_launch_block"],
+            )
+            self.assertTrue(registered["resumed"])
+            recorded = state.record_validator_result(
+                "TASK-002",
+                validator_nonce=validator_two["validator_nonce"],
+                agent_handle="validator-one",
+                result={
+                    "run_id": state.run_id,
+                    "item_id": "TASK-002",
+                    "attempt": validator_two["attempt"],
+                    "nonce": validator_two["validator_nonce"],
+                    "validator_config_hash": validator_two["validator_config_hash"],
+                    "validator_prompt_hash": validator_two["validator_prompt_hash"],
+                    "delta_fingerprint": validator_two["delta_fingerprint"],
+                    "status": "pass",
+                    "evidence": "validator two passed",
+                    "feedback_for_executor": "",
+                    "checked_items": ["VC-2"],
+                },
+            )
+            self.assertEqual(recorded["resume_nonce"], resume_auth["resume_nonce"])
+            event_types = [event["type"] for event in state.replay().events]
+            self.assertEqual(event_types.count("validator_spawn_authorized"), 1)
+
     def test_batch_selection_uses_ready_prefix_and_projects_status(self) -> None:
         from scripts.optim_plans_core import ContractError
 
@@ -915,6 +1043,352 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(tail["item_ids"], ["TASK-004"])
             self.assertEqual(tail["launch_block"]["prior_executor_agent_handle"], "batch-agent-1")
             self.assertIn("batch one done", tail["launch_block"]["prior_context"])
+
+    def test_host_item_resume_success_is_nonce_and_handle_bound(self) -> None:
+        from scripts.optim_plans_core import ContractError
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_batch_execution(
+                repo,
+                [
+                    {"id": "TASK-001", "allowed_paths": ["src/1.txt"]},
+                    {"id": "TASK-002", "allowed_paths": ["src/2.txt"]},
+                ],
+                verification_argv=[sys.executable, "-c", "pass"],
+            )
+            first = state.assign_item("TASK-001")
+            first_auth = state.authorize_spawn("TASK-001", first["assignment_nonce"], first["launch_block"])
+            state.register_agent(
+                "TASK-001",
+                assignment_nonce=first["assignment_nonce"],
+                launch_nonce=first_auth["launch_nonce"],
+                agent_handle="agent-one",
+                launch_block=first["launch_block"],
+            )
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/1.txt").write_text("one\n", encoding="utf-8")
+            state.complete_host_item(
+                "TASK-001",
+                assignment_nonce=first["assignment_nonce"],
+                agent_handle="agent-one",
+                evidence="first done",
+            )
+            checkpoint = state.advance_item("TASK-001")
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                state.advance_item("TASK-001")
+
+            second = state.assign_item("TASK-002")
+            self.assertEqual(second["launch_block"]["prior_executor_agent_handle"], "agent-one")
+            self.assertIn("resume_action", second)
+            self.assertIn("authorize-resume", second["next_action"])
+            self.assertIn("authorize-spawn", second["resume_action"]["fresh_spawn_fallback"])
+            self.assertIn("resume_agent", second["next_action"])
+            self.assertIn("send_input", second["next_action"])
+
+            resume_auth = state.authorize_resume(
+                "TASK-002",
+                second["assignment_nonce"],
+                "agent-one",
+                second["launch_block"],
+            )
+            self.assertEqual(resume_auth["prior_agent_handle"], "agent-one")
+            self.assertEqual(resume_auth["worker_config_hash"], second["worker_config_hash"])
+            self.assertEqual(resume_auth["prompt_hash"], second["worker"]["prompt_hash"])
+            self.assertEqual(state.assign_item("TASK-002")["phase"], "resume_authorized")
+
+            altered = json.loads(json.dumps(second["launch_block"]))
+            altered["worker"]["model"] = "other-model"
+            with self.assertRaisesRegex(ContractError, "assignment nonce"):
+                state.register_agent(
+                    "TASK-002",
+                    assignment_nonce="wrong",
+                    resume_nonce=resume_auth["resume_nonce"],
+                    agent_handle="agent-one",
+                    launch_block=second["launch_block"],
+                )
+            with self.assertRaisesRegex(ContractError, "authorized prior handle"):
+                state.register_agent(
+                    "TASK-002",
+                    assignment_nonce=second["assignment_nonce"],
+                    resume_nonce=resume_auth["resume_nonce"],
+                    agent_handle="other-agent",
+                    launch_block=second["launch_block"],
+                )
+            with self.assertRaisesRegex(ContractError, "launch block does not match"):
+                state.register_agent(
+                    "TASK-002",
+                    assignment_nonce=second["assignment_nonce"],
+                    resume_nonce=resume_auth["resume_nonce"],
+                    agent_handle="agent-one",
+                    launch_block=altered,
+                )
+
+            registered = state.register_agent(
+                "TASK-002",
+                assignment_nonce=second["assignment_nonce"],
+                resume_nonce=resume_auth["resume_nonce"],
+                agent_handle="agent-one",
+                launch_block=second["launch_block"],
+            )
+            self.assertTrue(registered["resumed"])
+            self.assertEqual(registered["resume_nonce"], resume_auth["resume_nonce"])
+            self.assertEqual(registered["prior_agent_handle"], "agent-one")
+            with self.assertRaisesRegex(ContractError, "stale or already used"):
+                state.register_agent(
+                    "TASK-002",
+                    assignment_nonce=second["assignment_nonce"],
+                    resume_nonce=resume_auth["resume_nonce"],
+                    agent_handle="agent-one",
+                    launch_block=second["launch_block"],
+                )
+            with self.assertRaisesRegex(ContractError, "stale or already used"):
+                state.fail_host_item(
+                    "TASK-002",
+                    assignment_nonce=second["assignment_nonce"],
+                    resume_nonce=resume_auth["resume_nonce"],
+                    evidence="late resume failure",
+                )
+
+            state.complete_host_item(
+                "TASK-002",
+                assignment_nonce=second["assignment_nonce"],
+                agent_handle="agent-one",
+                evidence="resumed done",
+            )
+            event_types = [event["type"] for event in state.replay().events]
+            self.assertEqual(event_types.count("host_spawn_authorized"), 1)
+            completed = [event["payload"] for event in state.replay().events if event["type"] == "worker_completed"][-1]
+            self.assertEqual(completed["resume_nonce"], resume_auth["resume_nonce"])
+            self.assertNotIn("launch_nonce", completed)
+
+    def test_host_resume_failure_records_worker_failed_and_falls_back_to_spawn(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_batch_execution(
+                repo,
+                [
+                    {"id": "TASK-001", "allowed_paths": ["src/1.txt"]},
+                    {"id": "TASK-002", "allowed_paths": ["src/2.txt"]},
+                ],
+                verification_argv=[sys.executable, "-c", "pass"],
+            )
+            first = state.assign_item("TASK-001")
+            first_auth = state.authorize_spawn("TASK-001", first["assignment_nonce"], first["launch_block"])
+            state.register_agent(
+                "TASK-001",
+                assignment_nonce=first["assignment_nonce"],
+                launch_nonce=first_auth["launch_nonce"],
+                agent_handle="bad-later",
+                launch_block=first["launch_block"],
+            )
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/1.txt").write_text("one\n", encoding="utf-8")
+            state.complete_host_item("TASK-001", assignment_nonce=first["assignment_nonce"], agent_handle="bad-later", evidence="first done")
+            checkpoint = state.advance_item("TASK-001")
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                state.advance_item("TASK-001")
+
+            second = state.assign_item("TASK-002")
+            resume_auth = state.authorize_resume("TASK-002", second["assignment_nonce"], "bad-later", second["launch_block"])
+            failed = state.fail_host_item(
+                "TASK-002",
+                assignment_nonce=second["assignment_nonce"],
+                resume_nonce=resume_auth["resume_nonce"],
+                resume_failure_kind="send_input",
+                evidence="send_input failed before registration",
+            )
+            self.assertTrue(failed["auto_retry"])
+            failure = [event["payload"] for event in state.replay().events if event["type"] == "worker_failed"][-1]
+            self.assertEqual(failure["prior_agent_handle"], "bad-later")
+            self.assertEqual(failure["resume_nonce"], resume_auth["resume_nonce"])
+            self.assertEqual(failure["resume_failure_kind"], "send_input")
+            self.assertIn("send_input failed", failure["evidence"])
+
+            retry = state.assign_item("TASK-002")
+            self.assertEqual(retry["attempt"], 2)
+            self.assertNotIn("prior_executor_agent_handle", retry["launch_block"])
+            self.assertNotIn("resume_action", retry)
+            fresh = state.authorize_spawn("TASK-002", retry["assignment_nonce"], retry["launch_block"])
+            self.assertIn("launch_nonce", fresh)
+
+    def test_host_batch_resume_success(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_batch_execution(
+                repo,
+                [
+                    {"id": "TASK-001", "allowed_paths": ["src/1.txt"]},
+                    {"id": "TASK-002", "allowed_paths": ["src/2.txt"]},
+                    {"id": "TASK-003", "allowed_paths": ["src/3.txt"]},
+                    {"id": "TASK-004", "allowed_paths": ["src/4.txt"]},
+                ],
+            )
+            first = state.assign_batch(["TASK-001", "TASK-002", "TASK-003"])
+            first_auth = state.authorize_batch_spawn(first["batch_id"], first["assignment_nonce"], first["launch_block"])
+            state.register_batch_agent(
+                first["batch_id"],
+                assignment_nonce=first["assignment_nonce"],
+                launch_nonce=first_auth["launch_nonce"],
+                agent_handle="batch-agent",
+                launch_block=first["launch_block"],
+            )
+            for index in range(1, 4):
+                target = run_worktree / f"src/{index}.txt"
+                target.parent.mkdir(exist_ok=True)
+                target.write_text(f"{index}\n", encoding="utf-8")
+            state.complete_host_batch(first["batch_id"], assignment_nonce=first["assignment_nonce"], agent_handle="batch-agent", evidence="first batch done")
+            checkpoint = state.advance_batch(first["batch_id"])
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                state.advance_batch(first["batch_id"])
+
+            tail = state.assign_batch()
+            self.assertIn("authorize-batch-resume", tail["next_action"])
+            resume_auth = state.authorize_batch_resume(tail["batch_id"], tail["assignment_nonce"], "batch-agent", tail["launch_block"])
+            registered = state.register_batch_agent(
+                tail["batch_id"],
+                assignment_nonce=tail["assignment_nonce"],
+                resume_nonce=resume_auth["resume_nonce"],
+                agent_handle="batch-agent",
+                launch_block=tail["launch_block"],
+            )
+            self.assertTrue(registered["resumed"])
+            (run_worktree / "src/4.txt").write_text("4\n", encoding="utf-8")
+            state.complete_host_batch(tail["batch_id"], assignment_nonce=tail["assignment_nonce"], agent_handle="batch-agent", evidence="tail done")
+            event_types = [event["type"] for event in state.replay().events]
+            self.assertEqual(event_types.count("batch_host_spawn_authorized"), 1)
+            completed = [event["payload"] for event in state.replay().events if event["type"] == "batch_completed"][-1]
+            self.assertEqual(completed["resume_nonce"], resume_auth["resume_nonce"])
+
+    def test_host_batch_validator_resume_success_binds_prompt_hash(self) -> None:
+        from scripts.optim_plans_core import ContractError
+
+        items = [
+            {"id": "TASK-001", "allowed_paths": ["src/1.txt"], "validator": {"check_ids": ["VC-1"]}},
+            {"id": "TASK-002", "allowed_paths": ["src/2.txt"], "validator": {"check_ids": ["VC-2"]}},
+            {"id": "TASK-003", "allowed_paths": ["src/3.txt"], "validator": {"check_ids": ["VC-3"]}},
+            {"id": "TASK-004", "allowed_paths": ["src/4.txt"], "validator": {"check_ids": ["VC-4"]}},
+        ]
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            state, run_worktree = self._start_host_batch_execution(repo, items, validator=True)
+            first = state.assign_batch(["TASK-001", "TASK-002", "TASK-003"])
+            first_auth = state.authorize_batch_spawn(first["batch_id"], first["assignment_nonce"], first["launch_block"])
+            state.register_batch_agent(
+                first["batch_id"],
+                assignment_nonce=first["assignment_nonce"],
+                launch_nonce=first_auth["launch_nonce"],
+                agent_handle="executor-batch",
+                launch_block=first["launch_block"],
+            )
+            for index in range(1, 4):
+                target = run_worktree / f"src/{index}.txt"
+                target.parent.mkdir(exist_ok=True)
+                target.write_text(f"{index}\n", encoding="utf-8")
+            state.complete_host_batch(first["batch_id"], assignment_nonce=first["assignment_nonce"], agent_handle="executor-batch", evidence="first batch done")
+            validator_first = state.advance_batch(first["batch_id"])
+            validator_auth = state.authorize_batch_validator_spawn(
+                first["batch_id"],
+                validator_first["validator_nonce"],
+                validator_first["validator_launch_block"],
+            )
+            state.register_batch_validator_agent(
+                first["batch_id"],
+                validator_nonce=validator_first["validator_nonce"],
+                launch_nonce=validator_auth["launch_nonce"],
+                agent_handle="validator-batch",
+                launch_block=validator_first["validator_launch_block"],
+            )
+            state.record_batch_validator_result(
+                first["batch_id"],
+                validator_nonce=validator_first["validator_nonce"],
+                agent_handle="validator-batch",
+                result={
+                    "run_id": state.run_id,
+                    "batch_id": first["batch_id"],
+                    "item_ids": first["item_ids"],
+                    "attempt": validator_first["attempt"],
+                    "assignment_nonce": first["assignment_nonce"],
+                    "nonce": validator_first["validator_nonce"],
+                    "validator_config_hash": validator_first["validator_config_hash"],
+                    "validator_prompt_hash": validator_first["validator_prompt_hash"],
+                    "delta_fingerprint": validator_first["delta_fingerprint"],
+                    "status": "pass",
+                    "evidence": "batch validator passed",
+                    "feedback_for_executor": "",
+                    "checked_items": ["VC-1", "VC-2", "VC-3"],
+                },
+            )
+            checkpoint = state.advance_batch(first["batch_id"])
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                state.advance_batch(first["batch_id"])
+
+            tail = state.assign_batch()
+            tail_auth = state.authorize_batch_spawn(tail["batch_id"], tail["assignment_nonce"], tail["launch_block"])
+            state.register_batch_agent(
+                tail["batch_id"],
+                assignment_nonce=tail["assignment_nonce"],
+                launch_nonce=tail_auth["launch_nonce"],
+                agent_handle="executor-tail",
+                launch_block=tail["launch_block"],
+            )
+            (run_worktree / "src/4.txt").write_text("4\n", encoding="utf-8")
+            state.complete_host_batch(tail["batch_id"], assignment_nonce=tail["assignment_nonce"], agent_handle="executor-tail", evidence="tail done")
+
+            validator_tail = state.advance_batch(tail["batch_id"])
+            self.assertEqual(validator_tail["validator_launch_block"]["prior_validator_agent_handle"], "validator-batch")
+            self.assertIn("authorize-batch-validator-resume", validator_tail["next_action"])
+            altered = json.loads(json.dumps(validator_tail["validator_launch_block"]))
+            altered["validator"]["model"] = "other-model"
+            with self.assertRaisesRegex(ContractError, "validator launch block does not match"):
+                state.authorize_batch_validator_resume(
+                    tail["batch_id"],
+                    validator_tail["validator_nonce"],
+                    "validator-batch",
+                    altered,
+                )
+            resume_auth = state.authorize_batch_validator_resume(
+                tail["batch_id"],
+                validator_tail["validator_nonce"],
+                "validator-batch",
+                validator_tail["validator_launch_block"],
+            )
+            self.assertEqual(resume_auth["validator_prompt_hash"], validator_tail["validator_prompt_hash"])
+            registered = state.register_batch_validator_agent(
+                tail["batch_id"],
+                validator_nonce=validator_tail["validator_nonce"],
+                resume_nonce=resume_auth["resume_nonce"],
+                agent_handle="validator-batch",
+                launch_block=validator_tail["validator_launch_block"],
+            )
+            self.assertTrue(registered["resumed"])
+            recorded = state.record_batch_validator_result(
+                tail["batch_id"],
+                validator_nonce=validator_tail["validator_nonce"],
+                agent_handle="validator-batch",
+                result={
+                    "run_id": state.run_id,
+                    "batch_id": tail["batch_id"],
+                    "item_ids": tail["item_ids"],
+                    "attempt": validator_tail["attempt"],
+                    "assignment_nonce": tail["assignment_nonce"],
+                    "nonce": validator_tail["validator_nonce"],
+                    "validator_config_hash": validator_tail["validator_config_hash"],
+                    "validator_prompt_hash": validator_tail["validator_prompt_hash"],
+                    "delta_fingerprint": validator_tail["delta_fingerprint"],
+                    "status": "pass",
+                    "evidence": "tail validator passed",
+                    "feedback_for_executor": "",
+                    "checked_items": ["VC-4"],
+                },
+            )
+            self.assertEqual(recorded["resume_nonce"], resume_auth["resume_nonce"])
+            event_types = [event["type"] for event in state.replay().events]
+            self.assertEqual(event_types.count("batch_validator_spawn_authorized"), 1)
 
     def test_batch_validator_envelope_retry_and_checkpoint_atomicity(self) -> None:
         from scripts import optim_plans_core as core

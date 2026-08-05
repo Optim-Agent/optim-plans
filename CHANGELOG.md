@@ -8,6 +8,11 @@ first, ISO dates, and grouped change types.
 
 ## Unreleased
 
+### Added
+
+- Added resume-first Codex host executor and validator assignment paths with
+  controller-bound resume nonces before fresh spawn fallback.
+
 ## 0.2.2 - 2026-08-04
 
 ### Added

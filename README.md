@@ -485,6 +485,13 @@ python3 scripts/optim_plans.py start-execution --repo <repo> --approval-nonce <a
 
 # Codex host-multi-agent executor/validator path:
 python3 scripts/optim_plans.py assign-item --repo <repo> --item-id TASK-001
+# if assign-item returns resume_action, try the prior handle before spawning:
+python3 scripts/optim_plans.py authorize-resume --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --prior-agent-handle <handle> --launch-block '<json>'
+# host resume_agent if needed, send_input with the launch block, then:
+python3 scripts/optim_plans.py register-agent --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --resume-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
+# if resume_agent/send_input fails before registration:
+python3 scripts/optim_plans.py fail-item --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --resume-nonce <nonce> --resume-failure-kind send_input --evidence "<summary>"
+# fresh spawn fallback:
 python3 scripts/optim_plans.py authorize-spawn --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --launch-block '<json>'
 # call host spawn_agent with the approved launch block, then:
 python3 scripts/optim_plans.py register-agent --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
@@ -492,6 +499,8 @@ python3 scripts/optim_plans.py register-agent --repo <repo> --item-id TASK-001 -
 python3 scripts/optim_plans.py complete-item --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --agent-handle <handle> --evidence "<summary>"
 python3 scripts/optim_plans.py advance-item --repo <repo> --item-id TASK-001
 # if advance-item returns a host validator launch block:
+python3 scripts/optim_plans.py authorize-validator-resume --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --prior-agent-handle <handle> --launch-block '<json>'
+python3 scripts/optim_plans.py register-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --resume-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
 python3 scripts/optim_plans.py authorize-validator-spawn --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --launch-block '<json>'
 # call host spawn_agent with the approved validator launch block, then:
 python3 scripts/optim_plans.py register-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
@@ -501,10 +510,15 @@ python3 scripts/optim_plans.py fail-validator --repo <repo> --item-id TASK-001 -
 
 # Host batch path: assign-batch selects a continuous ready prefix from manifest order.
 python3 scripts/optim_plans.py assign-batch --repo <repo>
+python3 scripts/optim_plans.py authorize-batch-resume --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --prior-agent-handle <handle> --launch-block '<json>'
+python3 scripts/optim_plans.py register-batch-agent --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --resume-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
 python3 scripts/optim_plans.py authorize-batch-spawn --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --launch-block '<json>'
 python3 scripts/optim_plans.py register-batch-agent --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
 python3 scripts/optim_plans.py complete-batch --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --agent-handle <handle> --evidence "<summary>"
 python3 scripts/optim_plans.py advance-batch --repo <repo> --batch-id <batch-id>
+# if advance-batch returns a host validator launch block, use batch validator resume first when offered:
+python3 scripts/optim_plans.py authorize-batch-validator-resume --repo <repo> --batch-id <batch-id> --validator-nonce <nonce> --prior-agent-handle <handle> --launch-block '<json>'
+python3 scripts/optim_plans.py register-batch-validator --repo <repo> --batch-id <batch-id> --validator-nonce <nonce> --resume-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
 # batch validation/checkpoint is all-or-nothing; recovery uses retry-batch, not retry-item.
 python3 scripts/optim_plans.py retry-batch --repo <repo> --batch-id <batch-id> --approval-nonce <nonce>
 
@@ -521,7 +535,7 @@ python3 scripts/optim_plans.py finish-run --repo <repo> --outcome kept --approva
 
 Use `$optim-plans:resume-previous-plan` to continue an interrupted active run. It checks the active run first and runs `resume_command` when available for approved execution launch or retryable recovery; if only finish recovery is available, it reports `finish_choices` and stops. If there is no active pointer, it falls back to `previous-run` and suggests the latest preserved run from Git common state.
 
-Batch launch blocks include prior agent handles when a related executor or validator session can be reused, plus bounded `prior_context` as a session resume fallback when the host cannot resume directly.
+Codex host launch blocks include prior agent handles when a related executor or validator session can be reused. The controller exposes a session resume-first action that authorizes a single-use `resume_nonce` bound to the target nonce, prior handle, launch block hash, worker config hash, and validator prompt hash where applicable. If resume/send fails, record it with the existing fail command and `--resume-nonce`; the next assignment skips that bad handle and can fresh-spawn. Claude executor manifests still use the CLI adapter `run-item` foreground standalone path, not host resume/spawn/wait.
 
 ## Why optim-plans?
 
