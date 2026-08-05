@@ -243,6 +243,15 @@ class GitIsolationTests(unittest.TestCase):
             )
 
             self.assertEqual(audit["changed_files"], [])
+            venv_bin = repo / ".venv" / "bin"
+            venv_bin.mkdir(parents=True)
+            (venv_bin / "python").symlink_to("/usr/bin/python3")
+            audit = audit_git_delta(
+                repo,
+                allowed_paths=["README.md"],
+                ignored_runtime_outputs=["runtime-output", "runtime-ignored", ".venv"],
+            )
+            self.assertEqual(audit["changed_files"], [])
             link = repo / "runtime-output" / "link"
             link.symlink_to("tracked.txt")
             with self.assertRaisesRegex(ContractError, "symlink runtime output"):
@@ -262,6 +271,17 @@ class GitIsolationTests(unittest.TestCase):
                     ignored_runtime_outputs=["runtime-output", "runtime-ignored"],
                 )
             shutil.rmtree(nested)
+            tracked_venv = repo / ".venv" / "tracked.txt"
+            tracked_venv.write_text("base\n", encoding="utf-8")
+            git(repo, "add", ".venv/tracked.txt")
+            git(repo, "commit", "-m", "tracked venv fixture")
+            tracked_venv.write_text("changed\n", encoding="utf-8")
+            with self.assertRaisesRegex(ContractError, "out of scope"):
+                audit_git_delta(
+                    repo,
+                    allowed_paths=["README.md"],
+                    ignored_runtime_outputs=["runtime-output", "runtime-ignored", ".venv"],
+                )
             tracked.write_text("changed\n", encoding="utf-8")
             with self.assertRaisesRegex(ContractError, "out of scope"):
                 audit_git_delta(

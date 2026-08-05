@@ -59,6 +59,7 @@ BATCH_RETRYABLE_FAILURE_EVENTS = {
 }
 RETRYABLE_FAILURE_EVENTS = ITEM_RETRYABLE_FAILURE_EVENTS | BATCH_RETRYABLE_FAILURE_EVENTS
 IGNORED_AUDIT_NOISE_PATTERNS = [".xsw/", ".pytest_cache/", "__pycache__/", "*.pyc"]
+CONTROLLER_RUNTIME_OUTPUT_SCOPES = [".venv"]
 PLAN_CONTEXT_REQUIRED_SECTIONS = (
     "Requirements",
     "Acceptance Criteria",
@@ -984,7 +985,7 @@ def _is_allowed_ignored_audit_noise(path: str) -> bool:
 
 def _require_runtime_output_safe(repo: Path, path: str) -> None:
     candidate = repo / path
-    if candidate.is_symlink():
+    if candidate.is_symlink() and not path.startswith(".venv/"):
         raise ContractError(f"symlink runtime output is not allowed: {path}")
     if _contains_nested_repo(repo, path):
         raise ContractError(f"nested repository runtime output is not allowed: {path}")
@@ -2010,7 +2011,9 @@ class OptimPlansState:
 
     def _with_controller_ignored_runtime_outputs(self, manifest: dict[str, Any]) -> dict[str, Any]:
         updated = _json_clone(manifest, source="execution manifest")
-        scopes = _normalize_ignored_runtime_outputs(updated.get("ignored_runtime_outputs"))
+        scopes = _normalize_ignored_runtime_outputs(
+            [*CONTROLLER_RUNTIME_OUTPUT_SCOPES, *_normalize_ignored_runtime_outputs(updated.get("ignored_runtime_outputs"))]
+        )
         try:
             artifact_scope = self.artifact_dir.relative_to(self.repo).as_posix()
         except ValueError:
