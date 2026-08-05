@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -218,6 +219,56 @@ class GitIsolationTests(unittest.TestCase):
             audit = audit_git_delta(repo, allowed_paths=["README.md"])
 
             self.assertEqual(audit["changed_files"], [])
+
+    def test_checkpoint_audit_allows_manifest_runtime_outputs_only_when_new(self) -> None:
+        from scripts.optim_plans_core import ContractError, audit_git_delta
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            (repo / ".gitignore").write_text("runtime-ignored/\n", encoding="utf-8")
+            tracked = repo / "runtime-output" / "tracked.txt"
+            tracked.parent.mkdir()
+            tracked.write_text("base\n", encoding="utf-8")
+            git(repo, "add", ".gitignore", "runtime-output/tracked.txt")
+            git(repo, "commit", "-m", "runtime fixture")
+
+            (repo / "runtime-output" / "log.txt").write_text("new\n", encoding="utf-8")
+            ignored_dir = repo / "runtime-ignored"
+            ignored_dir.mkdir()
+            (ignored_dir / "log.txt").write_text("ignored\n", encoding="utf-8")
+            audit = audit_git_delta(
+                repo,
+                allowed_paths=["README.md"],
+                ignored_runtime_outputs=["runtime-output", "runtime-ignored"],
+            )
+
+            self.assertEqual(audit["changed_files"], [])
+            link = repo / "runtime-output" / "link"
+            link.symlink_to("tracked.txt")
+            with self.assertRaisesRegex(ContractError, "symlink runtime output"):
+                audit_git_delta(
+                    repo,
+                    allowed_paths=["README.md"],
+                    ignored_runtime_outputs=["runtime-output", "runtime-ignored"],
+                )
+            link.unlink()
+            nested = repo / "runtime-output" / "nested"
+            nested.mkdir()
+            git(nested, "init")
+            with self.assertRaisesRegex(ContractError, "nested repository runtime output"):
+                audit_git_delta(
+                    repo,
+                    allowed_paths=["README.md"],
+                    ignored_runtime_outputs=["runtime-output", "runtime-ignored"],
+                )
+            shutil.rmtree(nested)
+            tracked.write_text("changed\n", encoding="utf-8")
+            with self.assertRaisesRegex(ContractError, "out of scope"):
+                audit_git_delta(
+                    repo,
+                    allowed_paths=["README.md"],
+                    ignored_runtime_outputs=["runtime-output", "runtime-ignored"],
+                )
 
     def test_final_audit_allows_ignored_test_cache_noise_after_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -116,6 +116,7 @@ class ExecutionTests(unittest.TestCase):
         worker_timeout_seconds: float = 5,
         verification_timeout_seconds: float = 5,
         worker_env: dict[str, str] | None = None,
+        ignored_runtime_outputs: list[str] | None = None,
     ):
         from scripts.optim_plans_core import OptimPlansState
 
@@ -123,24 +124,25 @@ class ExecutionTests(unittest.TestCase):
         run_worktree = state.root / "run-worktrees" / state.run_id
         argv = [str(worker), "exec", "-C", str(run_worktree)]
         smoke_argv = [*argv, "--optim-plans-smoke"]
-        state.persist_execution_manifest(
-            {
-                "plan_hash": "abc123",
-                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
-                "integration_destination": "main",
-                "run_worktree_path": str(run_worktree),
-                "worker": {
-                    "adapter": "codex",
-                    "argv": argv,
-                    "env": worker_env or {},
-                    "smoke": {"argv": smoke_argv, "timeout_seconds": 5},
-                    "timeout_seconds": worker_timeout_seconds,
-                },
-                "verification_argv": verification_argv,
-                "verification_timeout_seconds": verification_timeout_seconds,
-                "items": [{"id": "TASK-001", "allowed_paths": allowed_paths or ["src/app.txt"]}],
-            }
-        )
+        manifest = {
+            "plan_hash": "abc123",
+            "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+            "integration_destination": "main",
+            "run_worktree_path": str(run_worktree),
+            "worker": {
+                "adapter": "codex",
+                "argv": argv,
+                "env": worker_env or {},
+                "smoke": {"argv": smoke_argv, "timeout_seconds": 5},
+                "timeout_seconds": worker_timeout_seconds,
+            },
+            "verification_argv": verification_argv,
+            "verification_timeout_seconds": verification_timeout_seconds,
+            "items": [{"id": "TASK-001", "allowed_paths": allowed_paths or ["src/app.txt"]}],
+        }
+        if ignored_runtime_outputs is not None:
+            manifest["ignored_runtime_outputs"] = ignored_runtime_outputs
+        state.persist_execution_manifest(manifest)
         question = state.request_execution_approval()
         state.record_answer(question["nonce"], "approve")
         state.start_execution(question["nonce"])
@@ -156,6 +158,7 @@ class ExecutionTests(unittest.TestCase):
         allowed_paths: list[str] | None = None,
         validator_retry_limit: int = 1,
         write_plan: bool = True,
+        ignored_runtime_outputs: list[str] | None = None,
     ):
         from scripts.optim_plans_core import EXECUTION_PROTOCOL, EXECUTION_SCHEMA_VERSION, OptimPlansState
 
@@ -165,38 +168,39 @@ class ExecutionTests(unittest.TestCase):
         run_worktree = state.root / "run-worktrees" / state.run_id
         worker_argv = [str(worker), "exec", "-C", str(run_worktree)]
         validator_argv = [str(validator), "exec", "-C", str(run_worktree)]
-        state.persist_execution_manifest(
-            {
-                "schema_version": EXECUTION_SCHEMA_VERSION,
-                "protocol_version": EXECUTION_PROTOCOL,
-                "plan_hash": "abc123",
-                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
-                "integration_destination": "main",
-                "run_worktree_path": str(run_worktree),
-                "worker": {
-                    "adapter": "codex",
-                    "argv": worker_argv,
-                    "smoke": {"argv": [*worker_argv, "--optim-plans-smoke"], "timeout_seconds": 5},
-                },
-                "validator_worker": {
-                    "adapter": "codex",
-                    "argv": validator_argv,
-                    "smoke": {"argv": [*validator_argv, "--optim-plans-smoke"], "timeout_seconds": 5},
-                    "timeout_seconds": 5,
-                },
-                "validator_prompt": self._validator_prompt(),
-                "validator_retry_limit": validator_retry_limit,
-                "verification_argv": verification_argv,
-                "verification_timeout_seconds": 5,
-                "items": [
-                    {
-                        "id": "TASK-001",
-                        "allowed_paths": allowed_paths or ["src/app.txt"],
-                        "validator": {"check_ids": ["VC-TASK-001"]},
-                    }
-                ],
-            }
-        )
+        manifest = {
+            "schema_version": EXECUTION_SCHEMA_VERSION,
+            "protocol_version": EXECUTION_PROTOCOL,
+            "plan_hash": "abc123",
+            "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+            "integration_destination": "main",
+            "run_worktree_path": str(run_worktree),
+            "worker": {
+                "adapter": "codex",
+                "argv": worker_argv,
+                "smoke": {"argv": [*worker_argv, "--optim-plans-smoke"], "timeout_seconds": 5},
+            },
+            "validator_worker": {
+                "adapter": "codex",
+                "argv": validator_argv,
+                "smoke": {"argv": [*validator_argv, "--optim-plans-smoke"], "timeout_seconds": 5},
+                "timeout_seconds": 5,
+            },
+            "validator_prompt": self._validator_prompt(),
+            "validator_retry_limit": validator_retry_limit,
+            "verification_argv": verification_argv,
+            "verification_timeout_seconds": 5,
+            "items": [
+                {
+                    "id": "TASK-001",
+                    "allowed_paths": allowed_paths or ["src/app.txt"],
+                    "validator": {"check_ids": ["VC-TASK-001"]},
+                }
+            ],
+        }
+        if ignored_runtime_outputs is not None:
+            manifest["ignored_runtime_outputs"] = ignored_runtime_outputs
+        state.persist_execution_manifest(manifest)
         question = state.request_execution_approval()
         state.record_answer(question["nonce"], "approve")
         state.start_execution(question["nonce"])
@@ -665,6 +669,65 @@ class ExecutionTests(unittest.TestCase):
             self.assertIn("host_agent_registered", event_types)
             self.assertIn("checkpoint_created", event_types)
             self.assertIn("run_finished", event_types)
+
+    def test_manifest_ignored_runtime_outputs_do_not_block_checkpoint_or_final_audit(self) -> None:
+        from scripts.optim_plans_core import OptimPlansState
+
+        with tempfile.TemporaryDirectory() as raw:
+            repo = make_repo(Path(raw))
+            self._add_passing_full_proof_files(repo)
+            state = OptimPlansState.initialize(repo, topic="Runtime Outputs", plan_hash="abc123")
+            run_worktree = state.root / "run-worktrees" / state.run_id
+            state.persist_execution_manifest(
+                {
+                    "plan_hash": "abc123",
+                    "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                    "integration_destination": "main",
+                    "run_worktree_path": str(run_worktree),
+                    "worker": self._host_worker(),
+                    "ignored_runtime_outputs": ["runtime-output/"],
+                    "verification_argv": [
+                        sys.executable,
+                        "-c",
+                        "from pathlib import Path; assert Path('src/host.txt').read_text() == 'ok\\n'",
+                    ],
+                    "verification_timeout_seconds": 5,
+                    "items": [{"id": "TASK-001", "allowed_paths": ["src/host.txt"]}],
+                }
+            )
+            question = state.request_execution_approval()
+            state.record_answer(question["nonce"], "approve")
+            state.start_execution(question["nonce"])
+
+            assignment = state.assign_item("TASK-001")
+            self.assertIn("runtime-output", assignment["launch_block"]["ignored_audit_noise"]["patterns"])
+            authorized = state.authorize_spawn("TASK-001", assignment["assignment_nonce"], assignment["launch_block"])
+            state.register_agent(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                launch_nonce=authorized["launch_nonce"],
+                agent_handle="agent-123",
+                launch_block=assignment["launch_block"],
+            )
+            (run_worktree / "src").mkdir()
+            (run_worktree / "src/host.txt").write_text("ok\n", encoding="utf-8")
+            runtime_output = run_worktree / "runtime-output" / "trace.json"
+            runtime_output.parent.mkdir()
+            runtime_output.write_text("{}\n", encoding="utf-8")
+            state.complete_host_item(
+                "TASK-001",
+                assignment_nonce=assignment["assignment_nonce"],
+                agent_handle="agent-123",
+                evidence="wait_agent completed",
+            )
+            checkpoint = state.advance_item("TASK-001")
+            if checkpoint.get("phase") == "awaiting_execution_summary":
+                self._answer_execution_summary(state)
+                checkpoint = state.advance_item("TASK-001")
+
+            self.assertEqual(checkpoint["phase"], "finalized")
+            self.assertEqual(checkpoint["changed_files"], ["src/host.txt"])
+            self.assertNotIn("runtime-output/trace.json", git(run_worktree, "ls-tree", "-r", "--name-only", "HEAD"))
 
     def test_host_validator_launch_and_result_are_bound_to_nonce_handle_and_delta(self) -> None:
         from scripts.optim_plans_core import EXECUTION_PROTOCOL, EXECUTION_SCHEMA_VERSION, OptimPlansState
@@ -1745,14 +1808,19 @@ class ExecutionTests(unittest.TestCase):
             repo = make_repo(raw_path)
             self._add_passing_full_proof_files(repo)
             argv_log = raw_path / "argv.json"
+            policy_log = raw_path / "policy.json"
             sentinel = raw_path / "shell-expanded"
             worker = self._worker(
                 raw_path / "codex",
                 "import json, os, sys\n"
                 "from pathlib import Path\n"
                 f"Path({str(argv_log)!r}).write_text(json.dumps(sys.argv), encoding='utf-8')\n"
+                "state = json.loads(Path(os.environ['OPTIM_PLANS_STATE_PATH']).read_text(encoding='utf-8'))\n"
+                f"Path({str(policy_log)!r}).write_text(json.dumps({{'env': json.loads(os.environ['OPTIM_PLANS_IGNORED_AUDIT_NOISE']), 'state': state['ignored_audit_noise']}}), encoding='utf-8')\n"
                 "Path('src').mkdir(exist_ok=True)\n"
                 "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
+                "Path('runtime-output').mkdir(exist_ok=True)\n"
+                "Path('runtime-output/trace.json').write_text('{}\\n', encoding='utf-8')\n"
                 "print(json.dumps({\n"
                 "    'nonce': os.environ['OPTIM_PLANS_WORKER_NONCE'],\n"
                 "    'item_id': os.environ['OPTIM_PLANS_IDS'],\n"
@@ -1769,6 +1837,7 @@ class ExecutionTests(unittest.TestCase):
                     "from pathlib import Path; assert Path('src/app.txt').read_text() == 'ok\\n'",
                 ],
                 worker_env={"EXTRA_LITERAL": f"; touch {sentinel}"},
+                ignored_runtime_outputs=["runtime-output/"],
             )
             checkpoint = state.run_item("TASK-001")
             if checkpoint.get("phase") == "awaiting_execution_summary":
@@ -1782,6 +1851,10 @@ class ExecutionTests(unittest.TestCase):
             )
             self.assertFalse(sentinel.exists())
             self.assertFalse(any("schema" in arg for arg in json.loads(argv_log.read_text(encoding="utf-8"))))
+            policy = json.loads(policy_log.read_text(encoding="utf-8"))
+            self.assertIn("runtime-output", policy["env"]["patterns"])
+            self.assertEqual(policy["env"], policy["state"])
+            self.assertNotIn("runtime-output/trace.json", git(run_worktree, "ls-tree", "-r", "--name-only", "HEAD"))
             self.assertEqual(
                 [event["type"] for event in state.replay().events[-7:]],
                 [
@@ -1840,6 +1913,7 @@ class ExecutionTests(unittest.TestCase):
             validator_dir = raw_path / "validator"
             worker_dir.mkdir()
             validator_dir.mkdir()
+            validator_policy_log = raw_path / "validator-policy.json"
             worker = self._worker(
                 worker_dir / "codex",
                 "import json, os\n"
@@ -1856,6 +1930,9 @@ class ExecutionTests(unittest.TestCase):
             validator = self._worker(
                 validator_dir / "codex",
                 "import json, os\n"
+                "from pathlib import Path\n"
+                "state = json.loads(Path(os.environ['OPTIM_PLANS_VALIDATOR_STATE_PATH']).read_text(encoding='utf-8'))\n"
+                f"Path({str(validator_policy_log)!r}).write_text(json.dumps({{'env': json.loads(os.environ['OPTIM_PLANS_IGNORED_AUDIT_NOISE']), 'state': state['ignored_audit_noise']}}), encoding='utf-8')\n"
                 "print(json.dumps({\n"
                 "    'run_id': os.environ['OPTIM_PLANS_RUN_ID'],\n"
                 "    'item_id': os.environ['OPTIM_PLANS_ITEM_ID'],\n"
@@ -1879,6 +1956,7 @@ class ExecutionTests(unittest.TestCase):
                     "-c",
                     "from pathlib import Path; assert Path('src/app.txt').read_text() == 'ok\\n'",
                 ],
+                ignored_runtime_outputs=["runtime-output/"],
             )
 
             checkpoint = state.run_item("TASK-001")
@@ -1892,6 +1970,9 @@ class ExecutionTests(unittest.TestCase):
             validator_event = next(event["payload"] for event in state.replay().events if event["type"] == "validator_result_recorded")
             self.assertEqual(validator_event["status"], "pass")
             self.assertEqual(validator_event["checked_items"], ["VC-TASK-001"])
+            validator_policy = json.loads(validator_policy_log.read_text(encoding="utf-8"))
+            self.assertIn("runtime-output", validator_policy["env"]["patterns"])
+            self.assertEqual(validator_policy["env"], validator_policy["state"])
             self.assertEqual(git(run_worktree, "rev-parse", "--verify", "HEAD"), checkpoint["commit"])
 
     def test_validator_fail_auto_retries_with_feedback_in_cli_executor_env_and_state(self) -> None:

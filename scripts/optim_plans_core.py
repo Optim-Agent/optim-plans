@@ -79,7 +79,7 @@ PLAN_CONTEXT_FILE_RE = re.compile(r"^PLAN_v([0-9]+)\.md$")
 HOST_EXECUTOR_PROMPT_CONTRACT = {
     "instructions": [
         "Modify only the assigned run worktree.",
-        "Leave ignored audit noise untouched; the controller ignores .xsw/, .pytest_cache/, __pycache__/, and *.pyc.",
+        "Leave ignored audit noise from the launch block untouched.",
         "Keep pursuing the assigned goal until complete or genuinely blocked.",
         "Return concise completion evidence to the host.",
         "The controller, not the worker, performs verification, audit, checkpoint, retry, and finalization.",
@@ -948,6 +948,27 @@ def _source_status_entries(repo: Path, *, ignored_paths: list[Path] | None = Non
     return entries
 
 
+def _normalize_ignored_runtime_outputs(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(scope, str) and scope.strip() for scope in raw):
+        raise ContractError("execution manifest ignored_runtime_outputs must be a list of non-empty strings")
+    normalized: list[str] = []
+    for scope in raw:
+        current = _normalize_scope(scope)
+        if current == ".":
+            raise ContractError("execution manifest ignored_runtime_outputs cannot ignore the repository root")
+        if current == ".git" or current.startswith(".git/"):
+            raise ContractError("execution manifest ignored_runtime_outputs cannot ignore Git metadata")
+        if current not in normalized:
+            normalized.append(current)
+    return normalized
+
+
+def _is_runtime_output(path: str, scopes: list[str]) -> bool:
+    return bool(scopes) and _path_in_scope(path, scopes)
+
+
 def _is_allowed_ignored_audit_noise(path: str) -> bool:
     return (
         path == ".xsw"
@@ -961,8 +982,38 @@ def _is_allowed_ignored_audit_noise(path: str) -> bool:
     )
 
 
-def ignored_audit_noise_policy() -> dict[str, Any]:
-    return {"action": "leave_untouched", "patterns": list(IGNORED_AUDIT_NOISE_PATTERNS)}
+def _require_runtime_output_safe(repo: Path, path: str) -> None:
+    candidate = repo / path
+    if candidate.is_symlink():
+        raise ContractError(f"symlink runtime output is not allowed: {path}")
+    if _contains_nested_repo(repo, path):
+        raise ContractError(f"nested repository runtime output is not allowed: {path}")
+
+
+def _is_ignorable_runtime_status(
+    repo: Path,
+    status_code: str,
+    path: str,
+    ignored_runtime_outputs: list[str],
+) -> bool:
+    if status_code == "!!":
+        if _is_allowed_ignored_audit_noise(path):
+            return True
+        if _is_runtime_output(path, ignored_runtime_outputs):
+            _require_runtime_output_safe(repo, path)
+            return True
+        return False
+    if status_code == "??" and _is_runtime_output(path, ignored_runtime_outputs):
+        _require_runtime_output_safe(repo, path)
+        return True
+    return False
+
+
+def ignored_audit_noise_policy(ignored_runtime_outputs: list[str] | None = None) -> dict[str, Any]:
+    patterns = list(IGNORED_AUDIT_NOISE_PATTERNS)
+    if ignored_runtime_outputs:
+        patterns.extend(ignored_runtime_outputs)
+    return {"action": "leave_untouched", "patterns": patterns}
 
 
 def _diff_paths(repo: Path, base_commit: str, head_commit: str) -> list[str]:
@@ -1036,17 +1087,19 @@ def audit_git_delta(
     allowed_paths: list[str],
     base_commit: str | None = None,
     head_commit: str | None = None,
+    ignored_runtime_outputs: list[str] | None = None,
 ) -> dict[str, Any]:
     scopes = [_normalize_scope(scope) for scope in allowed_paths]
     if not scopes:
         raise ContractError("allowed paths are required for Git delta audit")
     resolve_path_scopes(repo, scopes)
+    ignored_outputs = _normalize_ignored_runtime_outputs(ignored_runtime_outputs)
 
     paths: dict[str, str] = {}
     for status_code, path in _status_entries(repo):
+        if _is_ignorable_runtime_status(repo, status_code, path, ignored_outputs):
+            continue
         if status_code == "!!":
-            if _is_allowed_ignored_audit_noise(path):
-                continue
             raise ContractError(f"ignored change is not allowed: {path}")
         paths[path] = "status"
     if base_commit is not None:
@@ -1074,11 +1127,17 @@ def audit_git_delta(
     return {"status": "passed", "changed_files": sorted(paths)}
 
 
-def checkpoint_delta_fingerprint(repo: Path, changed_files: list[str]) -> str:
+def checkpoint_delta_fingerprint(
+    repo: Path,
+    changed_files: list[str],
+    *,
+    ignored_runtime_outputs: list[str] | None = None,
+) -> str:
+    ignored_outputs = _normalize_ignored_runtime_outputs(ignored_runtime_outputs)
     status = sorted(
         (status_code, path)
         for status_code, path in _status_entries(repo)
-        if status_code != "!!" or not _is_allowed_ignored_audit_noise(path)
+        if not _is_ignorable_runtime_status(repo, status_code, path, ignored_outputs)
     )
     return stable_json_hash(
         {
@@ -1933,6 +1992,8 @@ class OptimPlansState:
 
     def _canonicalize_execution_manifest(self, manifest: dict[str, Any]) -> dict[str, Any]:
         canonical = _json_clone(manifest, source="execution manifest")
+        if "ignored_runtime_outputs" in canonical:
+            canonical["ignored_runtime_outputs"] = _normalize_ignored_runtime_outputs(canonical.get("ignored_runtime_outputs"))
         if isinstance(canonical.get("worker"), dict):
             worker_item = {"id": "__manifest_worker__", "worker": canonical["worker"], "allowed_paths": []}
             canonical["worker"] = self._worker_config(canonical, worker_item)
@@ -1955,6 +2016,7 @@ class OptimPlansState:
             raise ContractError(f"execution manifest schema_version must be {EXECUTION_SCHEMA_VERSION}")
         if manifest.get("protocol_version") != EXECUTION_PROTOCOL:
             raise ContractError(f"execution manifest protocol_version must be {EXECUTION_PROTOCOL}")
+        _normalize_ignored_runtime_outputs(manifest.get("ignored_runtime_outputs"))
         retry_limit = manifest.get("validator_retry_limit")
         if not isinstance(retry_limit, int) or retry_limit < 0:
             raise ContractError("execution manifest validator_retry_limit must be a non-negative integer")
@@ -2762,8 +2824,10 @@ class OptimPlansState:
         *,
         expected_head: str,
         clean: bool,
+        ignored_runtime_outputs: list[str] | None = None,
     ) -> Path:
         run_worktree = Path(started["run_worktree"])
+        ignored_outputs = _normalize_ignored_runtime_outputs(ignored_runtime_outputs)
         try:
             if git_common_dir(run_worktree).resolve() != git_common_dir(self.repo).resolve():
                 raise ContractError("run worktree no longer belongs to the source repository")
@@ -2774,7 +2838,7 @@ class OptimPlansState:
             if git(run_worktree, "rev-parse", "--verify", "HEAD") != expected_head:
                 raise ContractError("run worktree HEAD is not the latest controller checkpoint")
             if clean and any(
-                status_code != "!!" or not _is_allowed_ignored_audit_noise(path)
+                not _is_ignorable_runtime_status(run_worktree, status_code, path, ignored_outputs)
                 for status_code, path in _status_entries(run_worktree)
             ):
                 raise ContractError("run worktree is not clean at the latest controller checkpoint")
@@ -3564,6 +3628,7 @@ class OptimPlansState:
 
     def _host_launch_block(self, *, item_id: str, start: dict[str, Any], worker_config: dict[str, Any]) -> dict[str, Any]:
         events = self.replay().events
+        ignored_runtime_outputs = _normalize_ignored_runtime_outputs(start.get("ignored_runtime_outputs"))
         block = {
             "run_id": self.run_id,
             "item_id": item_id,
@@ -3572,7 +3637,7 @@ class OptimPlansState:
             "base_commit": start["base_commit"],
             "cwd": start["run_worktree"],
             "allowed_paths": list(start["allowed_paths"]),
-            "ignored_audit_noise": ignored_audit_noise_policy(),
+            "ignored_audit_noise": ignored_audit_noise_policy(ignored_runtime_outputs),
             "worker": worker_config,
             "plan_context": start.get("plan_context") or self._plan_context(),
         }
@@ -3601,6 +3666,7 @@ class OptimPlansState:
         worker_config: dict[str, Any],
     ) -> dict[str, Any]:
         events = self.replay().events
+        ignored_runtime_outputs = _normalize_ignored_runtime_outputs(start.get("ignored_runtime_outputs"))
         block = {
             "run_id": self.run_id,
             "batch_id": batch_id,
@@ -3610,7 +3676,7 @@ class OptimPlansState:
             "base_commit": start["base_commit"],
             "cwd": start["run_worktree"],
             "allowed_paths": list(start["allowed_paths"]),
-            "ignored_audit_noise": ignored_audit_noise_policy(),
+            "ignored_audit_noise": ignored_audit_noise_policy(ignored_runtime_outputs),
             "worker": worker_config,
             "plan_context": start.get("plan_context") or self._plan_context(),
         }
@@ -4683,17 +4749,24 @@ class OptimPlansState:
     ) -> dict[str, Any]:
         run_worktree = self._require_run_worktree(started, expected_head=start["base_commit"], clean=False)
         allowed_paths = self._item_allowed_paths(item)
+        ignored_runtime_outputs = _normalize_ignored_runtime_outputs(manifest.get("ignored_runtime_outputs"))
         audit = audit_git_delta(
             run_worktree,
             allowed_paths=allowed_paths,
             base_commit=start["base_commit"],
             head_commit=start["base_commit"],
+            ignored_runtime_outputs=ignored_runtime_outputs,
         )
         return {
             "run_worktree": str(run_worktree),
             "allowed_paths": allowed_paths,
             "changed_files": audit["changed_files"],
-            "delta_fingerprint": checkpoint_delta_fingerprint(run_worktree, audit["changed_files"]),
+            "delta_fingerprint": checkpoint_delta_fingerprint(
+                run_worktree,
+                audit["changed_files"],
+                ignored_runtime_outputs=ignored_runtime_outputs,
+            ),
+            "ignored_runtime_outputs": ignored_runtime_outputs,
         }
 
     def _batch_delta_locked(
@@ -4705,17 +4778,24 @@ class OptimPlansState:
     ) -> dict[str, Any]:
         run_worktree = self._require_run_worktree(started, expected_head=start["base_commit"], clean=False)
         allowed_paths = self._batch_allowed_paths(self._batch_items(manifest, list(start["item_ids"])))
+        ignored_runtime_outputs = _normalize_ignored_runtime_outputs(manifest.get("ignored_runtime_outputs"))
         audit = audit_git_delta(
             run_worktree,
             allowed_paths=allowed_paths,
             base_commit=start["base_commit"],
             head_commit=start["base_commit"],
+            ignored_runtime_outputs=ignored_runtime_outputs,
         )
         return {
             "run_worktree": str(run_worktree),
             "allowed_paths": allowed_paths,
             "changed_files": audit["changed_files"],
-            "delta_fingerprint": checkpoint_delta_fingerprint(run_worktree, audit["changed_files"]),
+            "delta_fingerprint": checkpoint_delta_fingerprint(
+                run_worktree,
+                audit["changed_files"],
+                ignored_runtime_outputs=ignored_runtime_outputs,
+            ),
+            "ignored_runtime_outputs": ignored_runtime_outputs,
         }
 
     def _validator_launch_block(
@@ -4726,6 +4806,7 @@ class OptimPlansState:
         validator_prompt: dict[str, Any],
         check_ids: list[str],
     ) -> dict[str, Any]:
+        ignored_runtime_outputs = _normalize_ignored_runtime_outputs(assignment.get("ignored_runtime_outputs"))
         block = {
             "run_id": self.run_id,
             "item_id": assignment["item_id"],
@@ -4734,6 +4815,7 @@ class OptimPlansState:
             "base_commit": assignment["base_commit"],
             "cwd": assignment["run_worktree"],
             "allowed_paths": list(assignment["allowed_paths"]),
+            "ignored_audit_noise": ignored_audit_noise_policy(ignored_runtime_outputs),
             "changed_files": list(assignment["changed_files"]),
             "check_ids": list(check_ids),
             "delta_fingerprint": assignment["delta_fingerprint"],
@@ -4762,6 +4844,7 @@ class OptimPlansState:
         validator_prompt: dict[str, Any],
         check_ids: list[str],
     ) -> dict[str, Any]:
+        ignored_runtime_outputs = _normalize_ignored_runtime_outputs(assignment.get("ignored_runtime_outputs"))
         block = {
             "run_id": self.run_id,
             "batch_id": assignment["batch_id"],
@@ -4772,6 +4855,7 @@ class OptimPlansState:
             "base_commit": assignment["base_commit"],
             "cwd": assignment["run_worktree"],
             "allowed_paths": list(assignment["allowed_paths"]),
+            "ignored_audit_noise": ignored_audit_noise_policy(ignored_runtime_outputs),
             "changed_files": list(assignment["changed_files"]),
             "check_ids": list(check_ids),
             "delta_fingerprint": assignment["delta_fingerprint"],
@@ -4894,6 +4978,7 @@ class OptimPlansState:
             "run_branch": started["run_branch"],
             "allowed_paths": delta["allowed_paths"],
             "changed_files": delta["changed_files"],
+            "ignored_runtime_outputs": delta["ignored_runtime_outputs"],
             "validator_nonce": uuid.uuid4().hex,
             "validator_config_hash": stable_json_hash(validator_config),
             "validator_prompt_hash": prompt_hash,
@@ -5011,6 +5096,7 @@ class OptimPlansState:
             "run_branch": started["run_branch"],
             "allowed_paths": delta["allowed_paths"],
             "changed_files": delta["changed_files"],
+            "ignored_runtime_outputs": delta["ignored_runtime_outputs"],
             "validator_nonce": uuid.uuid4().hex,
             "validator_config_hash": stable_json_hash(validator_config),
             "validator_prompt_hash": prompt_hash,
@@ -5199,10 +5285,12 @@ class OptimPlansState:
             for dependency in item.get("depends_on", []):
                 if statuses.get(dependency) != "verified":
                     raise ContractError(f"{item_id} dependency {dependency} is not verified")
+            ignored_runtime_outputs = _normalize_ignored_runtime_outputs(record["manifest"].get("ignored_runtime_outputs"))
             run_worktree = self._require_run_worktree(
                 started,
                 expected_head=self._latest_checkpoint(replayed.events, started),
                 clean=True,
+                ignored_runtime_outputs=ignored_runtime_outputs,
             )
             start = {
                 "item_id": item_id,
@@ -5216,6 +5304,7 @@ class OptimPlansState:
                 "run_worktree": str(run_worktree),
                 "run_branch": started["run_branch"],
                 "allowed_paths": self._item_allowed_paths(item),
+                "ignored_runtime_outputs": ignored_runtime_outputs,
                 "assignment_nonce": uuid.uuid4().hex,
                 "worker_config_hash": worker_config_hash,
                 "plan_context": self._plan_context(),
@@ -5343,10 +5432,12 @@ class OptimPlansState:
         items = self._batch_items(manifest, item_ids)
         worker_config = self._require_host_batch_worker_config(manifest, items)
         worker_config_hash = stable_json_hash(worker_config)
+        ignored_runtime_outputs = _normalize_ignored_runtime_outputs(manifest.get("ignored_runtime_outputs"))
         run_worktree = self._require_run_worktree(
             started,
             expected_head=self._latest_checkpoint(events, started),
             clean=True,
+            ignored_runtime_outputs=ignored_runtime_outputs,
         )
         batch_id = batch_id or f"B-{uuid.uuid4().hex[:12]}"
         start = {
@@ -5362,6 +5453,7 @@ class OptimPlansState:
             "run_worktree": str(run_worktree),
             "run_branch": started["run_branch"],
             "allowed_paths": self._batch_allowed_paths(items),
+            "ignored_runtime_outputs": ignored_runtime_outputs,
             "assignment_nonce": uuid.uuid4().hex,
             "worker_config_hash": worker_config_hash,
             "plan_context": self._plan_context(),
@@ -6814,6 +6906,7 @@ class OptimPlansState:
         self._ensure_adapter_launch_files(validator_config, write=False)
         run_worktree = Path(assignment["run_worktree"])
         state_path = self.run_dir / "validator-states" / f"{item_id}-{assignment['attempt']}.json"
+        ignored_audit_noise = assignment["validator_launch_block"]["ignored_audit_noise"]
         validator_state = {
             "run_id": self.run_id,
             "item_id": item_id,
@@ -6825,6 +6918,7 @@ class OptimPlansState:
             "checked_items": self._item_validator_check_ids(self._manifest_item(self._execution_manifest_record(self.replay().events)["manifest"], item_id)),
             "validator_prompt": self._execution_manifest_record(self.replay().events)["manifest"]["validator_prompt"],
             "plan_context": assignment["validator_launch_block"]["plan_context"],
+            "ignored_audit_noise": ignored_audit_noise,
         }
         write_json_atomic(state_path, validator_state)
         env = os.environ.copy()
@@ -6841,6 +6935,7 @@ class OptimPlansState:
                 "OPTIM_PLANS_VALIDATOR_STATE_PATH": str(state_path),
                 "OPTIM_PLANS_CHECK_IDS": json_text(validator_state["checked_items"]),
                 "OPTIM_PLANS_PLAN_CONTEXT": json_text(validator_state["plan_context"]),
+                "OPTIM_PLANS_IGNORED_AUDIT_NOISE": json_text(ignored_audit_noise),
             }
         )
         validator = run_process_group(
@@ -7243,6 +7338,7 @@ class OptimPlansState:
         checked_items = self._batch_validator_check_ids(
             self._batch_items(self._execution_manifest_record(self.replay().events)["manifest"], item_ids)
         )
+        ignored_audit_noise = assignment["validator_launch_block"]["ignored_audit_noise"]
         validator_state = {
             "run_id": self.run_id,
             "batch_id": batch_id,
@@ -7257,6 +7353,7 @@ class OptimPlansState:
             "validator_prompt": self._execution_manifest_record(self.replay().events)["manifest"]["validator_prompt"],
             "plan_context": assignment["validator_launch_block"]["plan_context"],
             "prior_context": assignment["validator_launch_block"].get("prior_context", ""),
+            "ignored_audit_noise": ignored_audit_noise,
         }
         write_json_atomic(state_path, validator_state)
         env = os.environ.copy()
@@ -7275,6 +7372,7 @@ class OptimPlansState:
                 "OPTIM_PLANS_VALIDATOR_STATE_PATH": str(state_path),
                 "OPTIM_PLANS_CHECK_IDS": json_text(checked_items),
                 "OPTIM_PLANS_PLAN_CONTEXT": json_text(validator_state["plan_context"]),
+                "OPTIM_PLANS_IGNORED_AUDIT_NOISE": json_text(ignored_audit_noise),
             }
         )
         if validator_state["prior_context"]:
@@ -7687,10 +7785,12 @@ class OptimPlansState:
             run_worktree = Path(started["run_worktree"])
             worker_nonce = uuid.uuid4().hex
             state_path = self.run_dir / "worker-states" / f"{item_id}-{started['attempt']}.json"
+            ignored_audit_noise = ignored_audit_noise_policy(started.get("ignored_runtime_outputs"))
             worker_state: dict[str, Any] = {
                 "run_id": self.run_id,
                 "worker_nonce": worker_nonce,
                 "plan_context": started["plan_context"],
+                "ignored_audit_noise": ignored_audit_noise,
             }
             feedback = self._latest_validator_feedback(self.replay().events, item_id)
             if feedback is not None:
@@ -7709,6 +7809,7 @@ class OptimPlansState:
                     "OPTIM_PLANS_IDS": item_id,
                     "OPTIM_PLANS_SCOPES": os.pathsep.join(started["allowed_paths"]),
                     "OPTIM_PLANS_PLAN_CONTEXT": json_text(worker_state["plan_context"]),
+                    "OPTIM_PLANS_IGNORED_AUDIT_NOISE": json_text(ignored_audit_noise),
                 }
             )
             if feedback is not None:
@@ -7966,10 +8067,12 @@ class OptimPlansState:
             for dependency in item.get("depends_on", []):
                 if statuses.get(dependency) != "verified":
                     raise ContractError(f"{item_id} dependency {dependency} is not verified")
+            ignored_runtime_outputs = _normalize_ignored_runtime_outputs(record["manifest"].get("ignored_runtime_outputs"))
             run_worktree = self._require_run_worktree(
                 started,
                 expected_head=self._latest_checkpoint(replayed.events, started),
                 clean=True,
+                ignored_runtime_outputs=ignored_runtime_outputs,
             )
             payload = {
                 "item_id": item_id,
@@ -7983,6 +8086,7 @@ class OptimPlansState:
                 "run_worktree": str(run_worktree),
                 "run_branch": started["run_branch"],
                 "allowed_paths": self._item_allowed_paths(item),
+                "ignored_runtime_outputs": ignored_runtime_outputs,
                 "plan_context": self._plan_context(),
             }
             return self._append_event_locked("item_started", payload)["payload"]
@@ -8056,6 +8160,7 @@ class OptimPlansState:
         if statuses[item_id] not in {"completed", "validated"}:
             raise ContractError(f"{item_id} is not completed and ready for checkpoint")
         start = self._latest_item_start(events, item_id)
+        ignored_runtime_outputs = _normalize_ignored_runtime_outputs(record["manifest"].get("ignored_runtime_outputs"))
         try:
             self._require_protected_metadata_clean(started)
             run_worktree = self._require_run_worktree(
@@ -8069,8 +8174,13 @@ class OptimPlansState:
                 allowed_paths=allowed_paths,
                 base_commit=start["base_commit"],
                 head_commit=start["base_commit"],
+                ignored_runtime_outputs=ignored_runtime_outputs,
             )
-            fingerprint = checkpoint_delta_fingerprint(run_worktree, audit["changed_files"])
+            fingerprint = checkpoint_delta_fingerprint(
+                run_worktree,
+                audit["changed_files"],
+                ignored_runtime_outputs=ignored_runtime_outputs,
+            )
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
             self._record_attempt_failure_locked("audit_failed", item_id, evidence=f"audit failed: {exc}", start=start)
             raise
@@ -8091,6 +8201,7 @@ class OptimPlansState:
             "run_worktree": str(run_worktree),
             "run_branch": started["run_branch"],
             "allowed_paths": allowed_paths,
+            "ignored_runtime_outputs": ignored_runtime_outputs,
             "attempt": start["attempt"],
             "head_commit": git(run_worktree, "rev-parse", "--verify", "HEAD"),
             "delta_fingerprint": fingerprint,
@@ -8107,6 +8218,7 @@ class OptimPlansState:
         started = self._execution_started_record(events)
         item = self._manifest_item(record["manifest"], item_id)
         start = self._latest_item_start(events, item_id)
+        ignored_runtime_outputs = _normalize_ignored_runtime_outputs(record["manifest"].get("ignored_runtime_outputs"))
         try:
             self._require_protected_metadata_clean(started)
             run_worktree = self._require_run_worktree(
@@ -8124,10 +8236,18 @@ class OptimPlansState:
                 allowed_paths=allowed_paths,
                 base_commit=prepared["base_commit"],
                 head_commit=prepared["head_commit"],
+                ignored_runtime_outputs=ignored_runtime_outputs,
             )
             if audit["changed_files"] != prepared["changed_files"]:
                 raise ContractError("run worktree changed since checkpoint preparation")
-            if checkpoint_delta_fingerprint(run_worktree, audit["changed_files"]) != prepared["delta_fingerprint"]:
+            if (
+                checkpoint_delta_fingerprint(
+                    run_worktree,
+                    audit["changed_files"],
+                    ignored_runtime_outputs=ignored_runtime_outputs,
+                )
+                != prepared["delta_fingerprint"]
+            ):
                 raise ContractError("run worktree changed since checkpoint preparation")
             for path in audit["changed_files"]:
                 git(run_worktree, "add", "-A", "--", path)
@@ -8152,7 +8272,11 @@ class OptimPlansState:
                 check=True,
             )
             commit = git(run_worktree, "rev-parse", "--verify", "HEAD")
-            clean_audit = audit_git_delta(run_worktree, allowed_paths=allowed_paths)
+            clean_audit = audit_git_delta(
+                run_worktree,
+                allowed_paths=allowed_paths,
+                ignored_runtime_outputs=ignored_runtime_outputs,
+            )
             if clean_audit["changed_files"]:
                 raise ContractError("run worktree is not clean after checkpoint")
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
@@ -8202,6 +8326,7 @@ class OptimPlansState:
             raise ContractError(f"{batch_id} is not validated and ready for checkpoint")
         if any(statuses[item_id] not in {"completed", "validated"} for item_id in item_ids):
             raise ContractError(f"{batch_id} is not completed and ready for checkpoint")
+        ignored_runtime_outputs = _normalize_ignored_runtime_outputs(record["manifest"].get("ignored_runtime_outputs"))
         try:
             self._require_protected_metadata_clean(started)
             run_worktree = self._require_run_worktree(
@@ -8215,8 +8340,13 @@ class OptimPlansState:
                 allowed_paths=allowed_paths,
                 base_commit=start["base_commit"],
                 head_commit=start["base_commit"],
+                ignored_runtime_outputs=ignored_runtime_outputs,
             )
-            fingerprint = checkpoint_delta_fingerprint(run_worktree, audit["changed_files"])
+            fingerprint = checkpoint_delta_fingerprint(
+                run_worktree,
+                audit["changed_files"],
+                ignored_runtime_outputs=ignored_runtime_outputs,
+            )
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
             self._record_batch_attempt_failure_locked("batch_audit_failed", batch_id, evidence=f"audit failed: {exc}", start=start)
             raise
@@ -8237,6 +8367,7 @@ class OptimPlansState:
             "run_worktree": str(run_worktree),
             "run_branch": started["run_branch"],
             "allowed_paths": allowed_paths,
+            "ignored_runtime_outputs": ignored_runtime_outputs,
             "attempt": start["attempt"],
             "assignment_nonce": start["assignment_nonce"],
             "head_commit": git(run_worktree, "rev-parse", "--verify", "HEAD"),
@@ -8250,8 +8381,10 @@ class OptimPlansState:
         prepared: dict[str, Any],
     ) -> dict[str, Any]:
         batch_id = prepared["batch_id"]
+        record = self._execution_manifest_record(events)
         started = self._execution_started_record(events)
         start = self._latest_batch_start(events, batch_id)
+        ignored_runtime_outputs = _normalize_ignored_runtime_outputs(record["manifest"].get("ignored_runtime_outputs"))
         try:
             self._require_protected_metadata_clean(started)
             run_worktree = self._require_run_worktree(
@@ -8269,10 +8402,18 @@ class OptimPlansState:
                 allowed_paths=allowed_paths,
                 base_commit=prepared["base_commit"],
                 head_commit=prepared["head_commit"],
+                ignored_runtime_outputs=ignored_runtime_outputs,
             )
             if audit["changed_files"] != prepared["changed_files"]:
                 raise ContractError("run worktree changed since checkpoint preparation")
-            if checkpoint_delta_fingerprint(run_worktree, audit["changed_files"]) != prepared["delta_fingerprint"]:
+            if (
+                checkpoint_delta_fingerprint(
+                    run_worktree,
+                    audit["changed_files"],
+                    ignored_runtime_outputs=ignored_runtime_outputs,
+                )
+                != prepared["delta_fingerprint"]
+            ):
                 raise ContractError("run worktree changed since checkpoint preparation")
             for path in audit["changed_files"]:
                 git(run_worktree, "add", "-A", "--", path)
@@ -8302,7 +8443,11 @@ class OptimPlansState:
                 check=True,
             )
             commit = git(run_worktree, "rev-parse", "--verify", "HEAD")
-            clean_audit = audit_git_delta(run_worktree, allowed_paths=allowed_paths)
+            clean_audit = audit_git_delta(
+                run_worktree,
+                allowed_paths=allowed_paths,
+                ignored_runtime_outputs=ignored_runtime_outputs,
+            )
             if clean_audit["changed_files"]:
                 raise ContractError("run worktree is not clean after checkpoint")
         except (ContractError, subprocess.CalledProcessError, OSError) as exc:
@@ -8523,14 +8668,21 @@ class OptimPlansState:
             for item in record["manifest"]["items"]:
                 allowed.extend(self._item_allowed_paths(item))
             head = self._latest_checkpoint(replayed.events, started)
+            ignored_runtime_outputs = _normalize_ignored_runtime_outputs(record["manifest"].get("ignored_runtime_outputs"))
             try:
                 self._require_protected_metadata_clean(started)
-                run_worktree = self._require_run_worktree(started, expected_head=head, clean=True)
+                run_worktree = self._require_run_worktree(
+                    started,
+                    expected_head=head,
+                    clean=True,
+                    ignored_runtime_outputs=ignored_runtime_outputs,
+                )
                 audit = audit_git_delta(
                     run_worktree,
                     allowed_paths=allowed,
                     base_commit=started["source_base"],
                     head_commit=head,
+                    ignored_runtime_outputs=ignored_runtime_outputs,
                 )
             except (ContractError, subprocess.CalledProcessError, OSError) as exc:
                 payload = {
