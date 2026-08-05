@@ -2008,6 +2008,19 @@ class OptimPlansState:
                 item["validator"] = {"check_ids": self._validator_check_ids(item)}
         return canonical
 
+    def _with_controller_ignored_runtime_outputs(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        updated = _json_clone(manifest, source="execution manifest")
+        scopes = _normalize_ignored_runtime_outputs(updated.get("ignored_runtime_outputs"))
+        try:
+            artifact_scope = self.artifact_dir.relative_to(self.repo).as_posix()
+        except ValueError:
+            artifact_scope = ""
+        if artifact_scope:
+            scopes = _normalize_ignored_runtime_outputs([*scopes, artifact_scope])
+        if scopes:
+            updated["ignored_runtime_outputs"] = scopes
+        return updated
+
     def _is_current_execution_manifest(self, manifest: dict[str, Any]) -> bool:
         return "schema_version" in manifest or "protocol_version" in manifest or "validator_worker" in manifest
 
@@ -2245,6 +2258,7 @@ class OptimPlansState:
         return self._append_event_locked("execution_manifest_created", payload)["payload"]
 
     def persist_execution_manifest(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        manifest = self._with_controller_ignored_runtime_outputs(manifest)
         canonical = self._canonicalize_execution_manifest(canonical_execution_manifest(manifest))
         with self.controller_lock():
             replayed = self.replay()
@@ -2264,6 +2278,7 @@ class OptimPlansState:
         manifest = parse_json_strict(raw, source=str(manifest_path))
         if not isinstance(manifest, dict):
             raise ContractError("execution manifest must be a JSON object")
+        manifest = self._with_controller_ignored_runtime_outputs(manifest)
         if self._is_current_execution_manifest(manifest):
             self._require_current_execution_manifest(manifest)
         approved_snapshot: dict[str, Any] | None = None

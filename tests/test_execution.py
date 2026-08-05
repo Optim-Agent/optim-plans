@@ -605,7 +605,8 @@ class ExecutionTests(unittest.TestCase):
                 ],
             )
             assignment = state.assign_item("TASK-001")
-            self.assertEqual(ignored_audit_noise_policy(), assignment["launch_block"]["ignored_audit_noise"])
+            artifact_scope = state.artifact_dir.relative_to(repo).as_posix()
+            self.assertEqual(ignored_audit_noise_policy([artifact_scope]), assignment["launch_block"]["ignored_audit_noise"])
             reloaded = OptimPlansState.load_active(repo).assign_item("TASK-001")
             self.assertEqual(reloaded["assignment_nonce"], assignment["assignment_nonce"])
             self.assertEqual(
@@ -700,6 +701,8 @@ class ExecutionTests(unittest.TestCase):
             state.start_execution(question["nonce"])
 
             assignment = state.assign_item("TASK-001")
+            artifact_scope = state.artifact_dir.relative_to(repo).as_posix()
+            self.assertIn(artifact_scope, assignment["launch_block"]["ignored_audit_noise"]["patterns"])
             self.assertIn("runtime-output", assignment["launch_block"]["ignored_audit_noise"]["patterns"])
             authorized = state.authorize_spawn("TASK-001", assignment["assignment_nonce"], assignment["launch_block"])
             state.register_agent(
@@ -714,6 +717,9 @@ class ExecutionTests(unittest.TestCase):
             runtime_output = run_worktree / "runtime-output" / "trace.json"
             runtime_output.parent.mkdir()
             runtime_output.write_text("{}\n", encoding="utf-8")
+            artifact_output = run_worktree / artifact_scope / "controller-runtime.md"
+            artifact_output.parent.mkdir(parents=True, exist_ok=True)
+            artifact_output.write_text("# runtime note\n", encoding="utf-8")
             state.complete_host_item(
                 "TASK-001",
                 assignment_nonce=assignment["assignment_nonce"],
@@ -727,7 +733,9 @@ class ExecutionTests(unittest.TestCase):
 
             self.assertEqual(checkpoint["phase"], "finalized")
             self.assertEqual(checkpoint["changed_files"], ["src/host.txt"])
-            self.assertNotIn("runtime-output/trace.json", git(run_worktree, "ls-tree", "-r", "--name-only", "HEAD"))
+            tree_paths = git(run_worktree, "ls-tree", "-r", "--name-only", "HEAD")
+            self.assertNotIn("runtime-output/trace.json", tree_paths)
+            self.assertNotIn(f"{artifact_scope}/controller-runtime.md", tree_paths)
 
     def test_host_validator_launch_and_result_are_bound_to_nonce_handle_and_delta(self) -> None:
         from scripts.optim_plans_core import EXECUTION_PROTOCOL, EXECUTION_SCHEMA_VERSION, OptimPlansState
@@ -1071,7 +1079,8 @@ class ExecutionTests(unittest.TestCase):
                 ],
             )
             assignment = state.assign_batch(["TASK-001", "TASK-002", "TASK-003"])
-            self.assertEqual(ignored_audit_noise_policy(), assignment["launch_block"]["ignored_audit_noise"])
+            artifact_scope = state.artifact_dir.relative_to(repo).as_posix()
+            self.assertEqual(ignored_audit_noise_policy([artifact_scope]), assignment["launch_block"]["ignored_audit_noise"])
             with self.assertRaisesRegex(ContractError, "active batch"):
                 state.assign_item("TASK-001")
             authorized = state.authorize_batch_spawn(assignment["batch_id"], assignment["assignment_nonce"], assignment["launch_block"])
@@ -3327,6 +3336,7 @@ class ExecutionTests(unittest.TestCase):
             record = state.persist_execution_manifest(manifest)
             self.assertEqual(record["manifest_hash"], execution_manifest_hash(record["manifest"]))
             self.assertNotIn("validator_worker", record["manifest"])
+            self.assertIn(state.artifact_dir.relative_to(repo).as_posix(), record["manifest"]["ignored_runtime_outputs"])
 
             changed = dict(record["manifest"])
             changed["integration_destination"] = "release"
