@@ -359,6 +359,7 @@ class SkillContractTests(unittest.TestCase):
             "host-multi-agent",
             "`spawn_agent`",
             "`wait_agent`",
+            "`close_agent`",
             "single-use launch nonce",
             "assignment nonce",
             "registered handle",
@@ -427,14 +428,15 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("advance-batch", readme)
         self.assertIn("spawn_agent", readme)
         self.assertIn("wait_agent", readme)
+        self.assertIn("close_agent", readme)
         self.assertIn("Codex host-multi-agent executor/validator path", readme)
         self.assertIn("run-item", readme)
         self.assertIn("current Claude executor path: foreground standalone --agent", readme)
         self.assertIn("synchronous run-item wait/stdout", readme)
-        self.assertIn("no host wait_agent, --bg, hidden background subagent, host/background mode, or notification/outputFile wait", readme)
+        self.assertIn("no host wait_agent/close_agent, --bg, hidden background subagent, host/background mode, or notification/outputFile wait", readme)
         self.assertIn("Current Claude executors use the CLI adapter path", readme)
         self.assertIn("waits synchronously, and reads stdout JSON", readme)
-        self.assertIn("They do not use host `spawn_agent` / `wait_agent`, `--bg`, hidden background subagents, host/background mode, or notification/outputFile waits", readme)
+        self.assertIn("They do not use host `spawn_agent` / `wait_agent` / `close_agent`, `--bg`, hidden background subagents, host/background mode, or notification/outputFile waits", readme)
         self.assertIn("retry-batch", readme)
         self.assertIn("all-or-nothing", readme)
         self.assertIn("session resume", readme)

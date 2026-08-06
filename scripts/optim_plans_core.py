@@ -4214,7 +4214,7 @@ class OptimPlansState:
             "register_command": register,
             "fail_command": fail,
             "fresh_spawn_fallback": spawn,
-            "host_instructions": "use host resume_agent if needed, then send_input with the launch block, register, and wait_agent",
+            "host_instructions": "use host resume_agent if needed, then send_input with the launch block, register, wait_agent, and close_agent",
         }
         if authorization is not None:
             action["resume_nonce"] = authorization["resume_nonce"]
@@ -4224,7 +4224,7 @@ class OptimPlansState:
         if authorized:
             return (
                 f"use host resume_agent on prior handle {action['prior_agent_handle']} if closed, "
-                f"then send_input with the launch block, run {action['register_command']}, and wait_agent; "
+                f"then send_input with the launch block, run {action['register_command']}, wait_agent, and close_agent; "
                 f"on resume/send failure run {action['fail_command']}"
             )
         return (
@@ -4258,7 +4258,10 @@ class OptimPlansState:
                 "--evidence",
                 "<evidence>",
             )
-            return f"use host wait_agent on registered handle {handle}, then run {complete}; on failure run {fail}"
+            return (
+                f"use host wait_agent on registered handle {handle}, then host close_agent on {handle}, "
+                f"then run {complete}; on agent failure host close_agent on {handle}, then run {fail}"
+            )
         if kind == "executor_batch":
             complete = self._controller_command(
                 "complete-batch",
@@ -4282,7 +4285,10 @@ class OptimPlansState:
                 "--evidence",
                 "<evidence>",
             )
-            return f"use host wait_agent on registered handle {handle}, then run {complete}; on failure run {fail}"
+            return (
+                f"use host wait_agent on registered handle {handle}, then host close_agent on {handle}, "
+                f"then run {complete}; on agent failure host close_agent on {handle}, then run {fail}"
+            )
         if kind == "validator_item":
             result = json_text(
                 {
@@ -4324,8 +4330,9 @@ class OptimPlansState:
                 "<evidence>",
             )
             return (
-                f"use host wait_agent on registered handle {handle}, then run {complete} "
-                f"(result nonce is validator_nonce; status is pass or fail); on agent failure run {fail}"
+                f"use host wait_agent on registered handle {handle}, then host close_agent on {handle}, "
+                f"then run {complete} (result nonce is validator_nonce; status is pass or fail); "
+                f"on agent failure host close_agent on {handle}, then run {fail}"
             )
         if kind == "validator_batch":
             result = json_text(
@@ -4370,8 +4377,9 @@ class OptimPlansState:
                 "<evidence>",
             )
             return (
-                f"use host wait_agent on registered handle {handle}, then run {complete} "
-                f"(result nonce is validator_nonce; status is pass or fail); on agent failure run {fail}"
+                f"use host wait_agent on registered handle {handle}, then host close_agent on {handle}, "
+                f"then run {complete} (result nonce is validator_nonce; status is pass or fail); "
+                f"on agent failure host close_agent on {handle}, then run {fail}"
             )
         raise AssertionError(f"unknown wait kind {kind}")
 
@@ -4379,6 +4387,8 @@ class OptimPlansState:
         active = {
             "command": "host wait_agent",
             "agent_handle": payload["agent_handle"],
+            "close_command": "host close_agent",
+            "close_agent_handle": payload["agent_handle"],
             "attempt": payload["attempt"],
             "role": "validator" if kind.startswith("validator") else "executor",
             "target_kind": "batch" if kind.endswith("batch") else "item",

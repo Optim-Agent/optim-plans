@@ -1192,6 +1192,8 @@ class E2ETests(unittest.TestCase):
             self.assertEqual(status["active_wait"]["role"], "executor")
             self.assertEqual(status["active_wait"]["target_kind"], "item")
             self.assertEqual(status["active_wait"]["agent_handle"], "agent-cli")
+            self.assertEqual(status["active_wait"]["close_command"], "host close_agent")
+            self.assertEqual(status["active_wait"]["close_agent_handle"], "agent-cli")
             self.assertEqual(status["next_action"], registered["next_action"])
             (run_worktree / "src").mkdir()
             (run_worktree / "src/host-cli.txt").write_text("ok\n", encoding="utf-8")

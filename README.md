@@ -365,7 +365,7 @@ You can edit this template by hand:
 - `refinement_worker.choice`, `executor_worker.choice`, and `validator_worker.choice` are `background` or `foreground`. With `executor_worker.choice` set to `foreground`, `worker-config --role executor` emits an in-session foreground worker block; `run-item` / `assign-item` returns the manifest-bound assignment, then `complete-item` and `advance-item` finish it without spawning a worker.
 - `platform` is `codex` or `claude`, and must match the current host platform; otherwise the stored preference is ignored.
 - `mode` is `default` or `manual`. `manual` requires non-empty `model` and `effort` values.
-- `execution_mode` applies only to a Codex executor: use `host-multi-agent` by default or `cli-adapter` as a fallback. Current Claude executors use the CLI adapter path: `run-item` launches the `optim-plans-executor` with `--agent` as a foreground standalone subagent, waits synchronously, and reads stdout JSON. They do not use host `spawn_agent` / `wait_agent`, `--bg`, hidden background subagents, host/background mode, or notification/outputFile waits.
+- `execution_mode` applies only to a Codex executor: use `host-multi-agent` by default or `cli-adapter` as a fallback. Current Claude executors use the CLI adapter path: `run-item` launches the `optim-plans-executor` with `--agent` as a foreground standalone subagent, waits synchronously, and reads stdout JSON. They do not use host `spawn_agent` / `wait_agent` / `close_agent`, `--bg`, hidden background subagents, host/background mode, or notification/outputFile waits.
 
 `worker_launch_files` and `smoke_tested_workers` are controller-managed internal state. Leave them out of manual configuration.
 
@@ -495,7 +495,7 @@ python3 scripts/optim_plans.py fail-item --repo <repo> --item-id TASK-001 --assi
 python3 scripts/optim_plans.py authorize-spawn --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --launch-block '<json>'
 # call host spawn_agent with the approved launch block, then:
 python3 scripts/optim_plans.py register-agent --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
-# call host wait_agent, then:
+# call host wait_agent, then host close_agent, then:
 python3 scripts/optim_plans.py complete-item --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --agent-handle <handle> --evidence "<summary>"
 python3 scripts/optim_plans.py advance-item --repo <repo> --item-id TASK-001
 # if advance-item returns a host validator launch block:
@@ -504,7 +504,7 @@ python3 scripts/optim_plans.py register-validator --repo <repo> --item-id TASK-0
 python3 scripts/optim_plans.py authorize-validator-spawn --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --launch-block '<json>'
 # call host spawn_agent with the approved validator launch block, then:
 python3 scripts/optim_plans.py register-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
-# call host wait_agent, then:
+# call host wait_agent, then host close_agent, then:
 python3 scripts/optim_plans.py complete-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --agent-handle <handle> --result '<json>'
 python3 scripts/optim_plans.py fail-validator --repo <repo> --item-id TASK-001 --reason interrupted --validator-nonce <nonce> --evidence "<summary>"
 
@@ -523,7 +523,7 @@ python3 scripts/optim_plans.py register-batch-validator --repo <repo> --batch-id
 python3 scripts/optim_plans.py retry-batch --repo <repo> --batch-id <batch-id> --approval-nonce <nonce>
 
 # CLI adapter fallback (current Claude executor path: foreground standalone --agent,
-# synchronous run-item wait/stdout; no host wait_agent, --bg, hidden background subagent, host/background mode, or notification/outputFile wait):
+# synchronous run-item wait/stdout; no host wait_agent/close_agent, --bg, hidden background subagent, host/background mode, or notification/outputFile wait):
 python3 scripts/optim_plans.py run-item --repo <repo> --item-id TASK-001
 python3 scripts/optim_plans.py status --repo <repo>
 # if no active pointer exists, rediscover the latest preserved run:
@@ -559,7 +559,7 @@ The implemented guardrails include:
 - advisory lock around event append;
 - strict JSON parsing with duplicate-key rejection;
 - collision-safe artifact directories;
-- host-multi-agent executor assignment, pre-spawn authorization, agent handle registration, wait result completion/failure, and replayable `advance-item`;
+- host-multi-agent executor assignment, pre-spawn authorization, agent handle registration, wait result close/completion/failure, and replayable `advance-item`;
 - adapter CLI smoke before immutable manifest-bound execution approval for CLI fallback, with exact smoke-tested worker blocks cached in Git-common config;
 - immutable manifest-bound execution approval with a single-use nonce recorded in `events.jsonl`;
 - atomic question nonce consumption;
@@ -567,7 +567,7 @@ The implemented guardrails include:
 - one controller-owned run worktree and run branch for the cumulative run;
 - serial item execution with checkpoint commits in stable DAG order;
 - executing-validating (ameliorating) ring before controller verification, with bounded safe-audit validator feedback injection for validator-driven retries;
-- host `spawn_agent` / `wait_agent` orchestration for Codex executor/validator delegation, or current Claude CLI adapter `run-item` foreground standalone `--agent` launch with `shell=False`, synchronous wait, and stdout JSON after adapter CLI smoke;
+- host `spawn_agent` / `wait_agent` / `close_agent` orchestration for Codex executor/validator delegation, or current Claude CLI adapter `run-item` foreground standalone `--agent` launch with `shell=False`, synchronous wait, and stdout JSON after adapter CLI smoke;
 - controller verification and Git audits for path allowlists and protected Git metadata;
 - automatic restore/retry for ordinary executor, validator, and verification failures until success or `blocked` (three equivalent failures or five total failures since the latest checkpoint/base);
 - automatic checked-out fast-forward `run_finished` / `integrated` after every item, final audit, and full local proof pass;

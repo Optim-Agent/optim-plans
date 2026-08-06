@@ -636,6 +636,7 @@ class ExecutionTests(unittest.TestCase):
             )
             self.assertEqual(registered["agent_handle"], "agent-123")
             self.assertIn("wait_agent", registered["next_action"])
+            self.assertIn("close_agent", registered["next_action"])
             self.assertIn("complete-item", registered["next_action"])
             self.assertIn("fail-item", registered["next_action"])
             self.assertEqual(state.assign_item("TASK-001")["next_action"], registered["next_action"])
@@ -823,6 +824,7 @@ class ExecutionTests(unittest.TestCase):
             )
             replayed_validator = state.advance_item("TASK-001")
             self.assertEqual(replayed_validator["next_action"], registered_validator["next_action"])
+            self.assertIn("close_agent", registered_validator["next_action"])
             self.assertIn("complete-validator", registered_validator["next_action"])
             self.assertIn("fail-validator", registered_validator["next_action"])
             for key in (
@@ -852,6 +854,8 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(status_payload["active_wait"]["role"], "validator")
             self.assertEqual(status_payload["active_wait"]["target_kind"], "item")
             self.assertEqual(status_payload["active_wait"]["agent_handle"], "validator-agent")
+            self.assertEqual(status_payload["active_wait"]["close_command"], "host close_agent")
+            self.assertEqual(status_payload["active_wait"]["close_agent_handle"], "validator-agent")
             self.assertEqual(status_payload["next_action"], registered_validator["next_action"])
             result = {
                 "run_id": state.run_id,
@@ -1104,6 +1108,7 @@ class ExecutionTests(unittest.TestCase):
                 agent_handle="batch-agent-1",
                 launch_block=assignment["launch_block"],
             )
+            self.assertIn("close_agent", registered_batch["next_action"])
             self.assertIn("complete-batch", registered_batch["next_action"])
             self.assertIn("fail-batch", registered_batch["next_action"])
             self.assertEqual(state.assign_batch(["TASK-001", "TASK-002", "TASK-003"])["next_action"], registered_batch["next_action"])
@@ -1181,7 +1186,9 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(resume_auth["prior_agent_handle"], "agent-one")
             self.assertEqual(resume_auth["worker_config_hash"], second["worker_config_hash"])
             self.assertEqual(resume_auth["prompt_hash"], second["worker"]["prompt_hash"])
-            self.assertEqual(state.assign_item("TASK-002")["phase"], "resume_authorized")
+            replayed_resume = state.assign_item("TASK-002")
+            self.assertEqual(replayed_resume["phase"], "resume_authorized")
+            self.assertIn("close_agent", replayed_resume["next_action"])
 
             altered = json.loads(json.dumps(second["launch_block"]))
             altered["worker"]["model"] = "other-model"
@@ -1523,6 +1530,7 @@ class ExecutionTests(unittest.TestCase):
                 launch_block=validator_assignment["validator_launch_block"],
             )
             self.assertEqual(state.advance_batch(assignment["batch_id"])["next_action"], registered_validator["next_action"])
+            self.assertIn("close_agent", registered_validator["next_action"])
             self.assertIn("complete-batch-validator", registered_validator["next_action"])
             self.assertIn("fail-batch-validator", registered_validator["next_action"])
             for key in (
