@@ -72,10 +72,12 @@ class HookTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             env = self.owned_env(Path(raw))
             env["OPTIM_PLANS_IDS"] = "TASK-001"
+            env["OPTIM_PLANS_READ_ACCESS"] = '{"ignored_files":"read_only"}'
             env["OPTIM_PLANS_IGNORED_AUDIT_NOISE"] = '{"patterns":["runtime-output"]}'
             out = self.run_hook({"event": "SessionStart"}, env)
             self.assertEqual(out["action"], "inject")
             self.assertIn("TASK-001", out["context"])
+            self.assertIn("read_only", out["context"])
             self.assertIn("runtime-output", out["context"])
 
     def test_pre_tool_use_denies_git_and_out_of_scope_writes(self) -> None:

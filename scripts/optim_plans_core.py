@@ -60,6 +60,11 @@ BATCH_RETRYABLE_FAILURE_EVENTS = {
 RETRYABLE_FAILURE_EVENTS = ITEM_RETRYABLE_FAILURE_EVENTS | BATCH_RETRYABLE_FAILURE_EVENTS
 IGNORED_AUDIT_NOISE_PATTERNS = [".xsw/", ".pytest_cache/", "__pycache__/", "*.pyc"]
 CONTROLLER_RUNTIME_OUTPUT_SCOPES = [".venv"]
+EXECUTOR_READ_ACCESS_POLICY = {
+    "scope": "run_worktree",
+    "ignored_files": "read_only",
+    "writes": "allowed_paths_only",
+}
 PLAN_CONTEXT_REQUIRED_SECTIONS = (
     "Requirements",
     "Acceptance Criteria",
@@ -80,6 +85,7 @@ PLAN_CONTEXT_FILE_RE = re.compile(r"^PLAN_v([0-9]+)\.md$")
 HOST_EXECUTOR_PROMPT_CONTRACT = {
     "instructions": [
         "Modify only the assigned run worktree.",
+        "You may read ignored files in the run worktree; writes remain limited to assigned paths.",
         "Leave ignored audit noise from the launch block untouched.",
         "Keep pursuing the assigned goal until complete or genuinely blocked.",
         "Return concise completion evidence to the host.",
@@ -1015,6 +1021,10 @@ def ignored_audit_noise_policy(ignored_runtime_outputs: list[str] | None = None)
     if ignored_runtime_outputs:
         patterns.extend(ignored_runtime_outputs)
     return {"action": "leave_untouched", "patterns": patterns}
+
+
+def executor_read_access_policy() -> dict[str, str]:
+    return dict(EXECUTOR_READ_ACCESS_POLICY)
 
 
 def _diff_paths(repo: Path, base_commit: str, head_commit: str) -> list[str]:
@@ -3655,6 +3665,7 @@ class OptimPlansState:
             "base_commit": start["base_commit"],
             "cwd": start["run_worktree"],
             "allowed_paths": list(start["allowed_paths"]),
+            "read_access": executor_read_access_policy(),
             "ignored_audit_noise": ignored_audit_noise_policy(ignored_runtime_outputs),
             "worker": worker_config,
             "plan_context": start.get("plan_context") or self._plan_context(),
@@ -3694,6 +3705,7 @@ class OptimPlansState:
             "base_commit": start["base_commit"],
             "cwd": start["run_worktree"],
             "allowed_paths": list(start["allowed_paths"]),
+            "read_access": executor_read_access_policy(),
             "ignored_audit_noise": ignored_audit_noise_policy(ignored_runtime_outputs),
             "worker": worker_config,
             "plan_context": start.get("plan_context") or self._plan_context(),
@@ -7804,10 +7816,12 @@ class OptimPlansState:
             worker_nonce = uuid.uuid4().hex
             state_path = self.run_dir / "worker-states" / f"{item_id}-{started['attempt']}.json"
             ignored_audit_noise = ignored_audit_noise_policy(started.get("ignored_runtime_outputs"))
+            read_access = executor_read_access_policy()
             worker_state: dict[str, Any] = {
                 "run_id": self.run_id,
                 "worker_nonce": worker_nonce,
                 "plan_context": started["plan_context"],
+                "read_access": read_access,
                 "ignored_audit_noise": ignored_audit_noise,
             }
             feedback = self._latest_validator_feedback(self.replay().events, item_id)
@@ -7827,6 +7841,7 @@ class OptimPlansState:
                     "OPTIM_PLANS_IDS": item_id,
                     "OPTIM_PLANS_SCOPES": os.pathsep.join(started["allowed_paths"]),
                     "OPTIM_PLANS_PLAN_CONTEXT": json_text(worker_state["plan_context"]),
+                    "OPTIM_PLANS_READ_ACCESS": json_text(read_access),
                     "OPTIM_PLANS_IGNORED_AUDIT_NOISE": json_text(ignored_audit_noise),
                 }
             )

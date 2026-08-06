@@ -606,6 +606,10 @@ class ExecutionTests(unittest.TestCase):
             )
             assignment = state.assign_item("TASK-001")
             artifact_scope = state.artifact_dir.relative_to(repo).as_posix()
+            self.assertEqual(
+                {"scope": "run_worktree", "ignored_files": "read_only", "writes": "allowed_paths_only"},
+                assignment["launch_block"]["read_access"],
+            )
             self.assertEqual(ignored_audit_noise_policy([".venv", artifact_scope]), assignment["launch_block"]["ignored_audit_noise"])
             reloaded = OptimPlansState.load_active(repo).assign_item("TASK-001")
             self.assertEqual(reloaded["assignment_nonce"], assignment["assignment_nonce"])
@@ -1085,6 +1089,10 @@ class ExecutionTests(unittest.TestCase):
             )
             assignment = state.assign_batch(["TASK-001", "TASK-002", "TASK-003"])
             artifact_scope = state.artifact_dir.relative_to(repo).as_posix()
+            self.assertEqual(
+                {"scope": "run_worktree", "ignored_files": "read_only", "writes": "allowed_paths_only"},
+                assignment["launch_block"]["read_access"],
+            )
             self.assertEqual(ignored_audit_noise_policy([".venv", artifact_scope]), assignment["launch_block"]["ignored_audit_noise"])
             with self.assertRaisesRegex(ContractError, "active batch"):
                 state.assign_item("TASK-001")
@@ -1830,7 +1838,7 @@ class ExecutionTests(unittest.TestCase):
                 "from pathlib import Path\n"
                 f"Path({str(argv_log)!r}).write_text(json.dumps(sys.argv), encoding='utf-8')\n"
                 "state = json.loads(Path(os.environ['OPTIM_PLANS_STATE_PATH']).read_text(encoding='utf-8'))\n"
-                f"Path({str(policy_log)!r}).write_text(json.dumps({{'env': json.loads(os.environ['OPTIM_PLANS_IGNORED_AUDIT_NOISE']), 'state': state['ignored_audit_noise']}}), encoding='utf-8')\n"
+                f"Path({str(policy_log)!r}).write_text(json.dumps({{'env': json.loads(os.environ['OPTIM_PLANS_IGNORED_AUDIT_NOISE']), 'state': state['ignored_audit_noise'], 'read_env': json.loads(os.environ['OPTIM_PLANS_READ_ACCESS']), 'read_state': state['read_access']}}), encoding='utf-8')\n"
                 "Path('src').mkdir(exist_ok=True)\n"
                 "Path('src/app.txt').write_text('ok\\n', encoding='utf-8')\n"
                 "Path('runtime-output').mkdir(exist_ok=True)\n"
@@ -1868,6 +1876,8 @@ class ExecutionTests(unittest.TestCase):
             policy = json.loads(policy_log.read_text(encoding="utf-8"))
             self.assertIn("runtime-output", policy["env"]["patterns"])
             self.assertEqual(policy["env"], policy["state"])
+            self.assertEqual("read_only", policy["read_env"]["ignored_files"])
+            self.assertEqual(policy["read_env"], policy["read_state"])
             self.assertNotIn("runtime-output/trace.json", git(run_worktree, "ls-tree", "-r", "--name-only", "HEAD"))
             self.assertEqual(
                 [event["type"] for event in state.replay().events[-7:]],

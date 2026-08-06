@@ -122,8 +122,11 @@ def in_scope(path: str) -> bool:
 def handle_session_start() -> dict[str, Any]:
     ids = os.environ.get("OPTIM_PLANS_IDS", "")
     scopes = os.environ.get("OPTIM_PLANS_SCOPES", "")
+    read_access = os.environ.get("OPTIM_PLANS_READ_ACCESS", "")
     ignored = os.environ.get("OPTIM_PLANS_IGNORED_AUDIT_NOISE", "")
     context = f"optim-plans worker scope: ids={ids or 'none'} scopes={scopes or 'repository'}"
+    if read_access:
+        context += f" read_access={read_access}"
     if ignored:
         context += f" ignored_audit_noise={ignored}"
     if codex():

@@ -573,6 +573,7 @@ The implemented guardrails include:
 - automatic checked-out fast-forward `run_finished` / `integrated` after every item, final audit, and full local proof pass;
 - `awaiting_integration` with bounded evidence when auto-integration is unsafe or post-fast-forward proof fails;
 - manual recovery `finish-run` outcomes, with `integrated` running the full local proof before terminal success;
+- executor read access to ignored files in the run worktree, with writes still limited to manifest allowed paths;
 - path-scope rejection and delta audits for symlinks, gitlinks, nested repos, ignored files, untracked files, staged files, and tracked changes, while preserving known ignored audit noise (`.xsw/`, `.pytest_cache/`, `__pycache__/`, `*.pyc`), `.venv`, the active `docs/optim-plans/...` artifact dir, and manifest-declared new runtime outputs;
 - three distinct evidenced attempts before `not_achievable` can even request confirmation;
 - Codex/Claude command builders with conservative role-specific flags;
@@ -640,7 +641,7 @@ Implemented:
 - serial item execution with checkpoint commits;
 - validator worker loop before controller verification;
 - adapter-only argv launch with `shell=False`: current Claude CLI adapter `run-item` foreground standalone `--agent`, synchronous wait, and stdout JSON envelope;
-- controller verification and Git audits for path allowlists and protected Git metadata, while preserving known ignored audit noise (`.xsw/`, `.pytest_cache/`, `__pycache__/`, `*.pyc`), `.venv`, the active `docs/optim-plans/...` artifact dir, and manifest-declared new runtime outputs;
+- controller verification and Git audits for path allowlists and protected Git metadata, with executor ignored-file read access and write access still limited to manifest allowed paths, while preserving known ignored audit noise (`.xsw/`, `.pytest_cache/`, `__pycache__/`, `*.pyc`), `.venv`, the active `docs/optim-plans/...` artifact dir, and manifest-declared new runtime outputs;
 - automatic retry restore until success or controller `blocked`;
 - automatic checked-out fast-forward `run_finished` / `integrated` after clean final audits and full local proof;
 - manual `awaiting_integration` recovery when checked-out fast-forward integration cannot safely finish;

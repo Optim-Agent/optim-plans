@@ -169,7 +169,8 @@ def build_claude_command(
                 agent_name: {
                     "description": "Executes approved optim-plans manifest items in a controller-owned worktree.",
                     "prompt": (
-                        "Complete only the assigned optim-plans item, stay inside the allowed scopes, "
+                        "Complete only the assigned optim-plans item, inspect the run worktree as needed, "
+                        "read ignored worktree files when useful but write only inside allowed scopes, "
                         "leave ignored audit noise such as .xsw/, .pytest_cache/, __pycache__/, and *.pyc untouched, "
                         "and print the required result JSON to stdout."
                     ),
