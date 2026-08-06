@@ -21,6 +21,7 @@ try:
         OptimPlansState,
         QuestionLedger,
         cached_smoke_tested_worker,
+        controller_script_path,
         host_agent,
         host_executor_prompt_hash,
         json_text,
@@ -45,6 +46,7 @@ except ImportError:  # pragma: no cover - package import path
         OptimPlansState,
         QuestionLedger,
         cached_smoke_tested_worker,
+        controller_script_path,
         host_agent,
         host_executor_prompt_hash,
         json_text,
@@ -371,6 +373,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def print_json(payload: dict[str, Any]) -> None:
     print(json_text(payload, pretty=True))
+
+
+def controller_argv(repo: Path, command: str, *args: str) -> list[str]:
+    return ["python3", str(controller_script_path()), command, "--repo", str(repo), *args]
 
 
 def _host_agent(env: dict[str, str]) -> str:
@@ -923,15 +929,12 @@ def cmd_status(args: argparse.Namespace) -> None:
             payload["execution_approval_nonce"] = nonce
         payload["execution_approved"] = approved
         if approved:
-            argv = [
-                "python3",
-                "scripts/optim_plans.py",
+            argv = controller_argv(
+                state.repo,
                 "start-execution",
-                "--repo",
-                str(state.repo),
                 "--approval-nonce",
                 str(nonce),
-            ]
+            )
             payload["resume_command"] = shlex.join(argv)
             payload["next_action"] = "fix any clean-worktree blockers, then run resume_command"
         else:
@@ -960,15 +963,12 @@ def cmd_status(args: argparse.Namespace) -> None:
                 event["type"] == "batch_retry_restored" and event.get("payload", {}).get("batch_id") == retry_batch_id
                 for event in replayed.events
             )
-            retry_argv = [
-                "python3",
-                "scripts/optim_plans.py",
+            retry_argv = controller_argv(
+                state.repo,
                 "retry-batch",
-                "--repo",
-                str(state.repo),
                 "--batch-id",
                 retry_batch_id,
-            ]
+            )
             if state._is_retryable_failure_event(batch_failure):
                 payload["retry_command"] = shlex.join(retry_argv)
                 payload["resume_command"] = payload["retry_command"]
@@ -1009,15 +1009,12 @@ def cmd_status(args: argparse.Namespace) -> None:
                 event["type"] == "retry_restored" and event.get("payload", {}).get("item_id") == retry_item_id
                 for event in replayed.events
             )
-            retry_argv = [
-                "python3",
-                "scripts/optim_plans.py",
+            retry_argv = controller_argv(
+                state.repo,
                 "retry-item",
-                "--repo",
-                str(state.repo),
                 "--item-id",
                 retry_item_id,
-            ]
+            )
             if state._is_retryable_failure_event(item_failure):
                 payload["retry_command"] = shlex.join(retry_argv)
                 payload["resume_command"] = payload["retry_command"]

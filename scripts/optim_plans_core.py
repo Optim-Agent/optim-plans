@@ -173,6 +173,10 @@ def host_agent(env: dict[str, str] | None = None) -> str:
     return "codex"
 
 
+def controller_script_path() -> Path:
+    return Path(__file__).resolve().with_name("optim_plans.py")
+
+
 def _reject_constant(value: str) -> None:
     raise ContractError(f"non-finite JSON number {value!r} is not allowed")
 
@@ -3910,7 +3914,7 @@ class OptimPlansState:
         return None
 
     def _controller_command(self, command: str, *args: str) -> str:
-        return shlex.join(["python3", "scripts/optim_plans.py", command, "--repo", str(self.repo), *args])
+        return shlex.join(["python3", str(controller_script_path()), command, "--repo", str(self.repo), *args])
 
     def _registration_nonce_payload(self, registration: dict[str, Any]) -> dict[str, Any]:
         if isinstance(registration.get("resume_nonce"), str):

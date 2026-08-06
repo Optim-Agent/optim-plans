@@ -10,7 +10,7 @@ Find the user's previous optim-plans run and continue the active recovery path w
 1. First run active status for the current worktree:
 
    ```bash
-   python3 scripts/optim_plans.py status --repo <repo>
+   python3 <optim-plans-plugin-or-source-root>/scripts/optim_plans.py status --repo <repo>
    ```
 
 2. If status succeeds, report the active `run_id`, `status`, `next_action`, and any controller-provided recovery fields:
@@ -21,7 +21,7 @@ Find the user's previous optim-plans run and continue the active recovery path w
 4. If status fails with no active pointer, run the Git-common fallback:
 
    ```bash
-   python3 scripts/optim_plans.py previous-run --repo <repo>
+   python3 <optim-plans-plugin-or-source-root>/scripts/optim_plans.py previous-run --repo <repo>
    ```
 
 5. If `previous-run` returns a `candidate`, report its `run_id`, `status`, `artifact_dir`, `terminal_time`, `last_event_type`, and `next_action`. If it returns `candidate: null`, say no preserved run was found.

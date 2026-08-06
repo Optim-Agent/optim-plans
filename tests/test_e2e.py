@@ -1465,6 +1465,117 @@ class E2ETests(unittest.TestCase):
             self.assertEqual(json.loads(resumed.stdout)["approval_nonce"], prepared["nonce"])
             self.assertTrue(run_worktree.is_dir())
 
+    def test_emitted_recovery_commands_use_portable_controller_path(self) -> None:
+        from scripts.optim_plans_core import OptimPlansState, controller_script_path, host_executor_prompt_hash
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            self.assertFalse((repo / "scripts" / "optim_plans.py").exists())
+            run_worktree = raw_path / "run-worktree"
+            init_controller(repo, "Portable Controller")
+            manifest = {
+                "plan_hash": "abc123",
+                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "run_worktree_path": str(run_worktree),
+                "worker": {
+                    "mode": "host-multi-agent",
+                    "platform": "codex",
+                    "agent_type": "optim-plans-executor",
+                    "model": "gpt-test",
+                    "reasoning_effort": "high",
+                    "prompt_protocol": "optim-plans-host-executor-v1",
+                    "prompt_hash": host_executor_prompt_hash(),
+                    "allowed_tools": ["Read", "Write", "Edit", "MultiEdit", "Bash"],
+                    "sandbox": "workspace-write",
+                    "result_schema": "optim-plans-worker-result-v1",
+                },
+                "verification_argv": [sys.executable, "-c", "pass"],
+                "items": [{"id": "TASK-001", "allowed_paths": ["src/done.txt"]}],
+            }
+            manifest_path = raw_path / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            write_executor_worker_config(repo)
+            prepared = controller_json("prepare-execution", "--repo", str(repo), "--manifest", str(manifest_path))
+            answer_choice(repo, prepared["nonce"], "approve")
+            (repo / "dirty.tmp").write_text("dirty\n", encoding="utf-8")
+            blocked = subprocess.run(
+                [
+                    sys.executable,
+                    str(controller_script_path()),
+                    "start-execution",
+                    "--repo",
+                    str(repo),
+                    "--approval-nonce",
+                    prepared["nonce"],
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(blocked.returncode, 2)
+
+            approved = controller_json("status", "--repo", str(repo))
+            controller = controller_script_path()
+            resume_argv = shlex.split(approved["resume_command"])
+            self.assertEqual(Path(resume_argv[1]), controller)
+            self.assertNotIn("python3 scripts/optim_plans.py", approved["resume_command"])
+            (repo / "dirty.tmp").unlink()
+            resumed = subprocess.run(
+                resume_argv,
+                cwd=repo,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            self.assertEqual(json.loads(resumed.stdout)["approval_nonce"], prepared["nonce"])
+
+            assignment = controller_json("assign-item", "--repo", str(repo), "--item-id", "TASK-001")
+            launch_block = json.dumps(assignment["launch_block"], sort_keys=True)
+            authorized = controller_json(
+                "authorize-spawn",
+                "--repo",
+                str(repo),
+                "--item-id",
+                "TASK-001",
+                "--assignment-nonce",
+                assignment["assignment_nonce"],
+                "--launch-block",
+                launch_block,
+            )
+            controller_json(
+                "register-agent",
+                "--repo",
+                str(repo),
+                "--item-id",
+                "TASK-001",
+                "--assignment-nonce",
+                assignment["assignment_nonce"],
+                "--launch-nonce",
+                authorized["launch_nonce"],
+                "--agent-handle",
+                "portable-agent",
+                "--launch-block",
+                launch_block,
+            )
+            wait_status = controller_json("status", "--repo", str(repo))
+            self.assertIn(str(controller), wait_status["next_action"])
+            self.assertNotIn("python3 scripts/optim_plans.py", wait_status["next_action"])
+
+            state = OptimPlansState.load_active(repo)
+            base = git(repo, "rev-parse", "--verify", "HEAD")
+            state.append_event(
+                "worker_failed",
+                {"item_id": "TASK-001", "base_commit": base, "run_worktree": str(run_worktree), "evidence": "failed"},
+            )
+            retry_status = controller_json("status", "--repo", str(repo))
+            retry_argv = shlex.split(retry_status["retry_command"])
+            self.assertEqual(Path(retry_argv[1]), controller)
+            self.assertEqual(retry_status["resume_command"], retry_status["retry_command"])
+            self.assertNotIn("python3 scripts/optim_plans.py", retry_status["retry_command"])
+
     def test_previous_run_reports_latest_preserved_without_active_pointer(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = make_repo(Path(raw))

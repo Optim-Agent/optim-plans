@@ -468,69 +468,71 @@ AI:  This is open-ended plugin design. I will inspect the directory, research
 ### Use the controller directly
 
 ```bash
-python3 scripts/optim_plans.py init --repo <repo> --topic "<topic>" --request-text "<original request>"
-python3 scripts/optim_plans.py ask --repo <repo> --prompt "Choose reviewer" --plan-level small-plan
-python3 scripts/optim_plans.py answer --repo <repo> --nonce <nonce> --choice <option-id>
-python3 scripts/optim_plans.py answer --repo <repo> --nonce <nonce> --choice codex-manual --model <model> --effort <effort>
-python3 scripts/optim_plans.py worker-config --repo <repo> --role reviewer --cwd <worktree>
-python3 scripts/optim_plans.py worker-config --repo <repo> --role executor --cwd <run-worktree>
-python3 scripts/optim_plans.py worker-config --repo <repo> --role validator --cwd <run-worktree>
+OPTIM_PLANS_CONTROLLER=/absolute/path/to/optim-plans/scripts/optim_plans.py
+
+python3 "$OPTIM_PLANS_CONTROLLER" init --repo <repo> --topic "<topic>" --request-text "<original request>"
+python3 "$OPTIM_PLANS_CONTROLLER" ask --repo <repo> --prompt "Choose reviewer" --plan-level small-plan
+python3 "$OPTIM_PLANS_CONTROLLER" answer --repo <repo> --nonce <nonce> --choice <option-id>
+python3 "$OPTIM_PLANS_CONTROLLER" answer --repo <repo> --nonce <nonce> --choice codex-manual --model <model> --effort <effort>
+python3 "$OPTIM_PLANS_CONTROLLER" worker-config --repo <repo> --role reviewer --cwd <worktree>
+python3 "$OPTIM_PLANS_CONTROLLER" worker-config --repo <repo> --role executor --cwd <run-worktree>
+python3 "$OPTIM_PLANS_CONTROLLER" worker-config --repo <repo> --role validator --cwd <run-worktree>
 
 # after PLAN_vN is final, write a manifest JSON that binds the plan hash,
 # source base, executor config, validator config/prompt/check IDs, item DAG, allowed paths, optional ignored_runtime_outputs, verification argv,
 # run worktree/branch, integration destination, validator retry limit, verification timeout, retry limits, and policy.
-python3 scripts/optim_plans.py prepare-execution --repo <repo> --manifest <manifest.json>
-python3 scripts/optim_plans.py answer --repo <repo> --nonce <approval-nonce> --choice approve
-python3 scripts/optim_plans.py start-execution --repo <repo> --approval-nonce <approval-nonce>
+python3 "$OPTIM_PLANS_CONTROLLER" prepare-execution --repo <repo> --manifest <manifest.json>
+python3 "$OPTIM_PLANS_CONTROLLER" answer --repo <repo> --nonce <approval-nonce> --choice approve
+python3 "$OPTIM_PLANS_CONTROLLER" start-execution --repo <repo> --approval-nonce <approval-nonce>
 
 # Codex host-multi-agent executor/validator path:
-python3 scripts/optim_plans.py assign-item --repo <repo> --item-id TASK-001
+python3 "$OPTIM_PLANS_CONTROLLER" assign-item --repo <repo> --item-id TASK-001
 # if assign-item returns resume_action, try the prior handle before spawning:
-python3 scripts/optim_plans.py authorize-resume --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --prior-agent-handle <handle> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" authorize-resume --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --prior-agent-handle <handle> --launch-block '<json>'
 # host resume_agent if needed, send_input with the launch block, then:
-python3 scripts/optim_plans.py register-agent --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --resume-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" register-agent --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --resume-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
 # if resume_agent/send_input fails before registration:
-python3 scripts/optim_plans.py fail-item --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --resume-nonce <nonce> --resume-failure-kind send_input --evidence "<summary>"
+python3 "$OPTIM_PLANS_CONTROLLER" fail-item --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --resume-nonce <nonce> --resume-failure-kind send_input --evidence "<summary>"
 # fresh spawn fallback:
-python3 scripts/optim_plans.py authorize-spawn --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" authorize-spawn --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --launch-block '<json>'
 # call host spawn_agent with the approved launch block, then:
-python3 scripts/optim_plans.py register-agent --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" register-agent --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
 # call host wait_agent, then host close_agent, then:
-python3 scripts/optim_plans.py complete-item --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --agent-handle <handle> --evidence "<summary>"
-python3 scripts/optim_plans.py advance-item --repo <repo> --item-id TASK-001
+python3 "$OPTIM_PLANS_CONTROLLER" complete-item --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --agent-handle <handle> --evidence "<summary>"
+python3 "$OPTIM_PLANS_CONTROLLER" advance-item --repo <repo> --item-id TASK-001
 # if advance-item returns a host validator launch block:
-python3 scripts/optim_plans.py authorize-validator-resume --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --prior-agent-handle <handle> --launch-block '<json>'
-python3 scripts/optim_plans.py register-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --resume-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
-python3 scripts/optim_plans.py authorize-validator-spawn --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" authorize-validator-resume --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --prior-agent-handle <handle> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" register-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --resume-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" authorize-validator-spawn --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --launch-block '<json>'
 # call host spawn_agent with the approved validator launch block, then:
-python3 scripts/optim_plans.py register-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" register-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
 # call host wait_agent, then host close_agent, then:
-python3 scripts/optim_plans.py complete-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --agent-handle <handle> --result '<json>'
-python3 scripts/optim_plans.py fail-validator --repo <repo> --item-id TASK-001 --reason interrupted --validator-nonce <nonce> --evidence "<summary>"
+python3 "$OPTIM_PLANS_CONTROLLER" complete-validator --repo <repo> --item-id TASK-001 --validator-nonce <nonce> --agent-handle <handle> --result '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" fail-validator --repo <repo> --item-id TASK-001 --reason interrupted --validator-nonce <nonce> --evidence "<summary>"
 
 # Host batch path: assign-batch selects a continuous ready prefix from manifest order.
-python3 scripts/optim_plans.py assign-batch --repo <repo>
-python3 scripts/optim_plans.py authorize-batch-resume --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --prior-agent-handle <handle> --launch-block '<json>'
-python3 scripts/optim_plans.py register-batch-agent --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --resume-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
-python3 scripts/optim_plans.py authorize-batch-spawn --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --launch-block '<json>'
-python3 scripts/optim_plans.py register-batch-agent --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
-python3 scripts/optim_plans.py complete-batch --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --agent-handle <handle> --evidence "<summary>"
-python3 scripts/optim_plans.py advance-batch --repo <repo> --batch-id <batch-id>
+python3 "$OPTIM_PLANS_CONTROLLER" assign-batch --repo <repo>
+python3 "$OPTIM_PLANS_CONTROLLER" authorize-batch-resume --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --prior-agent-handle <handle> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" register-batch-agent --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --resume-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" authorize-batch-spawn --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" register-batch-agent --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --launch-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" complete-batch --repo <repo> --batch-id <batch-id> --assignment-nonce <nonce> --agent-handle <handle> --evidence "<summary>"
+python3 "$OPTIM_PLANS_CONTROLLER" advance-batch --repo <repo> --batch-id <batch-id>
 # if advance-batch returns a host validator launch block, use batch validator resume first when offered:
-python3 scripts/optim_plans.py authorize-batch-validator-resume --repo <repo> --batch-id <batch-id> --validator-nonce <nonce> --prior-agent-handle <handle> --launch-block '<json>'
-python3 scripts/optim_plans.py register-batch-validator --repo <repo> --batch-id <batch-id> --validator-nonce <nonce> --resume-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" authorize-batch-validator-resume --repo <repo> --batch-id <batch-id> --validator-nonce <nonce> --prior-agent-handle <handle> --launch-block '<json>'
+python3 "$OPTIM_PLANS_CONTROLLER" register-batch-validator --repo <repo> --batch-id <batch-id> --validator-nonce <nonce> --resume-nonce <nonce> --agent-handle <handle> --launch-block '<json>'
 # batch validation/checkpoint is all-or-nothing; recovery uses retry-batch, not retry-item.
-python3 scripts/optim_plans.py retry-batch --repo <repo> --batch-id <batch-id> --approval-nonce <nonce>
+python3 "$OPTIM_PLANS_CONTROLLER" retry-batch --repo <repo> --batch-id <batch-id> --approval-nonce <nonce>
 
 # CLI adapter fallback (current Claude executor path: foreground standalone --agent,
 # synchronous run-item wait/stdout; no host wait_agent/close_agent, --bg, hidden background subagent, host/background mode, or notification/outputFile wait):
-python3 scripts/optim_plans.py run-item --repo <repo> --item-id TASK-001
-python3 scripts/optim_plans.py status --repo <repo>
+python3 "$OPTIM_PLANS_CONTROLLER" run-item --repo <repo> --item-id TASK-001
+python3 "$OPTIM_PLANS_CONTROLLER" status --repo <repo>
 # if no active pointer exists, rediscover the latest preserved run:
-python3 scripts/optim_plans.py previous-run --repo <repo>
+python3 "$OPTIM_PLANS_CONTROLLER" previous-run --repo <repo>
 # if status reports awaiting_integration:
-python3 scripts/optim_plans.py answer --repo <repo> --nonce <finish-nonce> --choice kept
-python3 scripts/optim_plans.py finish-run --repo <repo> --outcome kept --approval-nonce <finish-nonce>
+python3 "$OPTIM_PLANS_CONTROLLER" answer --repo <repo> --nonce <finish-nonce> --choice kept
+python3 "$OPTIM_PLANS_CONTROLLER" finish-run --repo <repo> --outcome kept --approval-nonce <finish-nonce>
 ```
 
 Use `$optim-plans:resume-previous-plan` to continue an interrupted active run. It checks the active run first and runs `resume_command` when available for approved execution launch or retryable recovery; if only finish recovery is available, it reports `finish_choices` and stops. If there is no active pointer, it falls back to `previous-run` and suggests the latest preserved run from Git common state.
