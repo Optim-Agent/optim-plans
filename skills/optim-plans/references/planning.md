@@ -6,7 +6,7 @@ During brainstorming QA, probe applicable edge-case dimensions before `PLAN_v1.m
 
 Resolve unknowns by the evidence ladder: codebase first, cited web research second, user question last. When a recommended option rests on a web-verifiable claim, websearch it before presenting the question and record the source in `PLAN_v1.md`. Never present a recommendation backed only by an unchecked assumption.
 
-One answered question is not a launch approval. When the decision tree is resolved, write `PLAN_v1.md` under `docs/optim-plans/YYYY-MM-DD-topic/`, then run refinement before any target repo file edit.
+One answered question is not a launch approval. When the decision tree is resolved, ask a final pre-`PLAN_v1.md` scope confirmation: whether the user has more modification requirements. Recommend `No more requirements` first when the scope is settled, offer `Add more requirements`, then `Other`, then `Auto-complete`. Write `PLAN_v1.md` under `docs/optim-plans/YYYY-MM-DD-topic/` only after the user selects no more requirements or Auto-complete accepts that recommendation, then run refinement before any target repo file edit. If the user adds requirements, resolve only the necessary follow-up questions, then repeat the final scope confirmation before writing `PLAN_v1.md`.
 
 Every user-facing planning question is a choice prompt with options ordered:
 

@@ -16,7 +16,7 @@ Do NOT write code, scaffold files, edit repo docs/config, or change target files
 
 ## First Turn Contract
 
-Treat the user's prompt as a planning target, not write authorization. After any read-only context check, the first visible response must be one optim-plans choice question, not a completed analysis or file edit. It must include recommended first, `Other` second-last, and `Auto-complete` last. References inform the recommended option; they never replace the user interview. One human-choice answer is necessary but not sufficient: after the answer, continue through `PLAN_v1.md`, refinement, and explicit execution approval before editing target files.
+Treat the user's prompt as a planning target, not write authorization. After any read-only context check, the first visible response must be one optim-plans choice question, not a completed analysis or file edit. It must include recommended first, `Other` second-last, and `Auto-complete` last. References inform the recommended option; they never replace the user interview. One human-choice answer is necessary but not sufficient: after the answer, continue through resolved planning questions, the final pre-`PLAN_v1.md` scope confirmation, `PLAN_v1.md`, refinement, and explicit execution approval before editing target files.
 
 ## Language Policy
 
@@ -37,6 +37,8 @@ Users may choose the planning depth in the prompt or via direct controller flags
 - `huge-plan` / `huge plan`: at least 10 planning questions, no maximum; websearch is required for brainstorming and refinement, with no refinement round or timeout limit and at most five high-priority comments or questions per round.
 - `deep-research-plan` / `deep research plan`: `huge-plan` depth plus the `../deep-research-plan/SKILL.md` contract for 3+ downloaded refs, graphify JSON, and per-ref adoption questions.
 
+The final pre-`PLAN_v1.md` scope confirmation is mandatory and does not count against these plan-level question limits.
+
 For `plan`, `big-plan`, `huge-plan`, and `deep-research-plan`, only high-priority comments or criticisms continue refinement; if a round produces none, terminate that round.
 
 If no level is named, auto-select the smallest level that fits the user's prompt and repo evidence before the first planning question. Do not ask the user to choose the level as that question.
@@ -53,6 +55,7 @@ Every request goes through this flow — a config change, a one-function utility
 digraph optim_plans {
     "Init controller, inspect repo" [shape=box];
     "Grill: one question at a time" [shape=box];
+    "Final scope confirmation" [shape=box];
     "PLAN_v1.md" [shape=box];
     "Reviewer / Criticizer pass" [shape=box];
     "Unresolved findings?" [shape=diamond];
@@ -68,7 +71,9 @@ digraph optim_plans {
     "Finish wrap" [shape=doublecircle];
 
     "Init controller, inspect repo" -> "Grill: one question at a time";
-    "Grill: one question at a time" -> "PLAN_v1.md";
+    "Grill: one question at a time" -> "Final scope confirmation";
+    "Final scope confirmation" -> "Grill: one question at a time" [label="more requirements"];
+    "Final scope confirmation" -> "PLAN_v1.md" [label="no more"];
     "PLAN_v1.md" -> "Reviewer / Criticizer pass";
     "Reviewer / Criticizer pass" -> "Unresolved findings?";
     "Unresolved findings?" -> "PLAN_v(N+1).md" [label="yes"];
@@ -102,9 +107,10 @@ Create a task for each item and complete them in order:
    ```
 
 3. Grill the user: ask unresolved questions one at a time until none remain.
-4. Write `PLAN_v1.md` under `docs/optim-plans/YYYY-MM-DD-topic/`, including the repo evidence and resolved decisions.
-5. Run reviewer or criticizer refinement; produce `PLAN_v(N+1).md` until converged.
-6. Obtain explicit human approval for the immutable execution manifest, execute serial items through the controller, then let clean final audits auto-record `integrated`; unsafe auto-integration enters `awaiting_integration`.
+4. Ask the final pre-`PLAN_v1.md` scope confirmation: whether the user has more modification requirements. Recommend `No more requirements` first when the scope is settled, offer `Add more requirements`, then `Other`, then `Auto-complete`.
+5. Write `PLAN_v1.md` under `docs/optim-plans/YYYY-MM-DD-topic/`, including the repo evidence and resolved decisions, only after the user selects no more requirements or Auto-complete accepts that recommendation.
+6. Run reviewer or criticizer refinement; produce `PLAN_v(N+1).md` until converged.
+7. Obtain explicit human approval for the immutable execution manifest, execute serial items through the controller, then let clean final audits auto-record `integrated`; unsafe auto-integration enters `awaiting_integration`.
 
 ## Grilling the User
 
@@ -113,6 +119,7 @@ Direct, evidence-based, relentless until answers are real:
 - If a question can be answered by exploring the codebase, explore the codebase instead of asking. Never spend a user question on something the repo already answers.
 - If the repo can't answer but the web might (library behavior, version constraints, external API semantics, domain facts), websearch first and cite sources. The evidence ladder is: codebase → cited web research → user question.
 - Walk each branch of the decision tree, resolving dependent decisions in order. One question per message; if a topic needs more exploration, split it into multiple questions.
+- Before writing `PLAN_v1.md`, always ask the final scope confirmation. If the user adds requirements, resolve only the necessary follow-up questions, then repeat the final scope confirmation before writing `PLAN_v1.md`.
 - Every user-facing planning question must be a choice prompt: recommended option first with a short reason, alternatives, `Other` second-last, `Auto-complete` last. The refinement mode question is exactly `Reviewer`, `Criticizer`, `Jump to executor`, `Auto-complete`; the first Reviewer/Criticizer follow-up uses `agent-choice`.
 - When asking the user to choose refinement mode, recommend `Reviewer` first. If the user selects `Jump to executor`, pass the execution gate directly with `skip-refinement-execute`.
 - Challenge vague or hand-waving answers. If an answer contradicts repo evidence, say so and re-ask — never silently accept it.
@@ -158,6 +165,7 @@ When native cards are available, render the controller's pending question as car
 - Launching a worker outside the manifest-bound `prepare-execution` / `start-execution` / `run-item` flow
 - Treating hooks, shell parsing, worker self-attestation, or a verifier agent as the authoritative safety boundary
 - Editing target files before `PLAN_v1.md` and refinement artifacts exist
+- Writing `PLAN_v1.md` before the final scope confirmation is answered
 - Accepting a vague answer to keep momentum
 - Asking the user (or guessing) something a websearch could have answered with sources
 - Dispositioning a finding on an unsure technical claim without cited evidence

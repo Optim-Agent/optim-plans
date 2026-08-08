@@ -150,6 +150,21 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("planning target, not write authorization", text)
         self.assertIn("References inform the recommended option; they never replace the user interview", text)
         self.assertIn("One human-choice answer is necessary but not sufficient", text)
+        self.assertIn("final pre-`PLAN_v1.md` scope confirmation", text)
+
+    def test_final_scope_confirmation_gates_plan_v1(self) -> None:
+        text = SKILL.read_text(encoding="utf-8")
+        planning = (ROOT / "skills/optim-plans/references/planning.md").read_text(encoding="utf-8")
+        for expected in (
+            "whether the user has more modification requirements",
+            "No more requirements",
+            "Add more requirements",
+            "only after the user selects no more requirements",
+            "repeat the final scope confirmation before writing `PLAN_v1.md`",
+        ):
+            self.assertIn(expected, planning)
+        self.assertIn("does not count against these plan-level question limits", text)
+        self.assertIn("Writing `PLAN_v1.md` before the final scope confirmation is answered", text)
 
     def test_plan_v1_is_only_pre_refinement_planning_artifact(self) -> None:
         paths = [
