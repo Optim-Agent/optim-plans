@@ -3662,6 +3662,45 @@ class ExecutionTests(unittest.TestCase):
             self.assertTrue(codex_home.is_dir())
             self.assertFalse((codex_home / "config.toml").exists())
 
+    def test_hash_only_config_files_are_verified_before_smoke_cache_skip(self) -> None:
+        from scripts.optim_plans_core import ContractError, OptimPlansState, worker_launch_files
+
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            repo = make_repo(raw_path)
+            worker = self._worker(raw_path / "codex", "print('{}')\n")
+            paths = worker_launch_files(repo)
+            codex_home = paths["codex_home"]
+            codex_home.mkdir(parents=True)
+            config_file = codex_home / "config.toml"
+            config_file.write_text('model = "gpt-test"\n', encoding="utf-8")
+            digest = hashlib.sha256(config_file.read_bytes()).hexdigest()
+            worker_argv = [str(worker), "exec", "-C", str(raw_path / "run-worktree")]
+            manifest = {
+                "plan_hash": "abc123",
+                "source_base": git(repo, "rev-parse", "--verify", "HEAD"),
+                "integration_destination": "main",
+                "worker": {
+                    "adapter": "codex",
+                    "argv": worker_argv,
+                    "env": {"CODEX_HOME": str(codex_home)},
+                    "config_files": [{"path": str(config_file), "sha256": digest}],
+                    "smoke": {"argv": [*worker_argv, "--optim-plans-smoke"]},
+                },
+                "verification_argv": [sys.executable, "-c", "pass"],
+                "items": [{"id": "TASK-001", "allowed_paths": ["src/app.txt"]}],
+            }
+            state = OptimPlansState.initialize(repo, topic="Hashed Config", plan_hash="abc123")
+            state.persist_execution_manifest(manifest)
+            self.assertEqual(config_file.read_text(encoding="utf-8"), 'model = "gpt-test"\n')
+
+            config_file.write_text("tampered = true\n", encoding="utf-8")
+            second_repo = raw_path / "repo-2"
+            git(repo, "worktree", "add", "--detach", str(second_repo), "HEAD")
+            second = OptimPlansState.initialize(second_repo, topic="Hashed Config 2", plan_hash="abc123")
+            with self.assertRaisesRegex(ContractError, "sha256 mismatch"):
+                second.persist_execution_manifest(manifest)
+
     def test_worker_launch_file_config_rejects_controller_state_collision(self) -> None:
         from scripts.optim_plans_core import save_optim_plans_config_value, worker_launch_files
 

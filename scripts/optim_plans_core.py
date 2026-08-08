@@ -2925,6 +2925,7 @@ class OptimPlansState:
             config_files = []
         if not isinstance(config_files, list):
             raise ContractError("worker adapter config_files must be a list")
+        config_files = self._worker_config_files(config_files)
         smoke = raw.get("smoke")
         if not isinstance(smoke, dict):
             raise ContractError("worker adapter smoke config is required before manifest recording")
@@ -2954,13 +2955,22 @@ class OptimPlansState:
         legacy_timeout = raw.get("timeout_seconds", manifest.get("worker_timeout_seconds"))
         if legacy_timeout is not None and (not isinstance(legacy_timeout, (int, float)) or legacy_timeout <= 0):
             raise ContractError("worker timeout_seconds must be positive")
+        metadata: dict[str, str] = {}
+        for key in ("profile", "model", "reasoning_effort", "model_provider"):
+            value = raw.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                raise ContractError(f"worker adapter {key} must be a non-empty string")
+            metadata[key] = value
         return {
             "adapter": adapter,
             "argv": list(argv),
             "env": dict(env),
-            "config_files": list(config_files),
+            "config_files": config_files,
             "smoke": {"argv": list(smoke_argv), "env": dict(smoke_env), "timeout_seconds": float(smoke_timeout)},
             "timeout_seconds": None,
+            **metadata,
         }
 
     def _foreground_executor_config(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -3057,6 +3067,32 @@ class OptimPlansState:
             target, optim_plans_state_dir(self.repo) / "launch-files"
         )
 
+    def _worker_config_files(self, files: list[Any]) -> list[dict[str, Any]]:
+        canonical: list[dict[str, Any]] = []
+        for entry in files:
+            if not isinstance(entry, dict):
+                raise ContractError("worker adapter config file entries must be objects")
+            path = entry.get("path")
+            if not isinstance(path, str) or not path:
+                raise ContractError("worker adapter config file path is required")
+            target = Path(path)
+            if not target.is_absolute():
+                target = self.run_dir / target
+            if not self._owned_generated_path(target):
+                raise ContractError("worker adapter config files must live under the controller run directory or launch-files state")
+            item: dict[str, Any] = {"path": str(target)}
+            if "content" in entry:
+                item["content"] = entry["content"]
+            sha256 = entry.get("sha256")
+            if sha256 is not None:
+                if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+                    raise ContractError("worker adapter config file sha256 must be a lowercase hex digest")
+                item["sha256"] = sha256
+            if "content" not in item and "sha256" not in item:
+                raise ContractError("worker adapter config file entries require content or sha256")
+            canonical.append(item)
+        return canonical
+
     def _write_manifest_config_files(self, files: list[Any], *, write: bool = True) -> None:
         for entry in files:
             if not isinstance(entry, dict):
@@ -3064,22 +3100,34 @@ class OptimPlansState:
             path = entry.get("path")
             if not isinstance(path, str) or not path:
                 raise ContractError("worker adapter config file path is required")
-            content = entry.get("content", "")
             target = Path(path)
             if not target.is_absolute():
                 target = self.run_dir / target
             if not self._owned_generated_path(target):
                 raise ContractError("worker adapter config files must live under the controller run directory or launch-files state")
-            if isinstance(content, (dict, list)):
-                text = json_text(content, pretty=True) + "\n"
-            elif isinstance(content, str):
-                text = content
-            else:
-                raise ContractError("worker adapter config file content must be JSON or text")
-            if not write:
+            sha256 = entry.get("sha256")
+            if sha256 is not None and (not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256)):
+                raise ContractError("worker adapter config file sha256 must be a lowercase hex digest")
+            if "content" in entry:
+                content = entry["content"]
+                if isinstance(content, (dict, list)):
+                    text = json_text(content, pretty=True) + "\n"
+                elif isinstance(content, str):
+                    text = content
+                else:
+                    raise ContractError("worker adapter config file content must be JSON or text")
+                if sha256 is not None and hashlib.sha256(text.encode("utf-8")).hexdigest() != sha256:
+                    raise ContractError("worker adapter config file sha256 does not match content")
+                if write:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(text, encoding="utf-8")
                 continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding="utf-8")
+            if sha256 is None:
+                raise ContractError("worker adapter config file entries require content or sha256")
+            if not target.is_file():
+                raise ContractError("worker adapter config file is missing")
+            if hashlib.sha256(target.read_bytes()).hexdigest() != sha256:
+                raise ContractError("worker adapter config file sha256 mismatch")
 
     def _owned_launch_path(self, raw: str, *, flag: str, canonical_key: str | None = None) -> Path:
         target = Path(raw)
@@ -3114,7 +3162,7 @@ class OptimPlansState:
         self._write_manifest_config_files(config["config_files"], write=write)
         if config["adapter"] == "codex" and config["env"].get("CODEX_HOME"):
             target = self._owned_launch_path(config["env"]["CODEX_HOME"], flag="CODEX_HOME", canonical_key="codex_home")
-            if write:
+            if write and not config["config_files"]:
                 self._refresh_launch_dir(target)
         for flag in ("--settings",):
             if flag not in argv:

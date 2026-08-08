@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -21,12 +22,15 @@ class AgentInfo:
     configured_model: str | None = None
     configured_effort: str | None = None
     auth_state: str = "unknown"
+    configured_provider: str | None = None
 
 
 @dataclass(frozen=True)
 class AgentCommand:
     argv: list[str]
     env: dict[str, str]
+    config_files: list[dict[str, str]] | None = None
+    metadata: dict[str, str] | None = None
 
 
 def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
@@ -52,19 +56,72 @@ def _run(argv: list[str], *, env: dict[str, str]) -> str | None:
     return result.stdout.strip()
 
 
-def _codex_defaults(path: str, env: dict[str, str]) -> tuple[str | None, str | None]:
-    raw = _run([path, "config", "show", "--json"], env=env) or _run([path, "config"], env=env)
-    if not raw:
-        return None, None
+def _toml_string_assignments(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            break
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.split("#", 1)[0].strip()
+        key = key.strip()
+        try:
+            parsed: Any = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = value.strip("'\"")
+        if isinstance(parsed, str):
+            values[key] = parsed
+    return values
+
+
+def _toml_table(text: str, table: str) -> str | None:
+    wanted = f"[{table}]"
+    lines = text.splitlines()
+    for index, raw in enumerate(lines):
+        if raw.strip() != wanted:
+            continue
+        end = index + 1
+        while end < len(lines) and not lines[end].lstrip().startswith("["):
+            end += 1
+        return "\n".join(lines[index:end]).strip() + "\n"
+    return None
+
+
+def _codex_config_file(env: dict[str, str]) -> Path:
+    return _codex_home(env) / "config.toml"
+
+
+def _read_codex_config(env: dict[str, str]) -> str:
     try:
-        payload: Any = json.loads(raw)
-    except json.JSONDecodeError:
-        return None, None
-    if not isinstance(payload, dict):
-        return None, None
+        return _codex_config_file(env).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _codex_defaults(path: str, env: dict[str, str]) -> tuple[str | None, str | None, str | None]:
+    raw = _run([path, "config", "show", "--json"], env=env) or _run([path, "config"], env=env)
+    model = effort = provider = None
+    if not raw:
+        payload = {}
+    else:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {}
+    if isinstance(payload, dict):
+        model = payload.get("model") if isinstance(payload.get("model"), str) else None
+        effort = payload.get("effort") if isinstance(payload.get("effort"), str) else None
+        effort = payload.get("model_reasoning_effort") if isinstance(payload.get("model_reasoning_effort"), str) else effort
+        provider = payload.get("model_provider") if isinstance(payload.get("model_provider"), str) else None
+    config = _toml_string_assignments(_read_codex_config(env))
     return (
-        payload.get("model") if isinstance(payload.get("model"), str) else None,
-        payload.get("effort") if isinstance(payload.get("effort"), str) else None,
+        model or config.get("model"),
+        effort or config.get("model_reasoning_effort"),
+        provider or config.get("model_provider"),
     )
 
 
@@ -87,10 +144,75 @@ def detect_agents(*, env: dict[str, str] | None = None) -> dict[str, AgentInfo]:
             continue
         version = _run([path, "--version"], env=env)
         model = effort = None
+        provider = None
         if name == "codex":
-            model, effort = _codex_defaults(path, env)
-        found[name] = AgentInfo(name, True, version, path, model, effort, "unknown")
+            model, effort, provider = _codex_defaults(path, env)
+        found[name] = AgentInfo(name, True, version, path, model, effort, "unknown", provider)
     return found
+
+
+def _codex_role_instructions(role: str) -> str:
+    if role == "executor":
+        return (
+            "Complete only the assigned optim-plans item in the controller-owned worktree, "
+            "write only inside allowed scopes, and print the required JSON result."
+        )
+    if role == "validator":
+        return "Validate the assigned optim-plans result read-only and print the required JSON verdict."
+    if role == "criticizer":
+        return "Criticize the plan for correctness, missing edge cases, and avoidable complexity without editing files."
+    return "Review the plan for correctness, security, and missing tests without editing files."
+
+
+def _toml_string(key: str, value: str) -> str:
+    return f"{key} = {json.dumps(value)}\n"
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_codex_profile_files(
+    info: AgentInfo,
+    *,
+    role: str,
+    config_home: Path,
+    env: dict[str, str],
+    sandbox: str,
+) -> tuple[str, list[dict[str, str]], dict[str, str]]:
+    config_home.mkdir(parents=True, exist_ok=True)
+    profile = f"optim-plans-{role}"
+    base_text = ""
+    if info.configured_provider:
+        table = _toml_table(_read_codex_config(env), f"model_providers.{info.configured_provider}")
+        if table:
+            base_text = table
+    base_config = config_home / "config.toml"
+    profile_config = config_home / f"{profile}.config.toml"
+    base_config.write_text(base_text, encoding="utf-8")
+    text = (
+        _toml_string("sandbox_mode", sandbox)
+        + _toml_string("developer_instructions", _codex_role_instructions(role))
+    )
+    if info.configured_model:
+        text += _toml_string("model", info.configured_model)
+    if info.configured_effort:
+        text += _toml_string("model_reasoning_effort", info.configured_effort)
+    if info.configured_provider:
+        text += _toml_string("model_provider", info.configured_provider)
+    profile_config.write_text(text, encoding="utf-8")
+    files = [
+        {"path": str(base_config), "sha256": _sha256_file(base_config)},
+        {"path": str(profile_config), "sha256": _sha256_file(profile_config)},
+    ]
+    metadata = {"profile": profile}
+    if info.configured_model:
+        metadata["model"] = info.configured_model
+    if info.configured_effort:
+        metadata["reasoning_effort"] = info.configured_effort
+    if info.configured_provider:
+        metadata["model_provider"] = info.configured_provider
+    return profile, files, metadata
 
 
 def build_codex_command(
@@ -110,14 +232,27 @@ def build_codex_command(
         command_env.update(env)
     executable = info.path or "codex"
     sandbox = "read-only" if role in {"reviewer", "criticizer", "validator", "verifier"} else "workspace-write"
-    ignore_config = config_home is not None and not _same_path(config_home, _codex_home(command_env))
+    config_files: list[dict[str, str]] = []
+    metadata: dict[str, str] = {}
+    profile_args: list[str] = []
+    if config_home is not None:
+        source_env = dict(command_env)
+        command_env["CODEX_HOME"] = str(config_home)
+        profile, config_files, metadata = _write_codex_profile_files(
+            info,
+            role=role,
+            config_home=config_home,
+            env=source_env,
+            sandbox=sandbox,
+        )
+        profile_args = ["--profile", profile]
     argv = [
         executable,
         "exec",
         "-s",
         sandbox,
         "--ephemeral",
-        *([] if not ignore_config else ["--ignore-user-config"]),
+        *profile_args,
         "--ignore-rules",
         "-C",
         str(cwd),
@@ -126,9 +261,7 @@ def build_codex_command(
         argv.extend(["--model", info.configured_model])
     if info.configured_effort:
         argv.extend(["-c", f"model_reasoning_effort={json.dumps(info.configured_effort)}"])
-    if config_home is not None:
-        command_env["CODEX_HOME"] = str(config_home)
-    return AgentCommand(argv, command_env)
+    return AgentCommand(argv, command_env, config_files, metadata)
 
 
 def build_claude_command(

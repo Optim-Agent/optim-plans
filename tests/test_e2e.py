@@ -615,18 +615,26 @@ class E2ETests(unittest.TestCase):
                 "model-test",
                 "--effort",
                 "high",
+                "--model-provider",
+                "provider-test",
             )
 
             resolved = controller_json(
                 "worker-config", "--repo", str(repo), "--role", "executor", "--cwd", str(repo), env=env
             )
-            self.assertEqual(resolved["mode"], "host-multi-agent")
-            self.assertEqual(resolved["platform"], platform)
-            self.assertEqual(resolved["model"], "model-test")
-            self.assertEqual(resolved["reasoning_effort"], "high")
-            self.assertEqual(resolved["prompt_protocol"], "optim-plans-host-executor-v1")
+            self.assertEqual(resolved["adapter"], platform)
+            if platform == "codex":
+                self.assertEqual(resolved["model"], "model-test")
+                self.assertEqual(resolved["reasoning_effort"], "high")
+                self.assertEqual(resolved["profile"], "optim-plans-executor")
+                self.assertEqual(resolved["model_provider"], "provider-test")
+                self.assertEqual(resolved["argv"][resolved["argv"].index("--profile") + 1], "optim-plans-executor")
+                self.assertEqual(len(resolved["config_files"]), 2)
+            else:
+                self.assertIn("model-test", resolved["argv"])
+                self.assertIn("high", resolved["argv"])
             config = json.loads(config_path(repo).read_text(encoding="utf-8"))
-            self.assertNotIn("worker_launch_files", config)
+            self.assertEqual(config["executor_worker"]["model_provider"], "provider-test")
 
             second_repo = raw_path / "repo-2"
             git(repo, "worktree", "add", "--detach", str(second_repo), "HEAD")
@@ -634,7 +642,7 @@ class E2ETests(unittest.TestCase):
             reused = controller_json(
                 "worker-config", "--repo", str(second_repo), "--role", "executor", "--cwd", str(second_repo), env=env
             )
-            self.assertEqual(reused["mode"], "host-multi-agent")
+            self.assertEqual(reused["adapter"], platform)
             self.assertEqual(reused["model"], "model-test")
 
     def test_worker_config_validator_uses_validator_worker_and_read_only_config(self) -> None:
@@ -650,22 +658,34 @@ class E2ETests(unittest.TestCase):
                 "worker-config", "--repo", str(repo), "--role", "validator", "--cwd", str(repo), env=env
             )
             self.assertEqual(question["config_key"], "validator_worker")
-            answer_choice(repo, question["nonce"], f"{platform}-manual", "--model", "model-test", "--effort", "high")
+            answer_choice(
+                repo,
+                question["nonce"],
+                f"{platform}-manual",
+                "--model",
+                "model-test",
+                "--effort",
+                "high",
+                "--model-provider",
+                "provider-test",
+            )
 
             resolved = controller_json(
                 "worker-config", "--repo", str(repo), "--role", "validator", "--cwd", str(repo), env=env
             )
 
             if platform == "codex":
-                self.assertEqual(resolved["mode"], "host-multi-agent")
-                self.assertEqual(resolved["agent_type"], "optim-plans-validator")
-                self.assertEqual(resolved["sandbox"], "read-only")
-                self.assertNotIn("Write", resolved["allowed_tools"])
+                self.assertEqual(resolved["adapter"], platform)
+                self.assertEqual(resolved["profile"], "optim-plans-validator")
+                self.assertEqual(resolved["model_provider"], "provider-test")
+                self.assertEqual(resolved["argv"][resolved["argv"].index("-s") + 1], "read-only")
+                self.assertEqual(resolved["argv"][resolved["argv"].index("--profile") + 1], "optim-plans-validator")
             else:
                 self.assertEqual(resolved["adapter"], platform)
                 self.assertIn("plan", resolved["argv"])
             config = json.loads(config_path(repo).read_text(encoding="utf-8"))
             self.assertEqual(config["validator_worker"]["model"], "model-test")
+            self.assertEqual(config["validator_worker"]["model_provider"], "provider-test")
             self.assertNotIn("executor_worker", config)
 
     def test_worker_config_validator_foreground_has_no_adapter(self) -> None:
@@ -905,9 +925,12 @@ class E2ETests(unittest.TestCase):
                 "adapter": resolved["adapter"],
                 "argv": resolved["argv"],
                 "env": resolved["env"],
-                "config_files": [],
+                "config_files": resolved["config_files"],
                 "smoke": {"argv": [*resolved["argv"], "--optim-plans-smoke"], "env": {}, "timeout_seconds": 10.0},
             }
+            for field in ("profile", "model", "reasoning_effort", "model_provider"):
+                if field in resolved:
+                    cached[field] = resolved[field]
             config_path(repo).write_text(
                 json.dumps(
                     {

@@ -89,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     answer.add_argument("--choice", required=True)
     answer.add_argument("--model")
     answer.add_argument("--effort")
+    answer.add_argument("--model-provider")
 
     worker_config = sub.add_parser("worker-config")
     worker_config.add_argument("--repo", required=True)
@@ -429,6 +430,10 @@ def _worker_preference(repo: Path, key: str, *, env: dict[str, str] | None = Non
         return None
     if value["mode"] == "manual" and not all(isinstance(value.get(field), str) and value[field].strip() for field in ("model", "effort")):
         return None
+    if value.get("model_provider") is not None and (
+        not isinstance(value.get("model_provider"), str) or not value["model_provider"].strip()
+    ):
+        return None
     return value
 
 
@@ -456,10 +461,11 @@ def _background_model_options(
     codex = agents.get("codex")
     claude = agents.get("claude")
     if codex and codex.available:
+        provider = f" on provider {codex.configured_provider}" if codex.configured_provider else ""
         codex_reason = _t(
             language,
-            f"use Codex model {codex.configured_model or 'default'} with effort {codex.configured_effort or 'default'}",
-            f"使用 Codex 模型 {codex.configured_model or 'default'}，推理强度 {codex.configured_effort or 'default'}",
+            f"use Codex model {codex.configured_model or 'default'}{provider} with effort {codex.configured_effort or 'default'}",
+            f"使用 Codex 模型 {codex.configured_model or 'default'}{provider}，推理强度 {codex.configured_effort or 'default'}",
         )
     if claude and claude.available:
         claude_reason = _t(
@@ -469,40 +475,40 @@ def _background_model_options(
         )
     if role == "executor":
         codex_options = [
-            ("codex-default", _t(language, "Codex host multi-agent defaults", "Codex 主机多智能体默认值"), codex_reason),
+            ("codex-default", _t(language, "Codex profile defaults", "Codex profile 默认值"), codex_reason),
             (
                 "codex-manual",
-                _t(language, "Codex host multi-agent manual", "Codex 主机多智能体手动配置"),
-                _t(language, "choose explicit model and effort for Codex host spawning", "为 Codex 主机派生选择明确模型和推理强度"),
+                _t(language, "Codex profile manual", "Codex profile 手动配置"),
+                _t(language, "choose explicit model, provider, and effort for Codex", "为 Codex 选择明确模型、provider 和推理强度"),
             ),
             (
                 "codex-cli-default",
-                _t(language, "Codex CLI fallback defaults", "Codex CLI 回退默认值"),
-                _t(language, "use Codex CLI subprocess execution with detected defaults", "使用检测到的默认值运行 Codex CLI 子进程"),
+                _t(language, "Codex profile defaults", "Codex profile 默认值"),
+                _t(language, "legacy alias for Codex profile execution", "Codex profile 执行的旧别名"),
             ),
             (
                 "codex-cli-manual",
-                _t(language, "Codex CLI fallback manual", "Codex CLI 回退手动配置"),
-                _t(language, "use Codex CLI subprocess execution with explicit model and effort", "使用明确模型和推理强度运行 Codex CLI 子进程"),
+                _t(language, "Codex profile manual", "Codex profile 手动配置"),
+                _t(language, "legacy alias for explicit Codex model, provider, and effort", "明确 Codex 模型、provider 和推理强度的旧别名"),
             ),
         ]
     elif role == "validator":
         codex_options = [
-            ("codex-default", _t(language, "Codex host validator defaults", "Codex 主机验证器默认值"), codex_reason),
+            ("codex-default", _t(language, "Codex validator profile defaults", "Codex 验证器 profile 默认值"), codex_reason),
             (
                 "codex-manual",
-                _t(language, "Codex host validator manual", "Codex 主机验证器手动配置"),
-                _t(language, "choose explicit model and effort for Codex host validation", "为 Codex 主机验证选择明确模型和推理强度"),
+                _t(language, "Codex validator profile manual", "Codex 验证器 profile 手动配置"),
+                _t(language, "choose explicit model, provider, and effort for Codex validation", "为 Codex 验证选择明确模型、provider 和推理强度"),
             ),
             (
                 "codex-cli-default",
-                _t(language, "Codex validator CLI fallback defaults", "Codex 验证器 CLI 回退默认值"),
-                _t(language, "use Codex CLI subprocess validation with detected defaults", "使用检测到的默认值运行 Codex CLI 子进程验证"),
+                _t(language, "Codex validator profile defaults", "Codex 验证器 profile 默认值"),
+                _t(language, "legacy alias for Codex validator profile execution", "Codex 验证器 profile 执行的旧别名"),
             ),
             (
                 "codex-cli-manual",
-                _t(language, "Codex validator CLI fallback manual", "Codex 验证器 CLI 回退手动配置"),
-                _t(language, "use Codex CLI subprocess validation with explicit model and effort", "使用明确模型和推理强度运行 Codex CLI 子进程验证"),
+                _t(language, "Codex validator profile manual", "Codex 验证器 profile 手动配置"),
+                _t(language, "legacy alias for explicit Codex validator model, provider, and effort", "明确 Codex 验证器模型、provider 和推理强度的旧别名"),
             ),
         ]
     else:
@@ -510,8 +516,8 @@ def _background_model_options(
             ("codex-default", _t(language, "Codex detected defaults", "Codex 检测默认值"), codex_reason),
             (
                 "codex-manual",
-                _t(language, "Codex manual model/effort", "Codex 手动模型/推理强度"),
-                _t(language, "choose explicit --model and reasoning effort for Codex", "为 Codex 选择明确的 --model 和推理强度"),
+                _t(language, "Codex manual model/provider/effort", "Codex 手动模型/provider/推理强度"),
+                _t(language, "choose explicit --model, provider, and reasoning effort for Codex", "为 Codex 选择明确的 --model、provider 和推理强度"),
             ),
         ]
     claude_options = [
@@ -567,9 +573,9 @@ def _worker_question(state: OptimPlansState, *, prompt: str, level: Any, key: st
     payload.update({"plan_level": level.to_json(), "stage": "background-model", "config_key": key})
     stored = _worker_preference(state.repo, key) if reuse else None
     if stored:
-        cli = "-cli" if key == "executor_worker" and stored.get("execution_mode") == "cli-adapter" else ""
+        cli = "-cli" if key in {"executor_worker", "validator_worker"} and stored.get("execution_mode") == "cli-adapter" else ""
         choice = f"{stored['platform']}{cli}-{stored['mode']}"
-        extra = {field: stored[field] for field in ("model", "effort") if field in stored}
+        extra = {field: stored[field] for field in ("model", "effort", "model_provider") if field in stored}
         _record_default(state, payload, choice, **extra)
     else:
         state.append_event("pending_question", payload)
@@ -703,8 +709,6 @@ def cmd_answer(args: argparse.Namespace) -> None:
             execution_mode = "cli-adapter"
         else:
             platform = base
-            if pending.get("config_key") in {"executor_worker", "validator_worker"} and platform == "codex":
-                execution_mode = "host-multi-agent"
         if platform not in {"codex", "claude"}:
             raise ContractError(f"invalid worker platform {platform!r}")
         if manual:
@@ -716,6 +720,8 @@ def cmd_answer(args: argparse.Namespace) -> None:
                 "model": args.model.strip(),
                 "effort": args.effort.strip(),
             }
+            if args.model_provider and args.model_provider.strip():
+                worker["model_provider"] = args.model_provider.strip()
         else:
             worker = {"platform": platform, "mode": "default"}
         if execution_mode is not None:
@@ -806,48 +812,18 @@ def cmd_worker_config(args: argparse.Namespace) -> None:
         )
         return
     info = AgentInfo(
-        platform,
-        True,
-        detected.version,
-        detected.path,
-        preference.get("model") if preference["mode"] == "manual" else detected.configured_model,
-        preference.get("effort") if preference["mode"] == "manual" else detected.configured_effort,
+        name=platform,
+        available=True,
+        version=detected.version,
+        path=detected.path,
+        configured_model=preference.get("model") if preference["mode"] == "manual" else detected.configured_model,
+        configured_effort=preference.get("effort") if preference["mode"] == "manual" else detected.configured_effort,
+        auth_state=detected.auth_state,
+        configured_provider=preference.get("model_provider") if preference["mode"] == "manual" else detected.configured_provider,
     )
     cwd = Path(args.cwd)
     files: dict[str, str] = {}
-    if args.role == "executor" and platform == "codex" and preference.get("execution_mode") != "cli-adapter":
-        print_json(
-            {
-                "mode": "host-multi-agent",
-                "platform": "codex",
-                "agent_type": "optim-plans-executor",
-                "model": info.configured_model or "default",
-                "reasoning_effort": info.configured_effort or "default",
-                "prompt_protocol": "optim-plans-host-executor-v1",
-                "prompt_hash": host_executor_prompt_hash(),
-                "allowed_tools": ["Read", "Write", "Edit", "MultiEdit", "Bash"],
-                "sandbox": "workspace-write",
-                "result_schema": "optim-plans-worker-result-v1",
-            }
-        )
-        return
-    if args.role == "validator" and platform == "codex" and preference.get("execution_mode") != "cli-adapter":
-        print_json(
-            {
-                "mode": "host-multi-agent",
-                "platform": "codex",
-                "agent_type": "optim-plans-validator",
-                "model": info.configured_model or "default",
-                "reasoning_effort": info.configured_effort or "default",
-                "prompt_protocol": HOST_VALIDATOR_PROMPT_PROTOCOL,
-                "prompt_hash": validator_prompt_hash(),
-                "allowed_tools": ["Read", "Bash"],
-                "sandbox": "read-only",
-                "result_schema": HOST_VALIDATOR_RESULT_SCHEMA,
-            }
-        )
-        return
-    launch_files = worker_launch_files(state.repo) if args.role == "executor" else {}
+    launch_files = worker_launch_files(state.repo) if args.role == "executor" or platform == "codex" else {}
     if platform == "codex":
         config_home = launch_files.get("codex_home")
         command = build_codex_command(info, role=args.role, cwd=cwd, config_home=config_home)
@@ -866,9 +842,11 @@ def cmd_worker_config(args: argparse.Namespace) -> None:
         env = {"PWD": str(cwd)}
         if args.role == "executor":
             files = {"settings": str(settings), "plugin_dir": str(plugin_dir)}
-    worker = {"adapter": platform, "argv": command.argv, "env": env, "config_files": []}
+    config_files = command.config_files or []
+    metadata = command.metadata or {}
+    worker = {"adapter": platform, "argv": command.argv, "env": env, "config_files": config_files, **metadata}
     cached = cached_smoke_tested_worker(state.repo, worker)
-    print_json(cached if cached is not None else {"adapter": platform, "argv": command.argv, "env": env, **files})
+    print_json(cached if cached is not None else {"adapter": platform, "argv": command.argv, "env": env, "config_files": config_files, **metadata, **files})
 
 
 def cmd_status(args: argparse.Namespace) -> None:

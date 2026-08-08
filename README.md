@@ -342,6 +342,7 @@ You can edit this template by hand:
     "platform": "codex",
     "mode": "manual",
     "model": "gpt-5.6-sol",
+    "model_provider": "openai",
     "effort": "medium"
   },
   "executor_worker": {
@@ -349,14 +350,15 @@ You can edit this template by hand:
     "platform": "codex",
     "mode": "manual",
     "model": "gpt-5.6-terra",
-    "effort": "xhigh",
-    "execution_mode": "host-multi-agent"
+    "model_provider": "openai",
+    "effort": "xhigh"
   },
   "validator_worker": {
     "choice": "background",
     "platform": "codex",
     "mode": "manual",
     "model": "gpt-5.6-sol",
+    "model_provider": "openai",
     "effort": "medium"
   }
 }
@@ -364,8 +366,9 @@ You can edit this template by hand:
 
 - `refinement_worker.choice`, `executor_worker.choice`, and `validator_worker.choice` are `background` or `foreground`. With `executor_worker.choice` set to `foreground`, `worker-config --role executor` emits an in-session foreground worker block; `run-item` / `assign-item` returns the manifest-bound assignment, then `complete-item` and `advance-item` finish it without spawning a worker.
 - `platform` is `codex` or `claude`, and must match the current host platform; otherwise the stored preference is ignored.
-- `mode` is `default` or `manual`. `manual` requires non-empty `model` and `effort` values.
-- `execution_mode` applies only to a Codex executor: use `host-multi-agent` by default or `cli-adapter` as a fallback. Current Claude executors use the CLI adapter path: `run-item` launches the `optim-plans-executor` with `--agent` as a foreground standalone subagent, waits synchronously, and reads stdout JSON. They do not use host `spawn_agent` / `wait_agent` / `close_agent`, `--bg`, hidden background subagents, host/background mode, or notification/outputFile waits.
+- `mode` is `default` or `manual`. `manual` requires non-empty `model` and `effort` values; Codex also accepts optional `model_provider`.
+- Codex background workers use CLI adapter commands with role-specific profiles (`--profile optim-plans-<role>`) in a controller-owned `CODEX_HOME`. The old `codex-cli-*` choices are accepted as aliases. Host-multi-agent is only for already recorded legacy manifests.
+- Current Claude executors use the CLI adapter path: `run-item` launches the `optim-plans-executor` with `--agent` as a foreground standalone subagent, waits synchronously, and reads stdout JSON. They do not use host `spawn_agent` / `wait_agent` / `close_agent`, `--bg`, hidden background subagents, host/background mode, or notification/outputFile waits.
 
 `worker_launch_files` and `smoke_tested_workers` are controller-managed internal state. Leave them out of manual configuration.
 
@@ -485,7 +488,7 @@ python3 "$OPTIM_PLANS_CONTROLLER" prepare-execution --repo <repo> --manifest <ma
 python3 "$OPTIM_PLANS_CONTROLLER" answer --repo <repo> --nonce <approval-nonce> --choice approve
 python3 "$OPTIM_PLANS_CONTROLLER" start-execution --repo <repo> --approval-nonce <approval-nonce>
 
-# Codex host-multi-agent executor/validator path:
+# Legacy Codex host-multi-agent executor/validator path:
 python3 "$OPTIM_PLANS_CONTROLLER" assign-item --repo <repo> --item-id TASK-001
 # if assign-item returns resume_action, try the prior handle before spawning:
 python3 "$OPTIM_PLANS_CONTROLLER" authorize-resume --repo <repo> --item-id TASK-001 --assignment-nonce <nonce> --prior-agent-handle <handle> --launch-block '<json>'
@@ -524,7 +527,7 @@ python3 "$OPTIM_PLANS_CONTROLLER" register-batch-validator --repo <repo> --batch
 # batch validation/checkpoint is all-or-nothing; recovery uses retry-batch, not retry-item.
 python3 "$OPTIM_PLANS_CONTROLLER" retry-batch --repo <repo> --batch-id <batch-id> --approval-nonce <nonce>
 
-# CLI adapter fallback (current Claude executor path: foreground standalone --agent,
+# Current CLI adapter path (Codex role profiles and current Claude executor path: foreground standalone --agent,
 # synchronous run-item wait/stdout; no host wait_agent/close_agent, --bg, hidden background subagent, host/background mode, or notification/outputFile wait):
 python3 "$OPTIM_PLANS_CONTROLLER" run-item --repo <repo> --item-id TASK-001
 python3 "$OPTIM_PLANS_CONTROLLER" status --repo <repo>
@@ -561,8 +564,8 @@ The implemented guardrails include:
 - advisory lock around event append;
 - strict JSON parsing with duplicate-key rejection;
 - collision-safe artifact directories;
-- host-multi-agent executor assignment, pre-spawn authorization, agent handle registration, wait result close/completion/failure, and replayable `advance-item`;
-- adapter CLI smoke before immutable manifest-bound execution approval for CLI fallback, with exact smoke-tested worker blocks cached in Git-common config;
+- legacy host-multi-agent executor assignment, pre-spawn authorization, agent handle registration, wait result close/completion/failure, and replayable `advance-item`;
+- adapter CLI smoke before immutable manifest-bound execution approval for Codex role profiles and Claude CLI workers, with exact smoke-tested worker blocks cached in Git-common config;
 - immutable manifest-bound execution approval with a single-use nonce recorded in `events.jsonl`;
 - atomic question nonce consumption;
 - fail-closed Auto-complete allowlist;

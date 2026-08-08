@@ -21,7 +21,7 @@ class AgentAdapterTests(unittest.TestCase):
                 bin_dir / "codex",
                 "#!/usr/bin/env sh\n"
                 "if [ \"$1\" = \"--version\" ]; then echo 'codex 0.144.4'; exit 0; fi\n"
-                "if [ \"$1\" = \"config\" ]; then echo '{\"model\":\"gpt-test\",\"effort\":\"max\"}'; exit 0; fi\n"
+                "if [ \"$1\" = \"config\" ]; then echo '{\"model\":\"gpt-test\",\"effort\":\"max\",\"model_provider\":\"alt\"}'; exit 0; fi\n"
                 "echo codex\n",
             )
             make_executable(
@@ -33,6 +33,7 @@ class AgentAdapterTests(unittest.TestCase):
             found = detect_agents(env=prepend_path(bin_dir))
             self.assertEqual(found["codex"].configured_model, "gpt-test")
             self.assertEqual(found["codex"].configured_effort, "max")
+            self.assertEqual(found["codex"].configured_provider, "alt")
             self.assertTrue(found["claude"].available)
 
     def test_commands_include_role_safety_flags(self) -> None:
@@ -40,7 +41,21 @@ class AgentAdapterTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             config_home = Path(raw) / "codex-home"
-            info = AgentInfo("codex", True, "0.144.4", None, "gpt-test", "max")
+            source_home = Path(raw) / "source-codex-home"
+            source_home.mkdir()
+            (source_home / "config.toml").write_text(
+                '[model_providers.alt]\nname = "Alternative provider"\nbase_url = "https://provider.example.com/v1"\n',
+                encoding="utf-8",
+            )
+            info = AgentInfo(
+                "codex",
+                True,
+                "0.144.4",
+                None,
+                "gpt-test",
+                "max",
+                configured_provider="alt",
+            )
             review = build_codex_command(info, role="reviewer", cwd=Path("/tmp/repo"))
             validate = build_codex_command(info, role="validator", cwd=Path("/tmp/repo"))
             self.assertEqual(
@@ -51,28 +66,25 @@ class AgentAdapterTests(unittest.TestCase):
             self.assertIn("--ignore-rules", review.argv)
             with self.assertRaises(ValueError):
                 build_codex_command(info, role="executor", cwd=Path("/tmp/repo"))
-            execute = build_codex_command(info, role="executor", cwd=Path("/tmp/repo"), config_home=config_home)
-            self.assertEqual(
-                execute.argv,
-                [
-                    "codex",
-                    "exec",
-                    "-s",
-                    "workspace-write",
-                    "--ephemeral",
-                    "--ignore-user-config",
-                    "--ignore-rules",
-                    "-C",
-                    "/tmp/repo",
-                    "--model",
-                    "gpt-test",
-                    "-c",
-                    'model_reasoning_effort="max"',
-                ],
+            execute = build_codex_command(
+                info,
+                role="executor",
+                cwd=Path("/tmp/repo"),
+                config_home=config_home,
+                env={"CODEX_HOME": str(source_home)},
             )
+            self.assertEqual(execute.argv[:7], ["codex", "exec", "-s", "workspace-write", "--ephemeral", "--profile", "optim-plans-executor"])
+            self.assertNotIn("--ignore-user-config", execute.argv)
+            self.assertIn("gpt-test", execute.argv)
             self.assertEqual(execute.env["CODEX_HOME"], str(config_home))
+            self.assertEqual(execute.metadata["model_provider"], "alt")
+            self.assertEqual(len(execute.config_files), 2)
+            self.assertIn("[model_providers.alt]", (config_home / "config.toml").read_text(encoding="utf-8"))
+            profile_text = (config_home / "optim-plans-executor.config.toml").read_text(encoding="utf-8")
+            self.assertIn('model_provider = "alt"', profile_text)
+            self.assertIn('sandbox_mode = "workspace-write"', profile_text)
 
-    def test_codex_executor_follows_current_config_home(self) -> None:
+    def test_codex_executor_uses_profile_config_home(self) -> None:
         from scripts.agent_adapters import AgentInfo, build_codex_command
 
         with tempfile.TemporaryDirectory() as raw:
@@ -88,15 +100,7 @@ class AgentAdapterTests(unittest.TestCase):
                 env={"CODEX_HOME": str(current_home)},
             )
             self.assertNotIn("--ignore-user-config", current.argv)
-
-            default_home = build_codex_command(
-                info,
-                role="executor",
-                cwd=Path("/tmp/repo"),
-                config_home=Path.home() / ".codex",
-                env={},
-            )
-            self.assertNotIn("--ignore-user-config", default_home.argv)
+            self.assertEqual(current.argv[current.argv.index("--profile") + 1], "optim-plans-executor")
 
             isolated = build_codex_command(
                 info,
@@ -105,7 +109,8 @@ class AgentAdapterTests(unittest.TestCase):
                 config_home=isolated_home,
                 env={"CODEX_HOME": str(current_home)},
             )
-            self.assertIn("--ignore-user-config", isolated.argv)
+            self.assertNotIn("--ignore-user-config", isolated.argv)
+            self.assertTrue((isolated_home / "optim-plans-executor.config.toml").is_file())
 
     def test_claude_commands_include_schema_and_executor_isolation(self) -> None:
         from scripts.agent_adapters import AgentInfo, build_claude_command
